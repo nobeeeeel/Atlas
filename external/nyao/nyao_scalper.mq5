@@ -282,6 +282,197 @@ bool marketCloseAlertSent = false;                        // Flag for near marke
 bool algoTradingStatus = false; 
 
 //Added by Nobel
+// +------------------------------------------------------------------+
+// | Atlas Runtime Configuration                                      |
+// |                                                                  |
+// | Nyao input/.set values remain the startup defaults.              |
+// | Atlas will modify these runtime values while the EA is running.  |
+// +------------------------------------------------------------------+
+struct AtlasRuntimeConfig
+{
+    // Signal / indicator behavior
+    int directionalBodyLookback;
+    int emaFastPeriod;
+    int emaSlowPeriod;
+    int slopeLookback;
+    int rsiPeriod;
+    int atrPeriod;
+    int atrAvgLookback;
+    double minVolRatioToTrade;
+    int impulseLookback;
+    double impulseBoostWeight;
+    int signalSmoothingCandles;
+    double currentCandleBlend;
+    double velocityWindow;
+    int rsiOverbought;
+    int rsiOversold;
+    int rsiMomentumBuy;
+    int rsiMomentumSell;
+
+    // Score weights
+    double trendWeight;
+    double slopeWeight;
+    double momentumBaseWeight;
+    double momentumTriggerWeight;
+    double bodyMomentumWeight;
+    double chopScoreHigh;
+    double chopScoreMed;
+    double chopScoreLow;
+    double volatilityScoreHigh;
+    double volatilityScoreLow;
+    double peakScoreWeight;
+    double wickRejectionWeight;
+    double minBodyRatio;
+
+    // Entry / execution
+    bool enableBuyOrders;
+    bool enableSellOrders;
+    bool enableNewBarEntryOnly;
+    bool enableMaxSpreadFilter;
+    double maxSpreadPoints;
+    double maxSpreadAtrRatio;
+    double baseLotSize;
+    int maxOpenOrders;
+    int maxTradesPerCandle;
+    double consecutiveCandleThresholdBoost;
+    int maxConsecutiveCandleBoosts;
+    double zonePoints;
+    double buyDuplicateMultiplier;
+    double sellDuplicateMultiplier;
+    double minBreakEvenProfit;
+    double profitThresholdMultiplier;
+    double lossThresholdMultiplier;
+    double minBuySignalScore;
+    double minSellSignalScore;
+
+    // Limit entry
+    bool enableLimitEntry;
+    ENUM_LIMIT_ANCHOR limitEntryAnchor;
+    double limitEntryAtrFraction;
+    int limitEntryExpiryBars;
+    bool limitEntryCancelOnFlip;
+
+    // Signal dampening
+    bool enableSignalDampening;
+    int maxLosingPositionsSameDir;
+    double losingPosScorePenalty;
+    double drawdownThresholdPct;
+    double drawdownScoreBoost;
+    int consecutiveLossesBeforeCooldown;
+    int consecutiveLossCooldownBars;
+
+    // Loss / health management
+    bool enableLossManagement;
+    int maxHoldingLossPositions;
+    double minHealthScore;
+    double maxAdverseAtr;
+    double healthTrendWeight;
+    double healthRsiWeight;
+    double healthAtrWeight;
+    double healthSwingWeight;
+    double healthRsiBuyMin;
+    double healthRsiSellMax;
+    int healthSwingLookback;
+    int healthGraceBars;
+    bool enablePartialClose;
+    double partialClose75Pct;
+    double partialClose50Pct;
+    double partialClose25Pct;
+    bool enableHealthSlTightening;
+    double slTightenAtrMultiplier;
+    double slTightenMinHealthPct;
+    bool enableBreakEvenOnSpread;
+    double breakEvenSpreadMultiplier;
+    bool enableVirtualSlReentry;
+    bool reentryRespectsNewBarGate;
+    double reentryMinSignalPct;
+    bool enableProfitOffsetSl;
+    int consecutiveWinsRequired;
+    double minOffsetProfit;
+
+    // Hedge chain
+    bool enableHedgeChain;
+    double hedgeTriggerAtr;
+    bool hedgeRequireSignal;
+    double hedgeMinSignalScore;
+    bool hedgeAutoLot;
+    double hedgeRecoveryAtr;
+    double hedgeLotMultiplier;
+    double hedgeMaxLot;
+    double hedgeRecoveryPct;
+    double hedgeRollMinProfit;
+    int hedgeCycleLevels;
+    bool enableHedgeCycleReset;
+    double hedgeCyclePartialPct;
+    int hedgeMaxCycles;
+    double hedgeMaxChainLossUsd;
+    double hedgeMaxChainLossPct;
+    bool hedgeClearRootSl;
+    double hedgeTrailAtr;
+
+    // Dynamic sizing
+    bool enableDynamicLots;
+    double equityDropPercent;
+    int maxEquityDropLotSteps;
+    double minSignalStrengthForLot;
+    double lotStepSize;
+    double maxLotSize;
+
+    // Equity protection
+    bool enableBasketStop;
+    double maxBasketLossPct;
+    double minEquityPercent;
+    double maxDrawdownFromPeak;
+    int pauseMinutes;
+    double pauseMinutesMultiplier;
+    int maxPauseMinutes;
+    int maxMinEquityTriggers;
+    bool resetOnNewPeak;
+    double targetEquity;
+    double minimumEquity;
+
+    // TP / SL / risk reward
+    bool enableTakeProfit;
+    ENUM_INPUT_TYPE tpInputType;
+    double tpValue;
+    bool enableStopLoss;
+    ENUM_INPUT_TYPE slInputType;
+    double slValue;
+    bool enableRiskReward;
+    ENUM_RR_RISK_MODE rrRiskMode;
+    ENUM_INPUT_TYPE rrRiskInputType;
+    double rrRiskValue;
+    double rrAtrMultiplier;
+    double riskRewardRatio;
+
+    // Trailing
+    bool enableTrailing;
+    bool trailingEnableBreakEvenLock;
+    bool trailingSlOnProfitableOnly;
+    bool enableAdaptiveTp;
+    bool enableAdaptiveSl;
+    ENUM_INPUT_TYPE tsInputType;
+    double trailingDistanceValue;
+    double trailingValueMultiplier;
+
+    // Operational filters / diagnostics
+    bool enableDiscordAlerts;
+    bool enableTradingHours;
+    string tradingStartTime;
+    string tradingEndTime;
+    bool enableReports;
+    int sendReportEveryHour;
+    bool enableMarketCloseFilter;
+    int minutesBeforeClose;
+    bool enableNewsFilter;
+    int newsMinutesBefore;
+    int newsMinutesAfter;
+    bool enableLeveragePause;
+    bool enableLogging;
+
+};
+
+AtlasRuntimeConfig atlasRuntime;
 bool atlasEnabled = true;
 bool atlasBuyEnabled = true;
 bool atlasSellEnabled = true;
@@ -289,6 +480,62 @@ bool atlasSellEnabled = true;
 int atlasLastCommandVersion = -1;
 string atlasCommandFile = "Atlas\\commands.json";
 string atlasStatusFile = "Atlas\\status.json";
+
+bool atlasStructuralConfigDirty = false;
+bool atlasHealthWeightsDirty = false;
+bool atlasRuntimeInitialized = false;
+
+const double ATLAS_HARD_MAX_LOT = 5.0;
+const int ATLAS_HARD_MAX_OPEN_ORDERS = 50;
+const int ATLAS_HARD_MAX_TRADES_PER_CANDLE = 20;
+
+void ApplyAtlasRuntimeMaintenance();
+
+
+// Atlas decision telemetry. These values do not change Nyao's strategy logic;
+// they explain the most recent entry evaluation and order attempt to Atlas.
+double atlasBuyAdjustedScore = 0.0;
+double atlasSellAdjustedScore = 0.0;
+double atlasBuyEffectiveThreshold = 0.0;
+double atlasSellEffectiveThreshold = 0.0;
+bool atlasBuyEntryEligible = false;
+bool atlasSellEntryEligible = false;
+string atlasBuyBlockReason = "NOT_EVALUATED";
+string atlasSellBlockReason = "NOT_EVALUATED";
+
+string atlasLastGlobalBlockReason = "NONE";
+bool atlasLastOrderAttempted = false;
+bool atlasLastOrderSuccess = false;
+string atlasLastOrderDirection = "NONE";
+string atlasLastOrderMode = "NONE";
+long atlasLastOrderRetcode = 0;
+ulong atlasLastOrderTicket = 0;
+datetime atlasLastOrderTime = 0;
+
+void AtlasSetDecisionReason(ENUM_POSITION_TYPE dir, string reason, bool eligible=false)
+{
+    if(dir == POSITION_TYPE_BUY)
+    {
+        atlasBuyBlockReason = reason;
+        atlasBuyEntryEligible = eligible;
+    }
+    else
+    {
+        atlasSellBlockReason = reason;
+        atlasSellEntryEligible = eligible;
+    }
+}
+
+void AtlasBeginOrderAttempt(ENUM_ORDER_TYPE orderType, string mode)
+{
+    atlasLastOrderAttempted = true;
+    atlasLastOrderSuccess = false;
+    atlasLastOrderDirection = (orderType == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+    atlasLastOrderMode = mode;
+    atlasLastOrderRetcode = 0;
+    atlasLastOrderTicket = 0;
+    atlasLastOrderTime = TimeCurrent();
+}
 
 string ReadAtlasFile(string fileName)
 {
@@ -374,35 +621,300 @@ int JsonReadInt(string json, string key, int fallback)
     return (int)StringToInteger(tail);
 }
 
+double JsonReadDouble(string json, string key, double fallback)
+{
+    string pattern = "\"" + key + "\"";
+    int keyPos = StringFind(json, pattern);
+
+    if(keyPos < 0)
+        return fallback;
+
+    int colonPos = StringFind(json, ":", keyPos);
+
+    if(colonPos < 0)
+        return fallback;
+
+    string tail = StringSubstr(json, colonPos + 1);
+    StringTrimLeft(tail);
+
+    int commaPos = StringFind(tail, ",");
+    int bracePos = StringFind(tail, "}");
+
+    int endPos = -1;
+
+    if(commaPos >= 0 && bracePos >= 0)
+        endPos = MathMin(commaPos, bracePos);
+    else if(commaPos >= 0)
+        endPos = commaPos;
+    else
+        endPos = bracePos;
+
+    if(endPos >= 0)
+        tail = StringSubstr(tail, 0, endPos);
+
+    StringTrimLeft(tail);
+    StringTrimRight(tail);
+
+    return StringToDouble(tail);
+}
+
+
+string JsonReadString(string json, string key, string fallback)
+{
+    string pattern = "\"" + key + "\"";
+    int keyPos = StringFind(json, pattern);
+    if(keyPos < 0) return fallback;
+
+    int colonPos = StringFind(json, ":", keyPos);
+    if(colonPos < 0) return fallback;
+
+    int firstQuote = StringFind(json, "\"", colonPos + 1);
+    if(firstQuote < 0) return fallback;
+
+    int secondQuote = StringFind(json, "\"", firstQuote + 1);
+    if(secondQuote < 0) return fallback;
+
+    return StringSubstr(json, firstQuote + 1, secondQuote - firstQuote - 1);
+}
+
+double AtlasClampDouble(double value, double minimum, double maximum)
+{
+    return MathMax(minimum, MathMin(maximum, value));
+}
+
+int AtlasClampInt(int value, int minimum, int maximum)
+{
+    return (int)MathMax(minimum, MathMin(maximum, value));
+}
+
+bool AtlasValidHHMM(string value)
+{
+    string parts[];
+    if(StringSplit(value, ':', parts) != 2) return false;
+
+    int hour = (int)StringToInteger(parts[0]);
+    int minute = (int)StringToInteger(parts[1]);
+
+    return (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59);
+}
+
+
 void ReadAtlasCommand()
 {
     string json = ReadAtlasFile(atlasCommandFile);
+    if(json == "") return;
 
-    if(json == "")
-        return;
+    int commandVersion = JsonReadInt(json, "command_version", atlasLastCommandVersion);
+    if(commandVersion == atlasLastCommandVersion) return;
 
-    int commandVersion =
-        JsonReadInt(json, "command_version", atlasLastCommandVersion);
+    int oldEMAFastPeriod = atlasRuntime.emaFastPeriod;
+    int oldEMASlowPeriod = atlasRuntime.emaSlowPeriod;
+    int oldRSIPeriod = atlasRuntime.rsiPeriod;
+    int oldATRPeriod = atlasRuntime.atrPeriod;
 
-    if(commandVersion == atlasLastCommandVersion)
-        return;
+    atlasEnabled = JsonReadBool(json, "enabled", atlasEnabled);
+    atlasRuntime.directionalBodyLookback = AtlasClampInt(JsonReadInt(json, "directional_body_lookback", atlasRuntime.directionalBodyLookback), 1, 500);
+    atlasRuntime.emaFastPeriod = AtlasClampInt(JsonReadInt(json, "ema_fast_period", atlasRuntime.emaFastPeriod), 1, 500);
+    atlasRuntime.emaSlowPeriod = AtlasClampInt(JsonReadInt(json, "ema_slow_period", atlasRuntime.emaSlowPeriod), 1, 500);
+    atlasRuntime.slopeLookback = AtlasClampInt(JsonReadInt(json, "slope_lookback", atlasRuntime.slopeLookback), 1, 100);
+    atlasRuntime.rsiPeriod = AtlasClampInt(JsonReadInt(json, "rsi_period", atlasRuntime.rsiPeriod), 2, 500);
+    atlasRuntime.atrPeriod = AtlasClampInt(JsonReadInt(json, "atr_period", atlasRuntime.atrPeriod), 1, 500);
+    atlasRuntime.atrAvgLookback = AtlasClampInt(JsonReadInt(json, "atr_avg_lookback", atlasRuntime.atrAvgLookback), 1, 500);
+    atlasRuntime.minVolRatioToTrade = AtlasClampDouble(JsonReadDouble(json, "min_vol_ratio_to_trade", atlasRuntime.minVolRatioToTrade), 0, 10);
+    atlasRuntime.impulseLookback = AtlasClampInt(JsonReadInt(json, "impulse_lookback", atlasRuntime.impulseLookback), 1, 100);
+    atlasRuntime.impulseBoostWeight = AtlasClampDouble(JsonReadDouble(json, "impulse_boost_weight", atlasRuntime.impulseBoostWeight), 0, 10);
+    atlasRuntime.signalSmoothingCandles = AtlasClampInt(JsonReadInt(json, "signal_smoothing_candles", atlasRuntime.signalSmoothingCandles), 1, 10);
+    atlasRuntime.currentCandleBlend = AtlasClampDouble(JsonReadDouble(json, "current_candle_blend", atlasRuntime.currentCandleBlend), 0, 1);
+    atlasRuntime.velocityWindow = AtlasClampDouble(JsonReadDouble(json, "velocity_window", atlasRuntime.velocityWindow), 0.0001, 100);
+    atlasRuntime.rsiOverbought = AtlasClampInt(JsonReadInt(json, "rsi_overbought", atlasRuntime.rsiOverbought), 0, 100);
+    atlasRuntime.rsiOversold = AtlasClampInt(JsonReadInt(json, "rsi_oversold", atlasRuntime.rsiOversold), 0, 100);
+    atlasRuntime.rsiMomentumBuy = AtlasClampInt(JsonReadInt(json, "rsi_momentum_buy", atlasRuntime.rsiMomentumBuy), 0, 100);
+    atlasRuntime.rsiMomentumSell = AtlasClampInt(JsonReadInt(json, "rsi_momentum_sell", atlasRuntime.rsiMomentumSell), 0, 100);
+    atlasRuntime.trendWeight = AtlasClampDouble(JsonReadDouble(json, "trend_weight", atlasRuntime.trendWeight), 0, 10);
+    atlasRuntime.slopeWeight = AtlasClampDouble(JsonReadDouble(json, "slope_weight", atlasRuntime.slopeWeight), 0, 10);
+    atlasRuntime.momentumBaseWeight = AtlasClampDouble(JsonReadDouble(json, "momentum_base_weight", atlasRuntime.momentumBaseWeight), 0, 10);
+    atlasRuntime.momentumTriggerWeight = AtlasClampDouble(JsonReadDouble(json, "momentum_trigger_weight", atlasRuntime.momentumTriggerWeight), 0, 10);
+    atlasRuntime.bodyMomentumWeight = AtlasClampDouble(JsonReadDouble(json, "body_momentum_weight", atlasRuntime.bodyMomentumWeight), 0, 10);
+    atlasRuntime.chopScoreHigh = AtlasClampDouble(JsonReadDouble(json, "chop_score_high", atlasRuntime.chopScoreHigh), 0, 10);
+    atlasRuntime.chopScoreMed = AtlasClampDouble(JsonReadDouble(json, "chop_score_med", atlasRuntime.chopScoreMed), 0, 10);
+    atlasRuntime.chopScoreLow = AtlasClampDouble(JsonReadDouble(json, "chop_score_low", atlasRuntime.chopScoreLow), 0, 10);
+    atlasRuntime.volatilityScoreHigh = AtlasClampDouble(JsonReadDouble(json, "volatility_score_high", atlasRuntime.volatilityScoreHigh), 0, 10);
+    atlasRuntime.volatilityScoreLow = AtlasClampDouble(JsonReadDouble(json, "volatility_score_low", atlasRuntime.volatilityScoreLow), 0, 10);
+    atlasRuntime.peakScoreWeight = AtlasClampDouble(JsonReadDouble(json, "peak_score_weight", atlasRuntime.peakScoreWeight), 0, 10);
+    atlasRuntime.wickRejectionWeight = AtlasClampDouble(JsonReadDouble(json, "wick_rejection_weight", atlasRuntime.wickRejectionWeight), 0, 10);
+    atlasRuntime.minBodyRatio = AtlasClampDouble(JsonReadDouble(json, "min_body_ratio", atlasRuntime.minBodyRatio), 0.0, 1000000000.0);
+    atlasRuntime.enableBuyOrders = JsonReadBool(json, "enable_buy_orders", atlasRuntime.enableBuyOrders);
+    atlasBuyEnabled = atlasRuntime.enableBuyOrders;
+    atlasRuntime.enableSellOrders = JsonReadBool(json, "enable_sell_orders", atlasRuntime.enableSellOrders);
+    atlasSellEnabled = atlasRuntime.enableSellOrders;
+    atlasRuntime.enableNewBarEntryOnly = JsonReadBool(json, "enable_new_bar_entry_only", atlasRuntime.enableNewBarEntryOnly);
+    atlasRuntime.enableMaxSpreadFilter = JsonReadBool(json, "enable_max_spread_filter", atlasRuntime.enableMaxSpreadFilter);
+    atlasRuntime.maxSpreadPoints = AtlasClampDouble(JsonReadDouble(json, "max_spread_points", atlasRuntime.maxSpreadPoints), 0.0, 1000000000.0);
+    atlasRuntime.maxSpreadAtrRatio = AtlasClampDouble(JsonReadDouble(json, "max_spread_atr_ratio", atlasRuntime.maxSpreadAtrRatio), 0, 10);
+    atlasRuntime.baseLotSize = AtlasClampDouble(JsonReadDouble(json, "base_lot_size", atlasRuntime.baseLotSize), 0, 5);
+    atlasRuntime.maxOpenOrders = AtlasClampInt(JsonReadInt(json, "max_open_orders", atlasRuntime.maxOpenOrders), 1, 50);
+    atlasRuntime.maxTradesPerCandle = AtlasClampInt(JsonReadInt(json, "max_trades_per_candle", atlasRuntime.maxTradesPerCandle), 0, 20);
+    atlasRuntime.consecutiveCandleThresholdBoost = AtlasClampDouble(JsonReadDouble(json, "consecutive_candle_threshold_boost", atlasRuntime.consecutiveCandleThresholdBoost), 0, 10);
+    atlasRuntime.maxConsecutiveCandleBoosts = AtlasClampInt(JsonReadInt(json, "max_consecutive_candle_boosts", atlasRuntime.maxConsecutiveCandleBoosts), 0, 100);
+    atlasRuntime.zonePoints = AtlasClampDouble(JsonReadDouble(json, "zone_points", atlasRuntime.zonePoints), 0.0, 1000000000.0);
+    atlasRuntime.buyDuplicateMultiplier = AtlasClampDouble(JsonReadDouble(json, "buy_duplicate_multiplier", atlasRuntime.buyDuplicateMultiplier), 0, 100);
+    atlasRuntime.sellDuplicateMultiplier = AtlasClampDouble(JsonReadDouble(json, "sell_duplicate_multiplier", atlasRuntime.sellDuplicateMultiplier), 0, 100);
+    atlasRuntime.minBreakEvenProfit = AtlasClampDouble(JsonReadDouble(json, "min_break_even_profit", atlasRuntime.minBreakEvenProfit), 0.0, 1000000000.0);
+    atlasRuntime.profitThresholdMultiplier = AtlasClampDouble(JsonReadDouble(json, "profit_threshold_multiplier", atlasRuntime.profitThresholdMultiplier), 0, 100);
+    atlasRuntime.lossThresholdMultiplier = AtlasClampDouble(JsonReadDouble(json, "loss_threshold_multiplier", atlasRuntime.lossThresholdMultiplier), 0, 100);
+    atlasRuntime.minBuySignalScore = AtlasClampDouble(JsonReadDouble(json, "min_buy_signal_score", atlasRuntime.minBuySignalScore), 0, 10);
+    atlasRuntime.minSellSignalScore = AtlasClampDouble(JsonReadDouble(json, "min_sell_signal_score", atlasRuntime.minSellSignalScore), 0, 10);
+    atlasRuntime.enableLimitEntry = JsonReadBool(json, "enable_limit_entry", atlasRuntime.enableLimitEntry);
+    atlasRuntime.limitEntryAnchor = (ENUM_LIMIT_ANCHOR)AtlasClampInt(JsonReadInt(json, "limit_entry_anchor", (int)atlasRuntime.limitEntryAnchor), 0, 3);
+    atlasRuntime.limitEntryAtrFraction = AtlasClampDouble(JsonReadDouble(json, "limit_entry_atr_fraction", atlasRuntime.limitEntryAtrFraction), 0, 10);
+    atlasRuntime.limitEntryExpiryBars = AtlasClampInt(JsonReadInt(json, "limit_entry_expiry_bars", atlasRuntime.limitEntryExpiryBars), 0, 1000);
+    atlasRuntime.limitEntryCancelOnFlip = JsonReadBool(json, "limit_entry_cancel_on_flip", atlasRuntime.limitEntryCancelOnFlip);
+    atlasRuntime.enableSignalDampening = JsonReadBool(json, "enable_signal_dampening", atlasRuntime.enableSignalDampening);
+    atlasRuntime.maxLosingPositionsSameDir = AtlasClampInt(JsonReadInt(json, "max_losing_positions_same_dir", atlasRuntime.maxLosingPositionsSameDir), 0, 50);
+    atlasRuntime.losingPosScorePenalty = AtlasClampDouble(JsonReadDouble(json, "losing_pos_score_penalty", atlasRuntime.losingPosScorePenalty), 0, 10);
+    atlasRuntime.drawdownThresholdPct = AtlasClampDouble(JsonReadDouble(json, "drawdown_threshold_pct", atlasRuntime.drawdownThresholdPct), 0, 100);
+    atlasRuntime.drawdownScoreBoost = AtlasClampDouble(JsonReadDouble(json, "drawdown_score_boost", atlasRuntime.drawdownScoreBoost), 0, 10);
+    atlasRuntime.consecutiveLossesBeforeCooldown = AtlasClampInt(JsonReadInt(json, "consecutive_losses_before_cooldown", atlasRuntime.consecutiveLossesBeforeCooldown), 0, 100);
+    atlasRuntime.consecutiveLossCooldownBars = AtlasClampInt(JsonReadInt(json, "consecutive_loss_cooldown_bars", atlasRuntime.consecutiveLossCooldownBars), 0, 1000);
+    atlasRuntime.enableLossManagement = JsonReadBool(json, "enable_loss_management", atlasRuntime.enableLossManagement);
+    atlasRuntime.maxHoldingLossPositions = AtlasClampInt(JsonReadInt(json, "max_holding_loss_positions", atlasRuntime.maxHoldingLossPositions), 0, 50);
+    atlasRuntime.minHealthScore = AtlasClampDouble(JsonReadDouble(json, "min_health_score", atlasRuntime.minHealthScore), 0, 1);
+    atlasRuntime.maxAdverseAtr = AtlasClampDouble(JsonReadDouble(json, "max_adverse_atr", atlasRuntime.maxAdverseAtr), 0, 100);
+    atlasRuntime.healthTrendWeight = AtlasClampDouble(JsonReadDouble(json, "health_trend_weight", atlasRuntime.healthTrendWeight), 0.0, 1000000000.0);
+    atlasRuntime.healthRsiWeight = AtlasClampDouble(JsonReadDouble(json, "health_rsi_weight", atlasRuntime.healthRsiWeight), 0.0, 1000000000.0);
+    atlasRuntime.healthAtrWeight = AtlasClampDouble(JsonReadDouble(json, "health_atr_weight", atlasRuntime.healthAtrWeight), 0.0, 1000000000.0);
+    atlasRuntime.healthSwingWeight = AtlasClampDouble(JsonReadDouble(json, "health_swing_weight", atlasRuntime.healthSwingWeight), 0.0, 1000000000.0);
+    atlasRuntime.healthRsiBuyMin = AtlasClampDouble(JsonReadDouble(json, "health_rsi_buy_min", atlasRuntime.healthRsiBuyMin), 0, 100);
+    atlasRuntime.healthRsiSellMax = AtlasClampDouble(JsonReadDouble(json, "health_rsi_sell_max", atlasRuntime.healthRsiSellMax), 0, 100);
+    atlasRuntime.healthSwingLookback = AtlasClampInt(JsonReadInt(json, "health_swing_lookback", atlasRuntime.healthSwingLookback), 1, 1000);
+    atlasRuntime.healthGraceBars = AtlasClampInt(JsonReadInt(json, "health_grace_bars", atlasRuntime.healthGraceBars), 0, 1000);
+    atlasRuntime.enablePartialClose = JsonReadBool(json, "enable_partial_close", atlasRuntime.enablePartialClose);
+    atlasRuntime.partialClose75Pct = AtlasClampDouble(JsonReadDouble(json, "partial_close75_pct", atlasRuntime.partialClose75Pct), 0, 1);
+    atlasRuntime.partialClose50Pct = AtlasClampDouble(JsonReadDouble(json, "partial_close50_pct", atlasRuntime.partialClose50Pct), 0, 1);
+    atlasRuntime.partialClose25Pct = AtlasClampDouble(JsonReadDouble(json, "partial_close25_pct", atlasRuntime.partialClose25Pct), 0, 1);
+    atlasRuntime.enableHealthSlTightening = JsonReadBool(json, "enable_health_sl_tightening", atlasRuntime.enableHealthSlTightening);
+    atlasRuntime.slTightenAtrMultiplier = AtlasClampDouble(JsonReadDouble(json, "sl_tighten_atr_multiplier", atlasRuntime.slTightenAtrMultiplier), 0.0, 1000000000.0);
+    atlasRuntime.slTightenMinHealthPct = AtlasClampDouble(JsonReadDouble(json, "sl_tighten_min_health_pct", atlasRuntime.slTightenMinHealthPct), 0, 1);
+    atlasRuntime.enableBreakEvenOnSpread = JsonReadBool(json, "enable_break_even_on_spread", atlasRuntime.enableBreakEvenOnSpread);
+    atlasRuntime.breakEvenSpreadMultiplier = AtlasClampDouble(JsonReadDouble(json, "break_even_spread_multiplier", atlasRuntime.breakEvenSpreadMultiplier), 0.0, 1000000000.0);
+    atlasRuntime.enableVirtualSlReentry = JsonReadBool(json, "enable_virtual_sl_reentry", atlasRuntime.enableVirtualSlReentry);
+    atlasRuntime.reentryRespectsNewBarGate = JsonReadBool(json, "reentry_respects_new_bar_gate", atlasRuntime.reentryRespectsNewBarGate);
+    atlasRuntime.reentryMinSignalPct = AtlasClampDouble(JsonReadDouble(json, "reentry_min_signal_pct", atlasRuntime.reentryMinSignalPct), 0, 2);
+    atlasRuntime.enableProfitOffsetSl = JsonReadBool(json, "enable_profit_offset_sl", atlasRuntime.enableProfitOffsetSl);
+    atlasRuntime.consecutiveWinsRequired = AtlasClampInt(JsonReadInt(json, "consecutive_wins_required", atlasRuntime.consecutiveWinsRequired), 0, 100);
+    atlasRuntime.minOffsetProfit = AtlasClampDouble(JsonReadDouble(json, "min_offset_profit", atlasRuntime.minOffsetProfit), 0.0, 1000000000.0);
+    atlasRuntime.enableHedgeChain = JsonReadBool(json, "enable_hedge_chain", atlasRuntime.enableHedgeChain);
+    atlasRuntime.hedgeTriggerAtr = AtlasClampDouble(JsonReadDouble(json, "hedge_trigger_atr", atlasRuntime.hedgeTriggerAtr), 0, 100);
+    atlasRuntime.hedgeRequireSignal = JsonReadBool(json, "hedge_require_signal", atlasRuntime.hedgeRequireSignal);
+    atlasRuntime.hedgeMinSignalScore = AtlasClampDouble(JsonReadDouble(json, "hedge_min_signal_score", atlasRuntime.hedgeMinSignalScore), 0, 10);
+    atlasRuntime.hedgeAutoLot = JsonReadBool(json, "hedge_auto_lot", atlasRuntime.hedgeAutoLot);
+    atlasRuntime.hedgeRecoveryAtr = AtlasClampDouble(JsonReadDouble(json, "hedge_recovery_atr", atlasRuntime.hedgeRecoveryAtr), 0, 100);
+    atlasRuntime.hedgeLotMultiplier = AtlasClampDouble(JsonReadDouble(json, "hedge_lot_multiplier", atlasRuntime.hedgeLotMultiplier), 0, 20);
+    atlasRuntime.hedgeMaxLot = AtlasClampDouble(JsonReadDouble(json, "hedge_max_lot", atlasRuntime.hedgeMaxLot), 0, 5);
+    atlasRuntime.hedgeRecoveryPct = AtlasClampDouble(JsonReadDouble(json, "hedge_recovery_pct", atlasRuntime.hedgeRecoveryPct), 0, 1000);
+    atlasRuntime.hedgeRollMinProfit = AtlasClampDouble(JsonReadDouble(json, "hedge_roll_min_profit", atlasRuntime.hedgeRollMinProfit), 0.0, 1000000000.0);
+    atlasRuntime.hedgeCycleLevels = AtlasClampInt(JsonReadInt(json, "hedge_cycle_levels", atlasRuntime.hedgeCycleLevels), 1, 20);
+    atlasRuntime.enableHedgeCycleReset = JsonReadBool(json, "enable_hedge_cycle_reset", atlasRuntime.enableHedgeCycleReset);
+    atlasRuntime.hedgeCyclePartialPct = AtlasClampDouble(JsonReadDouble(json, "hedge_cycle_partial_pct", atlasRuntime.hedgeCyclePartialPct), 0, 100);
+    atlasRuntime.hedgeMaxCycles = AtlasClampInt(JsonReadInt(json, "hedge_max_cycles", atlasRuntime.hedgeMaxCycles), 0, 100);
+    atlasRuntime.hedgeMaxChainLossUsd = AtlasClampDouble(JsonReadDouble(json, "hedge_max_chain_loss_usd", atlasRuntime.hedgeMaxChainLossUsd), 0.0, 1000000000.0);
+    atlasRuntime.hedgeMaxChainLossPct = AtlasClampDouble(JsonReadDouble(json, "hedge_max_chain_loss_pct", atlasRuntime.hedgeMaxChainLossPct), 0, 100);
+    atlasRuntime.hedgeClearRootSl = JsonReadBool(json, "hedge_clear_root_sl", atlasRuntime.hedgeClearRootSl);
+    atlasRuntime.hedgeTrailAtr = AtlasClampDouble(JsonReadDouble(json, "hedge_trail_atr", atlasRuntime.hedgeTrailAtr), 0, 100);
+    atlasRuntime.enableDynamicLots = JsonReadBool(json, "enable_dynamic_lots", atlasRuntime.enableDynamicLots);
+    atlasRuntime.equityDropPercent = AtlasClampDouble(JsonReadDouble(json, "equity_drop_percent", atlasRuntime.equityDropPercent), 0, 100);
+    atlasRuntime.maxEquityDropLotSteps = AtlasClampInt(JsonReadInt(json, "max_equity_drop_lot_steps", atlasRuntime.maxEquityDropLotSteps), 0, 100);
+    atlasRuntime.minSignalStrengthForLot = AtlasClampDouble(JsonReadDouble(json, "min_signal_strength_for_lot", atlasRuntime.minSignalStrengthForLot), 0, 10);
+    atlasRuntime.lotStepSize = AtlasClampDouble(JsonReadDouble(json, "lot_step_size", atlasRuntime.lotStepSize), 0, 5);
+    atlasRuntime.maxLotSize = AtlasClampDouble(JsonReadDouble(json, "max_lot_size", atlasRuntime.maxLotSize), 0, 5);
+    atlasRuntime.enableBasketStop = JsonReadBool(json, "enable_basket_stop", atlasRuntime.enableBasketStop);
+    atlasRuntime.maxBasketLossPct = AtlasClampDouble(JsonReadDouble(json, "max_basket_loss_pct", atlasRuntime.maxBasketLossPct), 0, 100);
+    atlasRuntime.minEquityPercent = AtlasClampDouble(JsonReadDouble(json, "min_equity_percent", atlasRuntime.minEquityPercent), 0.0, 1000000000.0);
+    atlasRuntime.maxDrawdownFromPeak = AtlasClampDouble(JsonReadDouble(json, "max_drawdown_from_peak", atlasRuntime.maxDrawdownFromPeak), 0.0, 1000000000.0);
+    atlasRuntime.pauseMinutes = AtlasClampInt(JsonReadInt(json, "pause_minutes", atlasRuntime.pauseMinutes), 0, 1440);
+    atlasRuntime.pauseMinutesMultiplier = AtlasClampDouble(JsonReadDouble(json, "pause_minutes_multiplier", atlasRuntime.pauseMinutesMultiplier), 0, 100);
+    atlasRuntime.maxPauseMinutes = AtlasClampInt(JsonReadInt(json, "max_pause_minutes", atlasRuntime.maxPauseMinutes), 0, 10080);
+    atlasRuntime.maxMinEquityTriggers = AtlasClampInt(JsonReadInt(json, "max_min_equity_triggers", atlasRuntime.maxMinEquityTriggers), 0, 1000);
+    atlasRuntime.resetOnNewPeak = JsonReadBool(json, "reset_on_new_peak", atlasRuntime.resetOnNewPeak);
+    atlasRuntime.targetEquity = AtlasClampDouble(JsonReadDouble(json, "target_equity", atlasRuntime.targetEquity), 0.0, 1000000000.0);
+    atlasRuntime.minimumEquity = AtlasClampDouble(JsonReadDouble(json, "minimum_equity", atlasRuntime.minimumEquity), 0.0, 1000000000.0);
+    atlasRuntime.enableTakeProfit = JsonReadBool(json, "enable_take_profit", atlasRuntime.enableTakeProfit);
+    atlasRuntime.tpInputType = (ENUM_INPUT_TYPE)AtlasClampInt(JsonReadInt(json, "tp_input_type", (int)atlasRuntime.tpInputType), 0, 2);
+    atlasRuntime.tpValue = AtlasClampDouble(JsonReadDouble(json, "tp_value", atlasRuntime.tpValue), 0.0, 1000000000.0);
+    atlasRuntime.enableStopLoss = JsonReadBool(json, "enable_stop_loss", atlasRuntime.enableStopLoss);
+    atlasRuntime.slInputType = (ENUM_INPUT_TYPE)AtlasClampInt(JsonReadInt(json, "sl_input_type", (int)atlasRuntime.slInputType), 0, 2);
+    atlasRuntime.slValue = AtlasClampDouble(JsonReadDouble(json, "sl_value", atlasRuntime.slValue), 0.0, 1000000000.0);
+    atlasRuntime.enableRiskReward = JsonReadBool(json, "enable_risk_reward", atlasRuntime.enableRiskReward);
+    atlasRuntime.rrRiskMode = (ENUM_RR_RISK_MODE)AtlasClampInt(JsonReadInt(json, "rr_risk_mode", (int)atlasRuntime.rrRiskMode), 0, 1);
+    atlasRuntime.rrRiskInputType = (ENUM_INPUT_TYPE)AtlasClampInt(JsonReadInt(json, "rr_risk_input_type", (int)atlasRuntime.rrRiskInputType), 0, 2);
+    atlasRuntime.rrRiskValue = AtlasClampDouble(JsonReadDouble(json, "rr_risk_value", atlasRuntime.rrRiskValue), 0.0, 1000000000.0);
+    atlasRuntime.rrAtrMultiplier = AtlasClampDouble(JsonReadDouble(json, "rr_atr_multiplier", atlasRuntime.rrAtrMultiplier), 0, 100);
+    atlasRuntime.riskRewardRatio = AtlasClampDouble(JsonReadDouble(json, "risk_reward_ratio", atlasRuntime.riskRewardRatio), 0, 100);
+    atlasRuntime.enableTrailing = JsonReadBool(json, "enable_trailing", atlasRuntime.enableTrailing);
+    atlasRuntime.trailingEnableBreakEvenLock = JsonReadBool(json, "trailing_enable_break_even_lock", atlasRuntime.trailingEnableBreakEvenLock);
+    atlasRuntime.trailingSlOnProfitableOnly = JsonReadBool(json, "trailing_sl_on_profitable_only", atlasRuntime.trailingSlOnProfitableOnly);
+    atlasRuntime.enableAdaptiveTp = JsonReadBool(json, "enable_adaptive_tp", atlasRuntime.enableAdaptiveTp);
+    atlasRuntime.enableAdaptiveSl = JsonReadBool(json, "enable_adaptive_sl", atlasRuntime.enableAdaptiveSl);
+    atlasRuntime.tsInputType = (ENUM_INPUT_TYPE)AtlasClampInt(JsonReadInt(json, "ts_input_type", (int)atlasRuntime.tsInputType), 0, 2);
+    atlasRuntime.trailingDistanceValue = AtlasClampDouble(JsonReadDouble(json, "trailing_distance_value", atlasRuntime.trailingDistanceValue), 0.0, 1000000000.0);
+    atlasRuntime.trailingValueMultiplier = AtlasClampDouble(JsonReadDouble(json, "trailing_value_multiplier", atlasRuntime.trailingValueMultiplier), 0, 100);
+    atlasRuntime.enableDiscordAlerts = JsonReadBool(json, "enable_discord_alerts", atlasRuntime.enableDiscordAlerts);
+    atlasRuntime.enableTradingHours = JsonReadBool(json, "enable_trading_hours", atlasRuntime.enableTradingHours);
+    {
+        string requested = JsonReadString(json, "trading_start_time", atlasRuntime.tradingStartTime);
+        if(AtlasValidHHMM(requested)) atlasRuntime.tradingStartTime = requested;
+    }
+    {
+        string requested = JsonReadString(json, "trading_end_time", atlasRuntime.tradingEndTime);
+        if(AtlasValidHHMM(requested)) atlasRuntime.tradingEndTime = requested;
+    }
+    atlasRuntime.enableReports = JsonReadBool(json, "enable_reports", atlasRuntime.enableReports);
+    atlasRuntime.sendReportEveryHour = AtlasClampInt(JsonReadInt(json, "send_report_every_hour", atlasRuntime.sendReportEveryHour), 1, 168);
+    atlasRuntime.enableMarketCloseFilter = JsonReadBool(json, "enable_market_close_filter", atlasRuntime.enableMarketCloseFilter);
+    atlasRuntime.minutesBeforeClose = AtlasClampInt(JsonReadInt(json, "minutes_before_close", atlasRuntime.minutesBeforeClose), 0, 1440);
+    atlasRuntime.enableNewsFilter = JsonReadBool(json, "enable_news_filter", atlasRuntime.enableNewsFilter);
+    atlasRuntime.newsMinutesBefore = AtlasClampInt(JsonReadInt(json, "news_minutes_before", atlasRuntime.newsMinutesBefore), 0, 1440);
+    atlasRuntime.newsMinutesAfter = AtlasClampInt(JsonReadInt(json, "news_minutes_after", atlasRuntime.newsMinutesAfter), 0, 1440);
+    atlasRuntime.enableLeveragePause = JsonReadBool(json, "enable_leverage_pause", atlasRuntime.enableLeveragePause);
+    atlasRuntime.enableLogging = JsonReadBool(json, "enable_logging", atlasRuntime.enableLogging);
 
-    atlasEnabled =
-        JsonReadBool(json, "enabled", atlasEnabled);
+    double brokerMinLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double brokerMaxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    if(brokerMinLot <= 0) brokerMinLot = 0.01;
+    if(brokerMaxLot <= 0) brokerMaxLot = ATLAS_HARD_MAX_LOT;
+    double localMaxLot = MathMin(brokerMaxLot, ATLAS_HARD_MAX_LOT);
+    atlasRuntime.maxLotSize = AtlasClampDouble(atlasRuntime.maxLotSize, brokerMinLot, localMaxLot);
+    atlasRuntime.baseLotSize = AtlasClampDouble(atlasRuntime.baseLotSize, brokerMinLot, atlasRuntime.maxLotSize);
+    atlasRuntime.hedgeMaxLot = AtlasClampDouble(atlasRuntime.hedgeMaxLot, brokerMinLot, localMaxLot);
+    atlasRuntime.lotStepSize = AtlasClampDouble(atlasRuntime.lotStepSize, 0.0, localMaxLot);
+    atlasRuntime.maxOpenOrders = AtlasClampInt(atlasRuntime.maxOpenOrders, 1, ATLAS_HARD_MAX_OPEN_ORDERS);
+    atlasRuntime.maxTradesPerCandle = AtlasClampInt(atlasRuntime.maxTradesPerCandle, 0, ATLAS_HARD_MAX_TRADES_PER_CANDLE);
 
-    atlasBuyEnabled =
-        JsonReadBool(json, "enable_buy_orders", atlasBuyEnabled);
+    atlasBuyEffectiveThreshold = atlasRuntime.minBuySignalScore;
+    atlasSellEffectiveThreshold = atlasRuntime.minSellSignalScore;
 
-    atlasSellEnabled =
-        JsonReadBool(json, "enable_sell_orders", atlasSellEnabled);
+    if(oldEMAFastPeriod != atlasRuntime.emaFastPeriod ||
+       oldEMASlowPeriod != atlasRuntime.emaSlowPeriod ||
+       oldRSIPeriod != atlasRuntime.rsiPeriod ||
+       oldATRPeriod != atlasRuntime.atrPeriod)
+        atlasStructuralConfigDirty = true;
 
+    atlasHealthWeightsDirty = true;
     atlasLastCommandVersion = commandVersion;
 
     Print(
         "Atlas command applied. Version=", atlasLastCommandVersion,
         " Enabled=", atlasEnabled,
-        " Buy=", atlasBuyEnabled,
-        " Sell=", atlasSellEnabled
+        " Buy=", atlasRuntime.enableBuyOrders,
+        " Sell=", atlasRuntime.enableSellOrders,
+        " BuyThreshold=", DoubleToString(atlasRuntime.minBuySignalScore, 2),
+        " SellThreshold=", DoubleToString(atlasRuntime.minSellSignalScore, 2),
+        " BaseLot=", DoubleToString(atlasRuntime.baseLotSize, 2),
+        " MaxOrders=", atlasRuntime.maxOpenOrders,
+        " TradesPerCandle=", atlasRuntime.maxTradesPerCandle,
+        " NewBarOnly=", atlasRuntime.enableNewBarEntryOnly,
+        " Hedge=", atlasRuntime.enableHedgeChain,
+        " DynamicLots=", atlasRuntime.enableDynamicLots
     );
 }
 
@@ -490,73 +1002,666 @@ struct ManagedPosition
     double hedgeLockProfit;                              // min profit ($) to keep locked on a graduated hedge (recovery floor); 0 = none
 };
 
+
+// Managed positions array is declared before Atlas status telemetry so
+// observability can include hedge/recovery metadata for each live position.
+ManagedPosition managedPositions[];
+int managedPositionCount = 0;
+
+string AtlasJsonEscape(string value)
+{
+    StringReplace(value, "\\", "\\\\");
+    StringReplace(value, "\"", "\\\"");
+    StringReplace(value, "\r", "\\r");
+    StringReplace(value, "\n", "\\n");
+    StringReplace(value, "\t", "\\t");
+    return value;
+}
+
+void AtlasResetSignalStrength(SignalStrength &strength)
+{
+    strength.avgBody = 0.0;
+    strength.bodySignal = 0.0;
+    strength.ratio = 0.0;
+    strength.upperWick = 0.0;
+    strength.lowerWick = 0.0;
+    strength.rejection = 0.0;
+    strength.penaltyBody = 0.0;
+    strength.penaltyWick = 0.0;
+    strength.finalScore = 0.0;
+    strength.trendScore = 0.0;
+    strength.momentumScore = 0.0;
+    strength.chopScore = 0.0;
+    strength.peakScore = 0.0;
+    strength.volatilityScore = 0.0;
+    strength.impulseStrength = 0.0;
+    strength.velocity = 0.0;
+    strength.normalizedVelocity = 0.0;
+    strength.reasoning = "";
+}
+
 void WriteAtlasStatus()
 {
-    double buyScore = 0.0;
-    double sellScore = 0.0;
+    SignalStrength buyStrength;
+    SignalStrength sellStrength;
+    AtlasResetSignalStrength(buyStrength);
+    AtlasResetSignalStrength(sellStrength);
 
-    if(passwordVerified &&
-       emaFastHandle != INVALID_HANDLE &&
-       emaSlowHandle != INVALID_HANDLE &&
-       rsiHandle != INVALID_HANDLE &&
-       atrSignalHandle != INVALID_HANDLE)
+    bool signalTelemetryReady =
+        passwordVerified &&
+        emaFastHandle != INVALID_HANDLE &&
+        emaSlowHandle != INVALID_HANDLE &&
+        rsiHandle != INVALID_HANDLE &&
+        atrSignalHandle != INVALID_HANDLE;
+
+    if(signalTelemetryReady)
     {
-        buyScore = GetSignalStrength(ORDER_TYPE_BUY).finalScore;
-        sellScore = GetSignalStrength(ORDER_TYPE_SELL).finalScore;
+        buyStrength = GetSignalStrength(ORDER_TYPE_BUY);
+        sellStrength = GetSignalStrength(ORDER_TYPE_SELL);
     }
-    MqlDateTime atlasTime;
-    TimeToStruct(TimeCurrent(), atlasTime);
+
+    double buyScore = buyStrength.finalScore;
+    double sellScore = sellStrength.finalScore;
+
+    MqlDateTime atlasUtcTime;
+    TimeToStruct(TimeGMT(), atlasUtcTime);
 
     string atlasTimestamp = StringFormat(
         "%04d-%02d-%02dT%02d:%02d:%02dZ",
-        atlasTime.year,
-        atlasTime.mon,
-        atlasTime.day,
-        atlasTime.hour,
-        atlasTime.min,
-        atlasTime.sec
+        atlasUtcTime.year,
+        atlasUtcTime.mon,
+        atlasUtcTime.day,
+        atlasUtcTime.hour,
+        atlasUtcTime.min,
+        atlasUtcTime.sec
     );
+
     double balance = AccountInfoDouble(ACCOUNT_BALANCE);
     double equity = AccountInfoDouble(ACCOUNT_EQUITY);
     double floatingProfit = AccountInfoDouble(ACCOUNT_PROFIT);
-    int openPositions = PositionsTotal();
+    double accountMargin = AccountInfoDouble(ACCOUNT_MARGIN);
+    double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+    double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+    long accountLeverage = AccountInfoInteger(ACCOUNT_LEVERAGE);
 
-    string json = StringFormat(
-        "{"
-        "\"connected\":true,"
-        "\"strategy\":\"nyao\","
-        "\"symbol\":\"%s\","
-        "\"balance\":%.2f,"
-        "\"equity\":%.2f,"
-        "\"floating_profit\":%.2f,"
-        "\"open_positions\":%d,"
-        "\"buy_score\":%.4f,"
-        "\"sell_score\":%.4f,"
-        "\"atlas_enabled\":%s,"
-        "\"timestamp\":\"%s\""
-        "}",
-        _Symbol,
-        balance,
-        equity,
-        floatingProfit,
-        openPositions,
-        buyScore,
-        sellScore,
-        atlasEnabled ? "true" : "false",
-        atlasTimestamp
-    );
+    double equityDrawdownUsd = MathMax(0.0, peakEquity - equity);
+    double equityDrawdownPct =
+        (peakEquity > 0.0)
+            ? (equityDrawdownUsd / peakEquity) * 100.0
+            : 0.0;
 
-    int handle = FileOpen(
-        atlasStatusFile,
-        FILE_WRITE | FILE_TXT | FILE_ANSI
-    );
+    datetime atlasCurrentBarTime = iTime(_Symbol, _Period, 0);
+    bool atlasNewBarReady =
+        !atlasRuntime.enableNewBarEntryOnly ||
+        (lastEntryBarTime != atlasCurrentBarTime);
 
+    bool atlasCooldownActive =
+        atlasRuntime.enableSignalDampening &&
+        cooldownUntilBarTime > atlasCurrentBarTime;
+
+    long pauseUntilEpoch = 0;
+    if(isPaused && currentPauseDuration > 0 && pauseStartTime > 0)
+        pauseUntilEpoch = (long)(pauseStartTime + currentPauseDuration * 60);
+
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double spreadPoints =
+        (_Point > 0.0 && ask > 0.0 && bid > 0.0)
+            ? (ask - bid) / _Point
+            : 0.0;
+
+    double currentAtr = 0.0;
+    double averageAtr = 0.0;
+    double volatilityRatio = 0.0;
+    double atrPoints = 0.0;
+
+    if(atrSignalHandle != INVALID_HANDLE)
+    {
+        double atrCurrentBuffer[];
+        ArraySetAsSeries(atrCurrentBuffer, true);
+
+        if(CopyBuffer(atrSignalHandle, 0, 0, 1, atrCurrentBuffer) == 1)
+        {
+            currentAtr = atrCurrentBuffer[0];
+            if(_Point > 0.0)
+                atrPoints = currentAtr / _Point;
+        }
+
+        int atrLookback = MathMax(1, atlasRuntime.atrAvgLookback);
+        double atrHistory[];
+        ArraySetAsSeries(atrHistory, true);
+
+        int copiedAtr = CopyBuffer(
+            atrSignalHandle,
+            0,
+            1,
+            atrLookback,
+            atrHistory
+        );
+
+        if(copiedAtr > 0)
+        {
+            double atrSum = 0.0;
+            for(int ai = 0; ai < copiedAtr; ai++)
+                atrSum += atrHistory[ai];
+
+            averageAtr = atrSum / copiedAtr;
+        }
+
+        if(averageAtr > 0.0)
+            volatilityRatio = currentAtr / averageAtr;
+    }
+
+    double effectiveSpreadCapPoints = atlasRuntime.maxSpreadPoints;
+    if(effectiveSpreadCapPoints <= 0.0 && atrPoints > 0.0)
+        effectiveSpreadCapPoints =
+            atrPoints * atlasRuntime.maxSpreadAtrRatio;
+
+    bool spreadWithinLimit =
+        !atlasRuntime.enableMaxSpreadFilter ||
+        effectiveSpreadCapPoints <= 0.0 ||
+        spreadPoints <= effectiveSpreadCapPoints;
+
+    int strategyPositionCount = 0;
+    int buyPositionCount = 0;
+    int sellPositionCount = 0;
+    int losingPositionCount = 0;
+    int winningPositionCount = 0;
+
+    double totalLots = 0.0;
+    double buyLots = 0.0;
+    double sellLots = 0.0;
+    double strategyFloatingPl = 0.0;
+    double strategySwap = 0.0;
+    double grossFloatingProfit = 0.0;
+    double grossFloatingLoss = 0.0;
+    double largestWinningPosition = 0.0;
+    double largestLosingPosition = 0.0;
+    double grossNotionalExposure = 0.0;
+    double buyNotionalExposure = 0.0;
+    double sellNotionalExposure = 0.0;
+
+    int activeHedgeChainCount = 0;
+    int hedgeChainPositionCount = 0;
+    int maxActiveHedgeLevel = 0;
+    int maxActiveHedgeCycle = 0;
+    double hedgeChainLots = 0.0;
+    double hedgeChainFloatingPl = 0.0;
+    ulong seenChainIds[];
+
+    string positionsJson = "[";
+    double contractSize =
+        SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(ticket == 0) continue;
+        if(!PositionSelectByTicket(ticket)) continue;
+        if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+        ENUM_POSITION_TYPE posType =
+            (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+        double volume = PositionGetDouble(POSITION_VOLUME);
+        double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+        double sl = PositionGetDouble(POSITION_SL);
+        double tp = PositionGetDouble(POSITION_TP);
+        double profit = PositionGetDouble(POSITION_PROFIT);
+        double swap = PositionGetDouble(POSITION_SWAP);
+        datetime positionTime =
+            (datetime)PositionGetInteger(POSITION_TIME);
+
+        double netPl = profit + swap;
+        double notional =
+            (contractSize > 0.0 && currentPrice > 0.0)
+                ? volume * contractSize * currentPrice
+                : 0.0;
+
+        strategyPositionCount++;
+        totalLots += volume;
+        strategyFloatingPl += netPl;
+        strategySwap += swap;
+        grossNotionalExposure += notional;
+
+        if(posType == POSITION_TYPE_BUY)
+        {
+            buyPositionCount++;
+            buyLots += volume;
+            buyNotionalExposure += notional;
+        }
+        else
+        {
+            sellPositionCount++;
+            sellLots += volume;
+            sellNotionalExposure += notional;
+        }
+
+        if(netPl < 0.0)
+        {
+            losingPositionCount++;
+            grossFloatingLoss += netPl;
+            if(netPl < largestLosingPosition)
+                largestLosingPosition = netPl;
+        }
+        else if(netPl > 0.0)
+        {
+            winningPositionCount++;
+            grossFloatingProfit += netPl;
+            if(netPl > largestWinningPosition)
+                largestWinningPosition = netPl;
+        }
+
+        int managedIndex = GetManagedPositionIndex(ticket);
+
+        double managedSignalScore = 0.0;
+        int partialCloseLevel = 0;
+        bool breakEvenLocked = false;
+        ulong chainId = 0;
+        int hedgeLevel = 0;
+        int cycleNum = 0;
+        bool noRehedge = false;
+        bool hedgeGraduated = false;
+        double hedgeLockProfit = 0.0;
+
+        if(managedIndex >= 0 && managedIndex < managedPositionCount)
+        {
+            managedSignalScore = managedPositions[managedIndex].signalScore;
+            partialCloseLevel = managedPositions[managedIndex].partialCloseLevel;
+            breakEvenLocked = managedPositions[managedIndex].breakEvenLocked;
+            chainId = managedPositions[managedIndex].chainId;
+            hedgeLevel = managedPositions[managedIndex].hedgeLevel;
+            cycleNum = managedPositions[managedIndex].cycleNum;
+            noRehedge = managedPositions[managedIndex].noRehedge;
+            hedgeGraduated = managedPositions[managedIndex].hedgeGraduated;
+            hedgeLockProfit = managedPositions[managedIndex].hedgeLockProfit;
+        }
+
+        if(chainId != 0)
+        {
+            hedgeChainPositionCount++;
+            hedgeChainLots += volume;
+            hedgeChainFloatingPl += netPl;
+
+            if(hedgeLevel > maxActiveHedgeLevel)
+                maxActiveHedgeLevel = hedgeLevel;
+            if(cycleNum > maxActiveHedgeCycle)
+                maxActiveHedgeCycle = cycleNum;
+
+            bool chainSeen = false;
+            for(int ci = 0; ci < ArraySize(seenChainIds); ci++)
+            {
+                if(seenChainIds[ci] == chainId)
+                {
+                    chainSeen = true;
+                    break;
+                }
+            }
+
+            if(!chainSeen)
+            {
+                int newSize = ArraySize(seenChainIds) + 1;
+                ArrayResize(seenChainIds, newSize);
+                seenChainIds[newSize - 1] = chainId;
+                activeHedgeChainCount++;
+            }
+        }
+
+        double signedDistancePoints = 0.0;
+        if(_Point > 0.0)
+        {
+            if(posType == POSITION_TYPE_BUY)
+                signedDistancePoints =
+                    (currentPrice - entryPrice) / _Point;
+            else
+                signedDistancePoints =
+                    (entryPrice - currentPrice) / _Point;
+        }
+
+        if(strategyPositionCount > 1)
+            positionsJson += ",";
+
+        positionsJson += "{";
+        positionsJson += "\"ticket\":" + IntegerToString((long)ticket) + ",";
+        positionsJson += "\"type\":\"" + (posType == POSITION_TYPE_BUY ? "BUY" : "SELL") + "\",";
+        positionsJson += "\"volume\":" + DoubleToString(volume, 4) + ",";
+        positionsJson += "\"entry_price\":" + DoubleToString(entryPrice, _Digits) + ",";
+        positionsJson += "\"current_price\":" + DoubleToString(currentPrice, _Digits) + ",";
+        positionsJson += "\"sl\":" + DoubleToString(sl, _Digits) + ",";
+        positionsJson += "\"tp\":" + DoubleToString(tp, _Digits) + ",";
+        positionsJson += "\"profit\":" + DoubleToString(profit, 2) + ",";
+        positionsJson += "\"swap\":" + DoubleToString(swap, 2) + ",";
+        positionsJson += "\"net_pl\":" + DoubleToString(netPl, 2) + ",";
+        positionsJson += "\"notional_exposure\":" + DoubleToString(notional, 2) + ",";
+        positionsJson += "\"signed_distance_points\":" + DoubleToString(signedDistancePoints, 2) + ",";
+        positionsJson += "\"opened_at_epoch\":" + IntegerToString((long)positionTime) + ",";
+        positionsJson += "\"age_seconds\":" + IntegerToString((long)MathMax(0, (long)TimeTradeServer() - (long)positionTime)) + ",";
+        positionsJson += "\"managed\":" + (managedIndex >= 0 ? "true" : "false") + ",";
+        positionsJson += "\"entry_signal_score\":" + DoubleToString(managedSignalScore, 4) + ",";
+        positionsJson += "\"partial_close_level\":" + IntegerToString(partialCloseLevel) + ",";
+        positionsJson += "\"break_even_locked\":" + (breakEvenLocked ? "true" : "false") + ",";
+        positionsJson += "\"chain_id\":" + IntegerToString((long)chainId) + ",";
+        positionsJson += "\"hedge_level\":" + IntegerToString(hedgeLevel) + ",";
+        positionsJson += "\"cycle_num\":" + IntegerToString(cycleNum) + ",";
+        positionsJson += "\"no_rehedge\":" + (noRehedge ? "true" : "false") + ",";
+        positionsJson += "\"hedge_graduated\":" + (hedgeGraduated ? "true" : "false") + ",";
+        positionsJson += "\"hedge_lock_profit\":" + DoubleToString(hedgeLockProfit, 2);
+        positionsJson += "}";
+    }
+
+    positionsJson += "]";
+
+    int workingLimitOrders = CountWorkingLimitOrders();
+
+    double basketFloatingPl = GetBasketFloatingPL();
+    double basketLossPct =
+        (basketFloatingPl < 0.0 && equity > 0.0)
+            ? (-basketFloatingPl / equity) * 100.0
+            : 0.0;
+
+    double basketRiskRemainingPct =
+        (atlasRuntime.enableBasketStop &&
+         atlasRuntime.maxBasketLossPct > 0.0)
+            ? MathMax(0.0, atlasRuntime.maxBasketLossPct - basketLossPct)
+            : 0.0;
+
+    double hedgeChainLossPct =
+        (hedgeChainFloatingPl < 0.0 && equity > 0.0)
+            ? (-hedgeChainFloatingPl / equity) * 100.0
+            : 0.0;
+
+    string json = "{";
+    json += "\"connected\":true,";
+    json += "\"strategy\":\"nyao\",";
+    json += "\"symbol\":\"" + AtlasJsonEscape(_Symbol) + "\",";
+
+    json += "\"balance\":" + DoubleToString(balance, 2) + ",";
+    json += "\"equity\":" + DoubleToString(equity, 2) + ",";
+    json += "\"floating_profit\":" + DoubleToString(floatingProfit, 2) + ",";
+    json += "\"account_margin\":" + DoubleToString(accountMargin, 2) + ",";
+    json += "\"free_margin\":" + DoubleToString(freeMargin, 2) + ",";
+    json += "\"margin_level_pct\":" + DoubleToString(marginLevel, 2) + ",";
+    json += "\"account_leverage\":" + IntegerToString(accountLeverage) + ",";
+    json += "\"peak_equity\":" + DoubleToString(peakEquity, 2) + ",";
+    json += "\"equity_drawdown_usd\":" + DoubleToString(equityDrawdownUsd, 2) + ",";
+    json += "\"equity_drawdown_pct\":" + DoubleToString(equityDrawdownPct, 4) + ",";
+
+    json += "\"open_positions\":" + IntegerToString(PositionsTotal()) + ",";
+    json += "\"strategy_open_positions\":" + IntegerToString(strategyPositionCount) + ",";
+    json += "\"buy_positions\":" + IntegerToString(buyPositionCount) + ",";
+    json += "\"sell_positions\":" + IntegerToString(sellPositionCount) + ",";
+    json += "\"winning_positions\":" + IntegerToString(winningPositionCount) + ",";
+    json += "\"losing_positions\":" + IntegerToString(losingPositionCount) + ",";
+    json += "\"working_limit_orders\":" + IntegerToString(workingLimitOrders) + ",";
+    json += "\"total_lots\":" + DoubleToString(totalLots, 4) + ",";
+    json += "\"buy_lots\":" + DoubleToString(buyLots, 4) + ",";
+    json += "\"sell_lots\":" + DoubleToString(sellLots, 4) + ",";
+    json += "\"strategy_floating_pl\":" + DoubleToString(strategyFloatingPl, 2) + ",";
+    json += "\"strategy_swap\":" + DoubleToString(strategySwap, 2) + ",";
+    json += "\"gross_floating_profit\":" + DoubleToString(grossFloatingProfit, 2) + ",";
+    json += "\"gross_floating_loss\":" + DoubleToString(grossFloatingLoss, 2) + ",";
+    json += "\"largest_winning_position\":" + DoubleToString(largestWinningPosition, 2) + ",";
+    json += "\"largest_losing_position\":" + DoubleToString(largestLosingPosition, 2) + ",";
+    json += "\"gross_notional_exposure\":" + DoubleToString(grossNotionalExposure, 2) + ",";
+    json += "\"buy_notional_exposure\":" + DoubleToString(buyNotionalExposure, 2) + ",";
+    json += "\"sell_notional_exposure\":" + DoubleToString(sellNotionalExposure, 2) + ",";
+    json += "\"positions\":" + positionsJson + ",";
+
+    json += "\"active_hedge_chains\":" + IntegerToString(activeHedgeChainCount) + ",";
+    json += "\"hedge_chain_positions\":" + IntegerToString(hedgeChainPositionCount) + ",";
+    json += "\"hedge_chain_lots\":" + DoubleToString(hedgeChainLots, 4) + ",";
+    json += "\"hedge_chain_floating_pl\":" + DoubleToString(hedgeChainFloatingPl, 2) + ",";
+    json += "\"hedge_chain_loss_pct\":" + DoubleToString(hedgeChainLossPct, 4) + ",";
+    json += "\"max_active_hedge_level\":" + IntegerToString(maxActiveHedgeLevel) + ",";
+    json += "\"max_active_hedge_cycle\":" + IntegerToString(maxActiveHedgeCycle) + ",";
+
+    json += "\"basket_floating_pl\":" + DoubleToString(basketFloatingPl, 2) + ",";
+    json += "\"basket_loss_pct\":" + DoubleToString(basketLossPct, 4) + ",";
+    json += "\"basket_risk_remaining_pct\":" + DoubleToString(basketRiskRemainingPct, 4) + ",";
+
+    json += "\"bid\":" + DoubleToString(bid, _Digits) + ",";
+    json += "\"ask\":" + DoubleToString(ask, _Digits) + ",";
+    json += "\"spread_points\":" + DoubleToString(spreadPoints, 2) + ",";
+    json += "\"effective_spread_cap_points\":" + DoubleToString(effectiveSpreadCapPoints, 2) + ",";
+    json += "\"spread_within_limit\":" + (spreadWithinLimit ? "true" : "false") + ",";
+    json += "\"current_atr\":" + DoubleToString(currentAtr, _Digits) + ",";
+    json += "\"average_atr\":" + DoubleToString(averageAtr, _Digits) + ",";
+    json += "\"atr_points\":" + DoubleToString(atrPoints, 2) + ",";
+    json += "\"volatility_ratio\":" + DoubleToString(volatilityRatio, 4) + ",";
+    json += "\"trading_paused\":" + (isPaused ? "true" : "false") + ",";
+    json += "\"pause_until_epoch\":" + IntegerToString(pauseUntilEpoch) + ",";
+    json += "\"pause_duration_minutes\":" + IntegerToString(currentPauseDuration) + ",";
+    json += "\"total_pause_count\":" + IntegerToString(totalPauseCount) + ",";
+    json += "\"total_pause_duration_minutes\":" + DoubleToString(totalPauseDurationMinutes, 2) + ",";
+    json += "\"outside_trading_hours\":" + (isOutsideTradingHours ? "true" : "false") + ",";
+    json += "\"near_market_close\":" + (isNearMarketClose ? "true" : "false") + ",";
+    json += "\"leverage_changed\":" + (isLeverageDiffFromInitial ? "true" : "false") + ",";
+    json += "\"initial_leverage\":" + IntegerToString(initialLeverage) + ",";
+
+    json += "\"signal_telemetry_ready\":" + (signalTelemetryReady ? "true" : "false") + ",";
+    json += "\"buy_score\":" + DoubleToString(buyScore, 4) + ",";
+    json += "\"sell_score\":" + DoubleToString(sellScore, 4) + ",";
+
+    json += "\"buy_trend_score\":" + DoubleToString(buyStrength.trendScore, 4) + ",";
+    json += "\"buy_momentum_score\":" + DoubleToString(buyStrength.momentumScore, 4) + ",";
+    json += "\"buy_chop_score\":" + DoubleToString(buyStrength.chopScore, 4) + ",";
+    json += "\"buy_peak_score\":" + DoubleToString(buyStrength.peakScore, 4) + ",";
+    json += "\"buy_volatility_score\":" + DoubleToString(buyStrength.volatilityScore, 4) + ",";
+    json += "\"buy_impulse_strength\":" + DoubleToString(buyStrength.impulseStrength, 4) + ",";
+    json += "\"buy_velocity\":" + DoubleToString(buyStrength.velocity, 4) + ",";
+    json += "\"buy_normalized_velocity\":" + DoubleToString(buyStrength.normalizedVelocity, 4) + ",";
+    json += "\"buy_body_ratio\":" + DoubleToString(buyStrength.ratio, 4) + ",";
+    json += "\"buy_wick_rejection\":" + DoubleToString(buyStrength.rejection, 4) + ",";
+    json += "\"buy_body_penalty\":" + DoubleToString(buyStrength.penaltyBody, 4) + ",";
+    json += "\"buy_wick_penalty\":" + DoubleToString(buyStrength.penaltyWick, 4) + ",";
+    json += "\"buy_signal_reasoning\":\"" + AtlasJsonEscape(buyStrength.reasoning) + "\",";
+
+    json += "\"sell_trend_score\":" + DoubleToString(sellStrength.trendScore, 4) + ",";
+    json += "\"sell_momentum_score\":" + DoubleToString(sellStrength.momentumScore, 4) + ",";
+    json += "\"sell_chop_score\":" + DoubleToString(sellStrength.chopScore, 4) + ",";
+    json += "\"sell_peak_score\":" + DoubleToString(sellStrength.peakScore, 4) + ",";
+    json += "\"sell_volatility_score\":" + DoubleToString(sellStrength.volatilityScore, 4) + ",";
+    json += "\"sell_impulse_strength\":" + DoubleToString(sellStrength.impulseStrength, 4) + ",";
+    json += "\"sell_velocity\":" + DoubleToString(sellStrength.velocity, 4) + ",";
+    json += "\"sell_normalized_velocity\":" + DoubleToString(sellStrength.normalizedVelocity, 4) + ",";
+    json += "\"sell_body_ratio\":" + DoubleToString(sellStrength.ratio, 4) + ",";
+    json += "\"sell_wick_rejection\":" + DoubleToString(sellStrength.rejection, 4) + ",";
+    json += "\"sell_body_penalty\":" + DoubleToString(sellStrength.penaltyBody, 4) + ",";
+    json += "\"sell_wick_penalty\":" + DoubleToString(sellStrength.penaltyWick, 4) + ",";
+    json += "\"sell_signal_reasoning\":\"" + AtlasJsonEscape(sellStrength.reasoning) + "\",";
+
+    json += "\"atlas_enabled\":" + (atlasEnabled ? "true" : "false") + ",";
+    json += "\"atlas_buy_enabled\":" + (atlasBuyEnabled ? "true" : "false") + ",";
+    json += "\"atlas_sell_enabled\":" + (atlasSellEnabled ? "true" : "false") + ",";
+    json += "\"applied_command_version\":" + IntegerToString(atlasLastCommandVersion) + ",";
+    json += "\"structural_config_dirty\":" + (atlasStructuralConfigDirty ? "true" : "false") + ",";
+    json += "\"last_global_block_reason\":\"" + AtlasJsonEscape(atlasLastGlobalBlockReason) + "\",";
+    json += "\"runtime_directional_body_lookback\":" + IntegerToString(atlasRuntime.directionalBodyLookback) + ",";
+    json += "\"runtime_ema_fast_period\":" + IntegerToString(atlasRuntime.emaFastPeriod) + ",";
+    json += "\"runtime_ema_slow_period\":" + IntegerToString(atlasRuntime.emaSlowPeriod) + ",";
+    json += "\"runtime_slope_lookback\":" + IntegerToString(atlasRuntime.slopeLookback) + ",";
+    json += "\"runtime_rsi_period\":" + IntegerToString(atlasRuntime.rsiPeriod) + ",";
+    json += "\"runtime_atr_period\":" + IntegerToString(atlasRuntime.atrPeriod) + ",";
+    json += "\"runtime_atr_avg_lookback\":" + IntegerToString(atlasRuntime.atrAvgLookback) + ",";
+    json += "\"runtime_min_vol_ratio_to_trade\":" + DoubleToString(atlasRuntime.minVolRatioToTrade, 8) + ",";
+    json += "\"runtime_impulse_lookback\":" + IntegerToString(atlasRuntime.impulseLookback) + ",";
+    json += "\"runtime_impulse_boost_weight\":" + DoubleToString(atlasRuntime.impulseBoostWeight, 8) + ",";
+    json += "\"runtime_signal_smoothing_candles\":" + IntegerToString(atlasRuntime.signalSmoothingCandles) + ",";
+    json += "\"runtime_current_candle_blend\":" + DoubleToString(atlasRuntime.currentCandleBlend, 8) + ",";
+    json += "\"runtime_velocity_window\":" + DoubleToString(atlasRuntime.velocityWindow, 8) + ",";
+    json += "\"runtime_rsi_overbought\":" + IntegerToString(atlasRuntime.rsiOverbought) + ",";
+    json += "\"runtime_rsi_oversold\":" + IntegerToString(atlasRuntime.rsiOversold) + ",";
+    json += "\"runtime_rsi_momentum_buy\":" + IntegerToString(atlasRuntime.rsiMomentumBuy) + ",";
+    json += "\"runtime_rsi_momentum_sell\":" + IntegerToString(atlasRuntime.rsiMomentumSell) + ",";
+    json += "\"runtime_trend_weight\":" + DoubleToString(atlasRuntime.trendWeight, 8) + ",";
+    json += "\"runtime_slope_weight\":" + DoubleToString(atlasRuntime.slopeWeight, 8) + ",";
+    json += "\"runtime_momentum_base_weight\":" + DoubleToString(atlasRuntime.momentumBaseWeight, 8) + ",";
+    json += "\"runtime_momentum_trigger_weight\":" + DoubleToString(atlasRuntime.momentumTriggerWeight, 8) + ",";
+    json += "\"runtime_body_momentum_weight\":" + DoubleToString(atlasRuntime.bodyMomentumWeight, 8) + ",";
+    json += "\"runtime_chop_score_high\":" + DoubleToString(atlasRuntime.chopScoreHigh, 8) + ",";
+    json += "\"runtime_chop_score_med\":" + DoubleToString(atlasRuntime.chopScoreMed, 8) + ",";
+    json += "\"runtime_chop_score_low\":" + DoubleToString(atlasRuntime.chopScoreLow, 8) + ",";
+    json += "\"runtime_volatility_score_high\":" + DoubleToString(atlasRuntime.volatilityScoreHigh, 8) + ",";
+    json += "\"runtime_volatility_score_low\":" + DoubleToString(atlasRuntime.volatilityScoreLow, 8) + ",";
+    json += "\"runtime_peak_score_weight\":" + DoubleToString(atlasRuntime.peakScoreWeight, 8) + ",";
+    json += "\"runtime_wick_rejection_weight\":" + DoubleToString(atlasRuntime.wickRejectionWeight, 8) + ",";
+    json += "\"runtime_min_body_ratio\":" + DoubleToString(atlasRuntime.minBodyRatio, 8) + ",";
+    json += "\"runtime_enable_buy_orders\":" + (atlasRuntime.enableBuyOrders ? "true" : "false") + ",";
+    json += "\"runtime_enable_sell_orders\":" + (atlasRuntime.enableSellOrders ? "true" : "false") + ",";
+    json += "\"runtime_enable_new_bar_entry_only\":" + (atlasRuntime.enableNewBarEntryOnly ? "true" : "false") + ",";
+    json += "\"runtime_enable_max_spread_filter\":" + (atlasRuntime.enableMaxSpreadFilter ? "true" : "false") + ",";
+    json += "\"runtime_max_spread_points\":" + DoubleToString(atlasRuntime.maxSpreadPoints, 8) + ",";
+    json += "\"runtime_max_spread_atr_ratio\":" + DoubleToString(atlasRuntime.maxSpreadAtrRatio, 8) + ",";
+    json += "\"runtime_base_lot_size\":" + DoubleToString(atlasRuntime.baseLotSize, 8) + ",";
+    json += "\"runtime_max_open_orders\":" + IntegerToString(atlasRuntime.maxOpenOrders) + ",";
+    json += "\"runtime_max_trades_per_candle\":" + IntegerToString(atlasRuntime.maxTradesPerCandle) + ",";
+    json += "\"runtime_consecutive_candle_threshold_boost\":" + DoubleToString(atlasRuntime.consecutiveCandleThresholdBoost, 8) + ",";
+    json += "\"runtime_max_consecutive_candle_boosts\":" + IntegerToString(atlasRuntime.maxConsecutiveCandleBoosts) + ",";
+    json += "\"runtime_zone_points\":" + DoubleToString(atlasRuntime.zonePoints, 8) + ",";
+    json += "\"runtime_buy_duplicate_multiplier\":" + DoubleToString(atlasRuntime.buyDuplicateMultiplier, 8) + ",";
+    json += "\"runtime_sell_duplicate_multiplier\":" + DoubleToString(atlasRuntime.sellDuplicateMultiplier, 8) + ",";
+    json += "\"runtime_min_break_even_profit\":" + DoubleToString(atlasRuntime.minBreakEvenProfit, 8) + ",";
+    json += "\"runtime_profit_threshold_multiplier\":" + DoubleToString(atlasRuntime.profitThresholdMultiplier, 8) + ",";
+    json += "\"runtime_loss_threshold_multiplier\":" + DoubleToString(atlasRuntime.lossThresholdMultiplier, 8) + ",";
+    json += "\"runtime_min_buy_signal_score\":" + DoubleToString(atlasRuntime.minBuySignalScore, 8) + ",";
+    json += "\"runtime_min_sell_signal_score\":" + DoubleToString(atlasRuntime.minSellSignalScore, 8) + ",";
+    json += "\"runtime_enable_limit_entry\":" + (atlasRuntime.enableLimitEntry ? "true" : "false") + ",";
+    json += "\"runtime_limit_entry_anchor\":" + IntegerToString((int)atlasRuntime.limitEntryAnchor) + ",";
+    json += "\"runtime_limit_entry_atr_fraction\":" + DoubleToString(atlasRuntime.limitEntryAtrFraction, 8) + ",";
+    json += "\"runtime_limit_entry_expiry_bars\":" + IntegerToString(atlasRuntime.limitEntryExpiryBars) + ",";
+    json += "\"runtime_limit_entry_cancel_on_flip\":" + (atlasRuntime.limitEntryCancelOnFlip ? "true" : "false") + ",";
+    json += "\"runtime_enable_signal_dampening\":" + (atlasRuntime.enableSignalDampening ? "true" : "false") + ",";
+    json += "\"runtime_max_losing_positions_same_dir\":" + IntegerToString(atlasRuntime.maxLosingPositionsSameDir) + ",";
+    json += "\"runtime_losing_pos_score_penalty\":" + DoubleToString(atlasRuntime.losingPosScorePenalty, 8) + ",";
+    json += "\"runtime_drawdown_threshold_pct\":" + DoubleToString(atlasRuntime.drawdownThresholdPct, 8) + ",";
+    json += "\"runtime_drawdown_score_boost\":" + DoubleToString(atlasRuntime.drawdownScoreBoost, 8) + ",";
+    json += "\"runtime_consecutive_losses_before_cooldown\":" + IntegerToString(atlasRuntime.consecutiveLossesBeforeCooldown) + ",";
+    json += "\"runtime_consecutive_loss_cooldown_bars\":" + IntegerToString(atlasRuntime.consecutiveLossCooldownBars) + ",";
+    json += "\"runtime_enable_loss_management\":" + (atlasRuntime.enableLossManagement ? "true" : "false") + ",";
+    json += "\"runtime_max_holding_loss_positions\":" + IntegerToString(atlasRuntime.maxHoldingLossPositions) + ",";
+    json += "\"runtime_min_health_score\":" + DoubleToString(atlasRuntime.minHealthScore, 8) + ",";
+    json += "\"runtime_max_adverse_atr\":" + DoubleToString(atlasRuntime.maxAdverseAtr, 8) + ",";
+    json += "\"runtime_health_trend_weight\":" + DoubleToString(atlasRuntime.healthTrendWeight, 8) + ",";
+    json += "\"runtime_health_rsi_weight\":" + DoubleToString(atlasRuntime.healthRsiWeight, 8) + ",";
+    json += "\"runtime_health_atr_weight\":" + DoubleToString(atlasRuntime.healthAtrWeight, 8) + ",";
+    json += "\"runtime_health_swing_weight\":" + DoubleToString(atlasRuntime.healthSwingWeight, 8) + ",";
+    json += "\"runtime_health_rsi_buy_min\":" + DoubleToString(atlasRuntime.healthRsiBuyMin, 8) + ",";
+    json += "\"runtime_health_rsi_sell_max\":" + DoubleToString(atlasRuntime.healthRsiSellMax, 8) + ",";
+    json += "\"runtime_health_swing_lookback\":" + IntegerToString(atlasRuntime.healthSwingLookback) + ",";
+    json += "\"runtime_health_grace_bars\":" + IntegerToString(atlasRuntime.healthGraceBars) + ",";
+    json += "\"runtime_enable_partial_close\":" + (atlasRuntime.enablePartialClose ? "true" : "false") + ",";
+    json += "\"runtime_partial_close75_pct\":" + DoubleToString(atlasRuntime.partialClose75Pct, 8) + ",";
+    json += "\"runtime_partial_close50_pct\":" + DoubleToString(atlasRuntime.partialClose50Pct, 8) + ",";
+    json += "\"runtime_partial_close25_pct\":" + DoubleToString(atlasRuntime.partialClose25Pct, 8) + ",";
+    json += "\"runtime_enable_health_sl_tightening\":" + (atlasRuntime.enableHealthSlTightening ? "true" : "false") + ",";
+    json += "\"runtime_sl_tighten_atr_multiplier\":" + DoubleToString(atlasRuntime.slTightenAtrMultiplier, 8) + ",";
+    json += "\"runtime_sl_tighten_min_health_pct\":" + DoubleToString(atlasRuntime.slTightenMinHealthPct, 8) + ",";
+    json += "\"runtime_enable_break_even_on_spread\":" + (atlasRuntime.enableBreakEvenOnSpread ? "true" : "false") + ",";
+    json += "\"runtime_break_even_spread_multiplier\":" + DoubleToString(atlasRuntime.breakEvenSpreadMultiplier, 8) + ",";
+    json += "\"runtime_enable_virtual_sl_reentry\":" + (atlasRuntime.enableVirtualSlReentry ? "true" : "false") + ",";
+    json += "\"runtime_reentry_respects_new_bar_gate\":" + (atlasRuntime.reentryRespectsNewBarGate ? "true" : "false") + ",";
+    json += "\"runtime_reentry_min_signal_pct\":" + DoubleToString(atlasRuntime.reentryMinSignalPct, 8) + ",";
+    json += "\"runtime_enable_profit_offset_sl\":" + (atlasRuntime.enableProfitOffsetSl ? "true" : "false") + ",";
+    json += "\"runtime_consecutive_wins_required\":" + IntegerToString(atlasRuntime.consecutiveWinsRequired) + ",";
+    json += "\"runtime_min_offset_profit\":" + DoubleToString(atlasRuntime.minOffsetProfit, 8) + ",";
+    json += "\"runtime_enable_hedge_chain\":" + (atlasRuntime.enableHedgeChain ? "true" : "false") + ",";
+    json += "\"runtime_hedge_trigger_atr\":" + DoubleToString(atlasRuntime.hedgeTriggerAtr, 8) + ",";
+    json += "\"runtime_hedge_require_signal\":" + (atlasRuntime.hedgeRequireSignal ? "true" : "false") + ",";
+    json += "\"runtime_hedge_min_signal_score\":" + DoubleToString(atlasRuntime.hedgeMinSignalScore, 8) + ",";
+    json += "\"runtime_hedge_auto_lot\":" + (atlasRuntime.hedgeAutoLot ? "true" : "false") + ",";
+    json += "\"runtime_hedge_recovery_atr\":" + DoubleToString(atlasRuntime.hedgeRecoveryAtr, 8) + ",";
+    json += "\"runtime_hedge_lot_multiplier\":" + DoubleToString(atlasRuntime.hedgeLotMultiplier, 8) + ",";
+    json += "\"runtime_hedge_max_lot\":" + DoubleToString(atlasRuntime.hedgeMaxLot, 8) + ",";
+    json += "\"runtime_hedge_recovery_pct\":" + DoubleToString(atlasRuntime.hedgeRecoveryPct, 8) + ",";
+    json += "\"runtime_hedge_roll_min_profit\":" + DoubleToString(atlasRuntime.hedgeRollMinProfit, 8) + ",";
+    json += "\"runtime_hedge_cycle_levels\":" + IntegerToString(atlasRuntime.hedgeCycleLevels) + ",";
+    json += "\"runtime_enable_hedge_cycle_reset\":" + (atlasRuntime.enableHedgeCycleReset ? "true" : "false") + ",";
+    json += "\"runtime_hedge_cycle_partial_pct\":" + DoubleToString(atlasRuntime.hedgeCyclePartialPct, 8) + ",";
+    json += "\"runtime_hedge_max_cycles\":" + IntegerToString(atlasRuntime.hedgeMaxCycles) + ",";
+    json += "\"runtime_hedge_max_chain_loss_usd\":" + DoubleToString(atlasRuntime.hedgeMaxChainLossUsd, 8) + ",";
+    json += "\"runtime_hedge_max_chain_loss_pct\":" + DoubleToString(atlasRuntime.hedgeMaxChainLossPct, 8) + ",";
+    json += "\"runtime_hedge_clear_root_sl\":" + (atlasRuntime.hedgeClearRootSl ? "true" : "false") + ",";
+    json += "\"runtime_hedge_trail_atr\":" + DoubleToString(atlasRuntime.hedgeTrailAtr, 8) + ",";
+    json += "\"runtime_enable_dynamic_lots\":" + (atlasRuntime.enableDynamicLots ? "true" : "false") + ",";
+    json += "\"runtime_equity_drop_percent\":" + DoubleToString(atlasRuntime.equityDropPercent, 8) + ",";
+    json += "\"runtime_max_equity_drop_lot_steps\":" + IntegerToString(atlasRuntime.maxEquityDropLotSteps) + ",";
+    json += "\"runtime_min_signal_strength_for_lot\":" + DoubleToString(atlasRuntime.minSignalStrengthForLot, 8) + ",";
+    json += "\"runtime_lot_step_size\":" + DoubleToString(atlasRuntime.lotStepSize, 8) + ",";
+    json += "\"runtime_max_lot_size\":" + DoubleToString(atlasRuntime.maxLotSize, 8) + ",";
+    json += "\"runtime_enable_basket_stop\":" + (atlasRuntime.enableBasketStop ? "true" : "false") + ",";
+    json += "\"runtime_max_basket_loss_pct\":" + DoubleToString(atlasRuntime.maxBasketLossPct, 8) + ",";
+    json += "\"runtime_min_equity_percent\":" + DoubleToString(atlasRuntime.minEquityPercent, 8) + ",";
+    json += "\"runtime_max_drawdown_from_peak\":" + DoubleToString(atlasRuntime.maxDrawdownFromPeak, 8) + ",";
+    json += "\"runtime_pause_minutes\":" + IntegerToString(atlasRuntime.pauseMinutes) + ",";
+    json += "\"runtime_pause_minutes_multiplier\":" + DoubleToString(atlasRuntime.pauseMinutesMultiplier, 8) + ",";
+    json += "\"runtime_max_pause_minutes\":" + IntegerToString(atlasRuntime.maxPauseMinutes) + ",";
+    json += "\"runtime_max_min_equity_triggers\":" + IntegerToString(atlasRuntime.maxMinEquityTriggers) + ",";
+    json += "\"runtime_reset_on_new_peak\":" + (atlasRuntime.resetOnNewPeak ? "true" : "false") + ",";
+    json += "\"runtime_target_equity\":" + DoubleToString(atlasRuntime.targetEquity, 8) + ",";
+    json += "\"runtime_minimum_equity\":" + DoubleToString(atlasRuntime.minimumEquity, 8) + ",";
+    json += "\"runtime_enable_take_profit\":" + (atlasRuntime.enableTakeProfit ? "true" : "false") + ",";
+    json += "\"runtime_tp_input_type\":" + IntegerToString((int)atlasRuntime.tpInputType) + ",";
+    json += "\"runtime_tp_value\":" + DoubleToString(atlasRuntime.tpValue, 8) + ",";
+    json += "\"runtime_enable_stop_loss\":" + (atlasRuntime.enableStopLoss ? "true" : "false") + ",";
+    json += "\"runtime_sl_input_type\":" + IntegerToString((int)atlasRuntime.slInputType) + ",";
+    json += "\"runtime_sl_value\":" + DoubleToString(atlasRuntime.slValue, 8) + ",";
+    json += "\"runtime_enable_risk_reward\":" + (atlasRuntime.enableRiskReward ? "true" : "false") + ",";
+    json += "\"runtime_rr_risk_mode\":" + IntegerToString((int)atlasRuntime.rrRiskMode) + ",";
+    json += "\"runtime_rr_risk_input_type\":" + IntegerToString((int)atlasRuntime.rrRiskInputType) + ",";
+    json += "\"runtime_rr_risk_value\":" + DoubleToString(atlasRuntime.rrRiskValue, 8) + ",";
+    json += "\"runtime_rr_atr_multiplier\":" + DoubleToString(atlasRuntime.rrAtrMultiplier, 8) + ",";
+    json += "\"runtime_risk_reward_ratio\":" + DoubleToString(atlasRuntime.riskRewardRatio, 8) + ",";
+    json += "\"runtime_enable_trailing\":" + (atlasRuntime.enableTrailing ? "true" : "false") + ",";
+    json += "\"runtime_trailing_enable_break_even_lock\":" + (atlasRuntime.trailingEnableBreakEvenLock ? "true" : "false") + ",";
+    json += "\"runtime_trailing_sl_on_profitable_only\":" + (atlasRuntime.trailingSlOnProfitableOnly ? "true" : "false") + ",";
+    json += "\"runtime_enable_adaptive_tp\":" + (atlasRuntime.enableAdaptiveTp ? "true" : "false") + ",";
+    json += "\"runtime_enable_adaptive_sl\":" + (atlasRuntime.enableAdaptiveSl ? "true" : "false") + ",";
+    json += "\"runtime_ts_input_type\":" + IntegerToString((int)atlasRuntime.tsInputType) + ",";
+    json += "\"runtime_trailing_distance_value\":" + DoubleToString(atlasRuntime.trailingDistanceValue, 8) + ",";
+    json += "\"runtime_trailing_value_multiplier\":" + DoubleToString(atlasRuntime.trailingValueMultiplier, 8) + ",";
+    json += "\"runtime_enable_discord_alerts\":" + (atlasRuntime.enableDiscordAlerts ? "true" : "false") + ",";
+    json += "\"runtime_enable_trading_hours\":" + (atlasRuntime.enableTradingHours ? "true" : "false") + ",";
+    json += "\"runtime_trading_start_time\":\"" + atlasRuntime.tradingStartTime + "\",";
+    json += "\"runtime_trading_end_time\":\"" + atlasRuntime.tradingEndTime + "\",";
+    json += "\"runtime_enable_reports\":" + (atlasRuntime.enableReports ? "true" : "false") + ",";
+    json += "\"runtime_send_report_every_hour\":" + IntegerToString(atlasRuntime.sendReportEveryHour) + ",";
+    json += "\"runtime_enable_market_close_filter\":" + (atlasRuntime.enableMarketCloseFilter ? "true" : "false") + ",";
+    json += "\"runtime_minutes_before_close\":" + IntegerToString(atlasRuntime.minutesBeforeClose) + ",";
+    json += "\"runtime_enable_news_filter\":" + (atlasRuntime.enableNewsFilter ? "true" : "false") + ",";
+    json += "\"runtime_news_minutes_before\":" + IntegerToString(atlasRuntime.newsMinutesBefore) + ",";
+    json += "\"runtime_news_minutes_after\":" + IntegerToString(atlasRuntime.newsMinutesAfter) + ",";
+    json += "\"runtime_enable_leverage_pause\":" + (atlasRuntime.enableLeveragePause ? "true" : "false") + ",";
+    json += "\"runtime_enable_logging\":" + (atlasRuntime.enableLogging ? "true" : "false") + ",";
+
+    json += "\"buy_adjusted_score\":" + DoubleToString(atlasBuyAdjustedScore, 4) + ",";
+    json += "\"sell_adjusted_score\":" + DoubleToString(atlasSellAdjustedScore, 4) + ",";
+    json += "\"buy_effective_threshold\":" + DoubleToString(atlasBuyEffectiveThreshold, 4) + ",";
+    json += "\"sell_effective_threshold\":" + DoubleToString(atlasSellEffectiveThreshold, 4) + ",";
+    json += "\"buy_entry_eligible\":" + (atlasBuyEntryEligible ? "true" : "false") + ",";
+    json += "\"sell_entry_eligible\":" + (atlasSellEntryEligible ? "true" : "false") + ",";
+    json += "\"buy_block_reason\":\"" + AtlasJsonEscape(atlasBuyBlockReason) + "\",";
+    json += "\"sell_block_reason\":\"" + AtlasJsonEscape(atlasSellBlockReason) + "\",";
+    json += "\"new_bar_entry_only\":" + (atlasRuntime.enableNewBarEntryOnly ? "true" : "false") + ",";
+    json += "\"new_bar_ready\":" + (atlasNewBarReady ? "true" : "false") + ",";
+    json += "\"cooldown_active\":" + (atlasCooldownActive ? "true" : "false") + ",";
+    json += "\"cooldown_until_epoch\":" + IntegerToString((long)cooldownUntilBarTime) + ",";
+
+    json += "\"last_order_attempted\":" + (atlasLastOrderAttempted ? "true" : "false") + ",";
+    json += "\"last_order_success\":" + (atlasLastOrderSuccess ? "true" : "false") + ",";
+    json += "\"last_order_direction\":\"" + AtlasJsonEscape(atlasLastOrderDirection) + "\",";
+    json += "\"last_order_mode\":\"" + AtlasJsonEscape(atlasLastOrderMode) + "\",";
+    json += "\"last_order_retcode\":" + IntegerToString(atlasLastOrderRetcode) + ",";
+    json += "\"last_order_ticket\":" + IntegerToString((long)atlasLastOrderTicket) + ",";
+    json += "\"last_order_time_epoch\":" + IntegerToString((long)atlasLastOrderTime) + ",";
+    json += "\"timestamp\":\"" + atlasTimestamp + "\"";
+    json += "}";
+
+    int handle = FileOpen(atlasStatusFile, FILE_WRITE | FILE_TXT | FILE_ANSI);
     if(handle == INVALID_HANDLE)
     {
-        Print(
-            "Atlas: could not write status file. Error=",
-            GetLastError()
-        );
+        Print("Atlas: could not write status file. Error=", GetLastError());
         return;
     }
 
@@ -565,9 +1670,6 @@ void WriteAtlasStatus()
 }
 
 
-// Managed positions array
-ManagedPosition managedPositions[];
-int managedPositionCount = 0;
 
 // Candle-based Position Counters
 datetime currentBarTime = 0;
@@ -655,13 +1757,444 @@ bool CreatePasswordDialog()
     return true;
 }
 
+void InitializeAtlasRuntime()
+{
+    atlasRuntime.directionalBodyLookback = DirectionalBodyLookback;
+    atlasRuntime.emaFastPeriod = EMAFastPeriod;
+    atlasRuntime.emaSlowPeriod = EMASlowPeriod;
+    atlasRuntime.slopeLookback = SlopeLookback;
+    atlasRuntime.rsiPeriod = RSIPeriod;
+    atlasRuntime.atrPeriod = ATRPeriod;
+    atlasRuntime.atrAvgLookback = ATRAvgLookback;
+    atlasRuntime.minVolRatioToTrade = MinVolRatioToTrade;
+    atlasRuntime.impulseLookback = ImpulseLookback;
+    atlasRuntime.impulseBoostWeight = ImpulseBoostWeight;
+    atlasRuntime.signalSmoothingCandles = SignalSmoothingCandles;
+    atlasRuntime.currentCandleBlend = CurrentCandleBlend;
+    atlasRuntime.velocityWindow = VelocityWindow;
+    atlasRuntime.rsiOverbought = RSIOverbought;
+    atlasRuntime.rsiOversold = RSIOversold;
+    atlasRuntime.rsiMomentumBuy = RSIMomentumBuy;
+    atlasRuntime.rsiMomentumSell = RSIMomentumSell;
+    atlasRuntime.trendWeight = TrendWeight;
+    atlasRuntime.slopeWeight = SlopeWeight;
+    atlasRuntime.momentumBaseWeight = MomentumBaseWeight;
+    atlasRuntime.momentumTriggerWeight = MomentumTriggerWeight;
+    atlasRuntime.bodyMomentumWeight = BodyMomentumWeight;
+    atlasRuntime.chopScoreHigh = ChopScoreHigh;
+    atlasRuntime.chopScoreMed = ChopScoreMed;
+    atlasRuntime.chopScoreLow = ChopScoreLow;
+    atlasRuntime.volatilityScoreHigh = VolatilityScoreHigh;
+    atlasRuntime.volatilityScoreLow = VolatilityScoreLow;
+    atlasRuntime.peakScoreWeight = PeakScoreWeight;
+    atlasRuntime.wickRejectionWeight = WickRejectionWeight;
+    atlasRuntime.minBodyRatio = MinBodyRatio;
+    atlasRuntime.enableBuyOrders = EnableBuyOrders;
+    atlasRuntime.enableSellOrders = EnableSellOrders;
+    atlasRuntime.enableNewBarEntryOnly = EnableNewBarEntryOnly;
+    atlasRuntime.enableMaxSpreadFilter = EnableMaxSpreadFilter;
+    atlasRuntime.maxSpreadPoints = MaxSpreadPoints;
+    atlasRuntime.maxSpreadAtrRatio = MaxSpreadATRRatio;
+    atlasRuntime.baseLotSize = BaseLotSize;
+    atlasRuntime.maxOpenOrders = MaxOpenOrders;
+    atlasRuntime.maxTradesPerCandle = MaxTradesPerCandle;
+    atlasRuntime.consecutiveCandleThresholdBoost = ConsecutiveCandleThresholdBoost;
+    atlasRuntime.maxConsecutiveCandleBoosts = MaxConsecutiveCandleBoosts;
+    atlasRuntime.zonePoints = ZonePoints;
+    atlasRuntime.buyDuplicateMultiplier = BuyDuplicateMultiplier;
+    atlasRuntime.sellDuplicateMultiplier = SellDuplicateMultiplier;
+    atlasRuntime.minBreakEvenProfit = MinBreakEvenProfit;
+    atlasRuntime.profitThresholdMultiplier = ProfitThresholdMultiplier;
+    atlasRuntime.lossThresholdMultiplier = LossThresholdMultiplier;
+    atlasRuntime.minBuySignalScore = MinBuySignalScore;
+    atlasRuntime.minSellSignalScore = MinSellSignalScore;
+    atlasRuntime.enableLimitEntry = EnableLimitEntry;
+    atlasRuntime.limitEntryAnchor = LimitEntryAnchor;
+    atlasRuntime.limitEntryAtrFraction = LimitEntryATRFraction;
+    atlasRuntime.limitEntryExpiryBars = LimitEntryExpiryBars;
+    atlasRuntime.limitEntryCancelOnFlip = LimitEntryCancelOnFlip;
+    atlasRuntime.enableSignalDampening = EnableSignalDampening;
+    atlasRuntime.maxLosingPositionsSameDir = MaxLosingPositionsSameDir;
+    atlasRuntime.losingPosScorePenalty = LosingPosScorePenalty;
+    atlasRuntime.drawdownThresholdPct = DrawdownThresholdPct;
+    atlasRuntime.drawdownScoreBoost = DrawdownScoreBoost;
+    atlasRuntime.consecutiveLossesBeforeCooldown = ConsecutiveLossesBeforeCooldown;
+    atlasRuntime.consecutiveLossCooldownBars = ConsecutiveLossCooldownBars;
+    atlasRuntime.enableLossManagement = EnableLossManagement;
+    atlasRuntime.maxHoldingLossPositions = MaxHoldingLossPositions;
+    atlasRuntime.minHealthScore = MinHealthScore;
+    atlasRuntime.maxAdverseAtr = MaxAdverseATR;
+    atlasRuntime.healthTrendWeight = HealthTrendWeight;
+    atlasRuntime.healthRsiWeight = HealthRSIWeight;
+    atlasRuntime.healthAtrWeight = HealthATRWeight;
+    atlasRuntime.healthSwingWeight = HealthSwingWeight;
+    atlasRuntime.healthRsiBuyMin = HealthRSIBuyMin;
+    atlasRuntime.healthRsiSellMax = HealthRSISellMax;
+    atlasRuntime.healthSwingLookback = HealthSwingLookback;
+    atlasRuntime.healthGraceBars = HealthGraceBars;
+    atlasRuntime.enablePartialClose = EnablePartialClose;
+    atlasRuntime.partialClose75Pct = PartialClose75Pct;
+    atlasRuntime.partialClose50Pct = PartialClose50Pct;
+    atlasRuntime.partialClose25Pct = PartialClose25Pct;
+    atlasRuntime.enableHealthSlTightening = EnableHealthSLTightening;
+    atlasRuntime.slTightenAtrMultiplier = SLTightenATRMultiplier;
+    atlasRuntime.slTightenMinHealthPct = SLTightenMinHealthPct;
+    atlasRuntime.enableBreakEvenOnSpread = EnableBreakEvenOnSpread;
+    atlasRuntime.breakEvenSpreadMultiplier = BreakEvenSpreadMultiplier;
+    atlasRuntime.enableVirtualSlReentry = EnableVirtualSLReentry;
+    atlasRuntime.reentryRespectsNewBarGate = ReentryRespectsNewBarGate;
+    atlasRuntime.reentryMinSignalPct = ReentryMinSignalPct;
+    atlasRuntime.enableProfitOffsetSl = EnableProfitOffsetSL;
+    atlasRuntime.consecutiveWinsRequired = ConsecutiveWinsRequired;
+    atlasRuntime.minOffsetProfit = MinOffsetProfit;
+    atlasRuntime.enableHedgeChain = EnableHedgeChain;
+    atlasRuntime.hedgeTriggerAtr = HedgeTriggerATR;
+    atlasRuntime.hedgeRequireSignal = HedgeRequireSignal;
+    atlasRuntime.hedgeMinSignalScore = HedgeMinSignalScore;
+    atlasRuntime.hedgeAutoLot = HedgeAutoLot;
+    atlasRuntime.hedgeRecoveryAtr = HedgeRecoveryATR;
+    atlasRuntime.hedgeLotMultiplier = HedgeLotMultiplier;
+    atlasRuntime.hedgeMaxLot = HedgeMaxLot;
+    atlasRuntime.hedgeRecoveryPct = HedgeRecoveryPct;
+    atlasRuntime.hedgeRollMinProfit = HedgeRollMinProfit;
+    atlasRuntime.hedgeCycleLevels = HedgeCycleLevels;
+    atlasRuntime.enableHedgeCycleReset = EnableHedgeCycleReset;
+    atlasRuntime.hedgeCyclePartialPct = HedgeCyclePartialPct;
+    atlasRuntime.hedgeMaxCycles = HedgeMaxCycles;
+    atlasRuntime.hedgeMaxChainLossUsd = HedgeMaxChainLossUSD;
+    atlasRuntime.hedgeMaxChainLossPct = HedgeMaxChainLossPct;
+    atlasRuntime.hedgeClearRootSl = HedgeClearRootSL;
+    atlasRuntime.hedgeTrailAtr = HedgeTrailATR;
+    atlasRuntime.enableDynamicLots = EnableDynamicLots;
+    atlasRuntime.equityDropPercent = EquityDropPercent;
+    atlasRuntime.maxEquityDropLotSteps = MaxEquityDropLotSteps;
+    atlasRuntime.minSignalStrengthForLot = MinSignalStrengthForLot;
+    atlasRuntime.lotStepSize = LotStepSize;
+    atlasRuntime.maxLotSize = MaxLotSize;
+    atlasRuntime.enableBasketStop = EnableBasketStop;
+    atlasRuntime.maxBasketLossPct = MaxBasketLossPct;
+    atlasRuntime.minEquityPercent = MinEquityPercent;
+    atlasRuntime.maxDrawdownFromPeak = MaxDrawdownFromPeak;
+    atlasRuntime.pauseMinutes = PauseMinutes;
+    atlasRuntime.pauseMinutesMultiplier = PauseMinutesMultiplier;
+    atlasRuntime.maxPauseMinutes = MaxPauseMinutes;
+    atlasRuntime.maxMinEquityTriggers = MaxMinEquityTriggers;
+    atlasRuntime.resetOnNewPeak = ResetOnNewPeak;
+    atlasRuntime.targetEquity = TargetEquity;
+    atlasRuntime.minimumEquity = MinimumEquity;
+    atlasRuntime.enableTakeProfit = EnableTakeProfit;
+    atlasRuntime.tpInputType = TPInputType;
+    atlasRuntime.tpValue = TPValue;
+    atlasRuntime.enableStopLoss = EnableStopLoss;
+    atlasRuntime.slInputType = SLInputType;
+    atlasRuntime.slValue = SLValue;
+    atlasRuntime.enableRiskReward = EnableRiskReward;
+    atlasRuntime.rrRiskMode = RRRiskMode;
+    atlasRuntime.rrRiskInputType = RRRiskInputType;
+    atlasRuntime.rrRiskValue = RRRiskValue;
+    atlasRuntime.rrAtrMultiplier = RRAtrMultiplier;
+    atlasRuntime.riskRewardRatio = RiskRewardRatio;
+    atlasRuntime.enableTrailing = EnableTrailing;
+    atlasRuntime.trailingEnableBreakEvenLock = TrailingEnableBreakEvenLock;
+    atlasRuntime.trailingSlOnProfitableOnly = TrailingSLOnProfitableOnly;
+    atlasRuntime.enableAdaptiveTp = EnableAdaptiveTP;
+    atlasRuntime.enableAdaptiveSl = EnableAdaptiveSL;
+    atlasRuntime.tsInputType = TSInputType;
+    atlasRuntime.trailingDistanceValue = TrailingDistanceValue;
+    atlasRuntime.trailingValueMultiplier = TrailingValueMultiplier;
+    atlasRuntime.enableDiscordAlerts = EnableDiscordAlerts;
+    atlasRuntime.enableTradingHours = EnableTradingHours;
+    atlasRuntime.tradingStartTime = TradingStartTime;
+    atlasRuntime.tradingEndTime = TradingEndTime;
+    atlasRuntime.enableReports = EnableReports;
+    atlasRuntime.sendReportEveryHour = SendReportEveryHour;
+    atlasRuntime.enableMarketCloseFilter = EnableMarketCloseFilter;
+    atlasRuntime.minutesBeforeClose = MinutesBeforeClose;
+    atlasRuntime.enableNewsFilter = EnableNewsFilter;
+    atlasRuntime.newsMinutesBefore = NewsMinutesBefore;
+    atlasRuntime.newsMinutesAfter = NewsMinutesAfter;
+    atlasRuntime.enableLeveragePause = EnableLeveragePause;
+    atlasRuntime.enableLogging = EnableLogging;
+
+    atlasBuyEnabled = atlasRuntime.enableBuyOrders;
+    atlasSellEnabled = atlasRuntime.enableSellOrders;
+    atlasBuyEffectiveThreshold = atlasRuntime.minBuySignalScore;
+    atlasSellEffectiveThreshold = atlasRuntime.minSellSignalScore;
+    atlasBuyBlockReason = "INITIALIZED";
+    atlasSellBlockReason = "INITIALIZED";
+    atlasRuntimeInitialized = true;
+
+    Print(
+        "[ATLAS] Full runtime initialized from Nyao profile. ",
+        "BuyThreshold=", DoubleToString(atlasRuntime.minBuySignalScore, 2),
+        " SellThreshold=", DoubleToString(atlasRuntime.minSellSignalScore, 2),
+        " BaseLot=", DoubleToString(atlasRuntime.baseLotSize, 2),
+        " MaxOrders=", atlasRuntime.maxOpenOrders,
+        " NewBarOnly=", atlasRuntime.enableNewBarEntryOnly
+    );
+}
+
+// Effective runtime aliases. The .set file seeds AtlasRuntimeConfig at startup.
+#define DirectionalBodyLookback atlasRuntime.directionalBodyLookback
+#define EMAFastPeriod atlasRuntime.emaFastPeriod
+#define EMASlowPeriod atlasRuntime.emaSlowPeriod
+#define SlopeLookback atlasRuntime.slopeLookback
+#define RSIPeriod atlasRuntime.rsiPeriod
+#define ATRPeriod atlasRuntime.atrPeriod
+#define ATRAvgLookback atlasRuntime.atrAvgLookback
+#define MinVolRatioToTrade atlasRuntime.minVolRatioToTrade
+#define ImpulseLookback atlasRuntime.impulseLookback
+#define ImpulseBoostWeight atlasRuntime.impulseBoostWeight
+#define SignalSmoothingCandles atlasRuntime.signalSmoothingCandles
+#define CurrentCandleBlend atlasRuntime.currentCandleBlend
+#define VelocityWindow atlasRuntime.velocityWindow
+#define RSIOverbought atlasRuntime.rsiOverbought
+#define RSIOversold atlasRuntime.rsiOversold
+#define RSIMomentumBuy atlasRuntime.rsiMomentumBuy
+#define RSIMomentumSell atlasRuntime.rsiMomentumSell
+#define TrendWeight atlasRuntime.trendWeight
+#define SlopeWeight atlasRuntime.slopeWeight
+#define MomentumBaseWeight atlasRuntime.momentumBaseWeight
+#define MomentumTriggerWeight atlasRuntime.momentumTriggerWeight
+#define BodyMomentumWeight atlasRuntime.bodyMomentumWeight
+#define ChopScoreHigh atlasRuntime.chopScoreHigh
+#define ChopScoreMed atlasRuntime.chopScoreMed
+#define ChopScoreLow atlasRuntime.chopScoreLow
+#define VolatilityScoreHigh atlasRuntime.volatilityScoreHigh
+#define VolatilityScoreLow atlasRuntime.volatilityScoreLow
+#define PeakScoreWeight atlasRuntime.peakScoreWeight
+#define WickRejectionWeight atlasRuntime.wickRejectionWeight
+#define MinBodyRatio atlasRuntime.minBodyRatio
+#define EnableBuyOrders atlasRuntime.enableBuyOrders
+#define EnableSellOrders atlasRuntime.enableSellOrders
+#define EnableNewBarEntryOnly atlasRuntime.enableNewBarEntryOnly
+#define EnableMaxSpreadFilter atlasRuntime.enableMaxSpreadFilter
+#define MaxSpreadPoints atlasRuntime.maxSpreadPoints
+#define MaxSpreadATRRatio atlasRuntime.maxSpreadAtrRatio
+#define BaseLotSize atlasRuntime.baseLotSize
+#define MaxOpenOrders atlasRuntime.maxOpenOrders
+#define MaxTradesPerCandle atlasRuntime.maxTradesPerCandle
+#define ConsecutiveCandleThresholdBoost atlasRuntime.consecutiveCandleThresholdBoost
+#define MaxConsecutiveCandleBoosts atlasRuntime.maxConsecutiveCandleBoosts
+#define ZonePoints atlasRuntime.zonePoints
+#define BuyDuplicateMultiplier atlasRuntime.buyDuplicateMultiplier
+#define SellDuplicateMultiplier atlasRuntime.sellDuplicateMultiplier
+#define MinBreakEvenProfit atlasRuntime.minBreakEvenProfit
+#define ProfitThresholdMultiplier atlasRuntime.profitThresholdMultiplier
+#define LossThresholdMultiplier atlasRuntime.lossThresholdMultiplier
+#define MinBuySignalScore atlasRuntime.minBuySignalScore
+#define MinSellSignalScore atlasRuntime.minSellSignalScore
+#define EnableLimitEntry atlasRuntime.enableLimitEntry
+#define LimitEntryAnchor atlasRuntime.limitEntryAnchor
+#define LimitEntryATRFraction atlasRuntime.limitEntryAtrFraction
+#define LimitEntryExpiryBars atlasRuntime.limitEntryExpiryBars
+#define LimitEntryCancelOnFlip atlasRuntime.limitEntryCancelOnFlip
+#define EnableSignalDampening atlasRuntime.enableSignalDampening
+#define MaxLosingPositionsSameDir atlasRuntime.maxLosingPositionsSameDir
+#define LosingPosScorePenalty atlasRuntime.losingPosScorePenalty
+#define DrawdownThresholdPct atlasRuntime.drawdownThresholdPct
+#define DrawdownScoreBoost atlasRuntime.drawdownScoreBoost
+#define ConsecutiveLossesBeforeCooldown atlasRuntime.consecutiveLossesBeforeCooldown
+#define ConsecutiveLossCooldownBars atlasRuntime.consecutiveLossCooldownBars
+#define EnableLossManagement atlasRuntime.enableLossManagement
+#define MaxHoldingLossPositions atlasRuntime.maxHoldingLossPositions
+#define MinHealthScore atlasRuntime.minHealthScore
+#define MaxAdverseATR atlasRuntime.maxAdverseAtr
+#define HealthTrendWeight atlasRuntime.healthTrendWeight
+#define HealthRSIWeight atlasRuntime.healthRsiWeight
+#define HealthATRWeight atlasRuntime.healthAtrWeight
+#define HealthSwingWeight atlasRuntime.healthSwingWeight
+#define HealthRSIBuyMin atlasRuntime.healthRsiBuyMin
+#define HealthRSISellMax atlasRuntime.healthRsiSellMax
+#define HealthSwingLookback atlasRuntime.healthSwingLookback
+#define HealthGraceBars atlasRuntime.healthGraceBars
+#define EnablePartialClose atlasRuntime.enablePartialClose
+#define PartialClose75Pct atlasRuntime.partialClose75Pct
+#define PartialClose50Pct atlasRuntime.partialClose50Pct
+#define PartialClose25Pct atlasRuntime.partialClose25Pct
+#define EnableHealthSLTightening atlasRuntime.enableHealthSlTightening
+#define SLTightenATRMultiplier atlasRuntime.slTightenAtrMultiplier
+#define SLTightenMinHealthPct atlasRuntime.slTightenMinHealthPct
+#define EnableBreakEvenOnSpread atlasRuntime.enableBreakEvenOnSpread
+#define BreakEvenSpreadMultiplier atlasRuntime.breakEvenSpreadMultiplier
+#define EnableVirtualSLReentry atlasRuntime.enableVirtualSlReentry
+#define ReentryRespectsNewBarGate atlasRuntime.reentryRespectsNewBarGate
+#define ReentryMinSignalPct atlasRuntime.reentryMinSignalPct
+#define EnableProfitOffsetSL atlasRuntime.enableProfitOffsetSl
+#define ConsecutiveWinsRequired atlasRuntime.consecutiveWinsRequired
+#define MinOffsetProfit atlasRuntime.minOffsetProfit
+#define EnableHedgeChain atlasRuntime.enableHedgeChain
+#define HedgeTriggerATR atlasRuntime.hedgeTriggerAtr
+#define HedgeRequireSignal atlasRuntime.hedgeRequireSignal
+#define HedgeMinSignalScore atlasRuntime.hedgeMinSignalScore
+#define HedgeAutoLot atlasRuntime.hedgeAutoLot
+#define HedgeRecoveryATR atlasRuntime.hedgeRecoveryAtr
+#define HedgeLotMultiplier atlasRuntime.hedgeLotMultiplier
+#define HedgeMaxLot atlasRuntime.hedgeMaxLot
+#define HedgeRecoveryPct atlasRuntime.hedgeRecoveryPct
+#define HedgeRollMinProfit atlasRuntime.hedgeRollMinProfit
+#define HedgeCycleLevels atlasRuntime.hedgeCycleLevels
+#define EnableHedgeCycleReset atlasRuntime.enableHedgeCycleReset
+#define HedgeCyclePartialPct atlasRuntime.hedgeCyclePartialPct
+#define HedgeMaxCycles atlasRuntime.hedgeMaxCycles
+#define HedgeMaxChainLossUSD atlasRuntime.hedgeMaxChainLossUsd
+#define HedgeMaxChainLossPct atlasRuntime.hedgeMaxChainLossPct
+#define HedgeClearRootSL atlasRuntime.hedgeClearRootSl
+#define HedgeTrailATR atlasRuntime.hedgeTrailAtr
+#define EnableDynamicLots atlasRuntime.enableDynamicLots
+#define EquityDropPercent atlasRuntime.equityDropPercent
+#define MaxEquityDropLotSteps atlasRuntime.maxEquityDropLotSteps
+#define MinSignalStrengthForLot atlasRuntime.minSignalStrengthForLot
+#define LotStepSize atlasRuntime.lotStepSize
+#define MaxLotSize atlasRuntime.maxLotSize
+#define EnableBasketStop atlasRuntime.enableBasketStop
+#define MaxBasketLossPct atlasRuntime.maxBasketLossPct
+#define MinEquityPercent atlasRuntime.minEquityPercent
+#define MaxDrawdownFromPeak atlasRuntime.maxDrawdownFromPeak
+#define PauseMinutes atlasRuntime.pauseMinutes
+#define PauseMinutesMultiplier atlasRuntime.pauseMinutesMultiplier
+#define MaxPauseMinutes atlasRuntime.maxPauseMinutes
+#define MaxMinEquityTriggers atlasRuntime.maxMinEquityTriggers
+#define ResetOnNewPeak atlasRuntime.resetOnNewPeak
+#define TargetEquity atlasRuntime.targetEquity
+#define MinimumEquity atlasRuntime.minimumEquity
+#define EnableTakeProfit atlasRuntime.enableTakeProfit
+#define TPInputType atlasRuntime.tpInputType
+#define TPValue atlasRuntime.tpValue
+#define EnableStopLoss atlasRuntime.enableStopLoss
+#define SLInputType atlasRuntime.slInputType
+#define SLValue atlasRuntime.slValue
+#define EnableRiskReward atlasRuntime.enableRiskReward
+#define RRRiskMode atlasRuntime.rrRiskMode
+#define RRRiskInputType atlasRuntime.rrRiskInputType
+#define RRRiskValue atlasRuntime.rrRiskValue
+#define RRAtrMultiplier atlasRuntime.rrAtrMultiplier
+#define RiskRewardRatio atlasRuntime.riskRewardRatio
+#define EnableTrailing atlasRuntime.enableTrailing
+#define TrailingEnableBreakEvenLock atlasRuntime.trailingEnableBreakEvenLock
+#define TrailingSLOnProfitableOnly atlasRuntime.trailingSlOnProfitableOnly
+#define EnableAdaptiveTP atlasRuntime.enableAdaptiveTp
+#define EnableAdaptiveSL atlasRuntime.enableAdaptiveSl
+#define TSInputType atlasRuntime.tsInputType
+#define TrailingDistanceValue atlasRuntime.trailingDistanceValue
+#define TrailingValueMultiplier atlasRuntime.trailingValueMultiplier
+#define EnableDiscordAlerts atlasRuntime.enableDiscordAlerts
+#define EnableTradingHours atlasRuntime.enableTradingHours
+#define TradingStartTime atlasRuntime.tradingStartTime
+#define TradingEndTime atlasRuntime.tradingEndTime
+#define EnableReports atlasRuntime.enableReports
+#define SendReportEveryHour atlasRuntime.sendReportEveryHour
+#define EnableMarketCloseFilter atlasRuntime.enableMarketCloseFilter
+#define MinutesBeforeClose atlasRuntime.minutesBeforeClose
+#define EnableNewsFilter atlasRuntime.enableNewsFilter
+#define NewsMinutesBefore atlasRuntime.newsMinutesBefore
+#define NewsMinutesAfter atlasRuntime.newsMinutesAfter
+#define EnableLeveragePause atlasRuntime.enableLeveragePause
+#define EnableLogging atlasRuntime.enableLogging
+
+
+void AtlasNormalizeHealthWeights()
+{
+    double healthWeightSum =
+        atlasRuntime.healthTrendWeight +
+        atlasRuntime.healthRsiWeight +
+        atlasRuntime.healthAtrWeight +
+        atlasRuntime.healthSwingWeight;
+
+    if(healthWeightSum > 0.0)
+    {
+        normHealthTrendWeight = atlasRuntime.healthTrendWeight / healthWeightSum;
+        normHealthRSIWeight   = atlasRuntime.healthRsiWeight / healthWeightSum;
+        normHealthATRWeight   = atlasRuntime.healthAtrWeight / healthWeightSum;
+        normHealthSwingWeight = atlasRuntime.healthSwingWeight / healthWeightSum;
+    }
+    else
+    {
+        normHealthTrendWeight = 0.25;
+        normHealthRSIWeight   = 0.25;
+        normHealthATRWeight   = 0.25;
+        normHealthSwingWeight = 0.25;
+    }
+
+    atlasHealthWeightsDirty = false;
+}
+
+bool AtlasRebuildSignalIndicators()
+{
+    int newFast = iMA(_Symbol, _Period, atlasRuntime.emaFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    int newSlow = iMA(_Symbol, _Period, atlasRuntime.emaSlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    int newRSI  = iRSI(_Symbol, _Period, atlasRuntime.rsiPeriod, PRICE_CLOSE);
+    int newATR  = iATR(_Symbol, _Period, atlasRuntime.atrPeriod);
+
+    if(newFast == INVALID_HANDLE ||
+       newSlow == INVALID_HANDLE ||
+       newRSI == INVALID_HANDLE ||
+       newATR == INVALID_HANDLE)
+    {
+        if(newFast != INVALID_HANDLE) IndicatorRelease(newFast);
+        if(newSlow != INVALID_HANDLE) IndicatorRelease(newSlow);
+        if(newRSI  != INVALID_HANDLE) IndicatorRelease(newRSI);
+        if(newATR  != INVALID_HANDLE) IndicatorRelease(newATR);
+
+        atlasLastGlobalBlockReason = "STRUCTURAL_REINIT_FAILED";
+        Print("[ATLAS] Indicator reinitialization failed; previous handles retained.");
+        return false;
+    }
+
+    if(emaFastHandle != INVALID_HANDLE) IndicatorRelease(emaFastHandle);
+    if(emaSlowHandle != INVALID_HANDLE) IndicatorRelease(emaSlowHandle);
+    if(rsiHandle != INVALID_HANDLE) IndicatorRelease(rsiHandle);
+    if(atrSignalHandle != INVALID_HANDLE) IndicatorRelease(atrSignalHandle);
+
+    emaFastHandle = newFast;
+    emaSlowHandle = newSlow;
+    rsiHandle = newRSI;
+    atrSignalHandle = newATR;
+
+    _buyStrengthValid = false;
+    _sellStrengthValid = false;
+
+    atlasStructuralConfigDirty = false;
+    atlasLastGlobalBlockReason = "NONE";
+
+    Print(
+        "[ATLAS] Structural indicators rebuilt. EMAFast=",
+        atlasRuntime.emaFastPeriod,
+        " EMASlow=", atlasRuntime.emaSlowPeriod,
+        " RSI=", atlasRuntime.rsiPeriod,
+        " ATR=", atlasRuntime.atrPeriod
+    );
+
+    return true;
+}
+
+void ApplyAtlasRuntimeMaintenance()
+{
+    if(atlasHealthWeightsDirty)
+        AtlasNormalizeHealthWeights();
+
+    if(atlasStructuralConfigDirty &&
+       emaFastHandle != INVALID_HANDLE &&
+       emaSlowHandle != INVALID_HANDLE &&
+       rsiHandle != INVALID_HANDLE &&
+       atrSignalHandle != INVALID_HANDLE)
+    {
+        AtlasRebuildSignalIndicators();
+    }
+}
+
+
 // +------------------------------------------------------------------+
 // | Expert Initialization Function                                   |
 // +------------------------------------------------------------------+
 int OnInit()
 {   
+    // Load the active .set/input values into Atlas runtime state first.
+    InitializeAtlasRuntime();
+
     EventSetTimer(1);
     ReadAtlasCommand();
+
     // Password protection - show dialog if password is set
     if(EA_PASSWORD != "")
     {
@@ -724,29 +2257,8 @@ int InitializeEA()
         return(INIT_PARAMETERS_INCORRECT);
     }
 
-    // Normalize health weights to sum to 1.0
-    double healthWeightSum = HealthTrendWeight + HealthRSIWeight + HealthATRWeight + HealthSwingWeight;
-    if(healthWeightSum > 0)
-    {
-        normHealthTrendWeight = HealthTrendWeight / healthWeightSum;
-        normHealthRSIWeight   = HealthRSIWeight   / healthWeightSum;
-        normHealthATRWeight   = HealthATRWeight   / healthWeightSum;
-        normHealthSwingWeight = HealthSwingWeight  / healthWeightSum;
-        
-        if(MathAbs(healthWeightSum - 1.0) > 0.001)
-        {
-            Print("⚠️ Health weights sum to ", DoubleToString(healthWeightSum, 3), ", normalized to 1.0");
-        }
-    }
-    else
-    {
-        // Fallback: equal weights
-        normHealthTrendWeight = 0.25;
-        normHealthRSIWeight   = 0.25;
-        normHealthATRWeight   = 0.25;
-        normHealthSwingWeight = 0.25;
-        Print("⚠️ All health weights are 0, defaulting to equal weights (0.25 each)");
-    }
+    // Normalize effective Atlas runtime health weights.
+    AtlasNormalizeHealthWeights();
 
     // Initialize Signal Indicators
     emaFastHandle = iMA(_Symbol, _Period, EMAFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
@@ -776,6 +2288,8 @@ int InitializeEA()
         Print("Error creating Signal ATR handle!");
         return(INIT_FAILED);
     }
+
+    atlasStructuralConfigDirty = false;
 
     initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
     peakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -825,7 +2339,7 @@ int InitializeEA()
         else strength = GetSignalStrength(ORDER_TYPE_SELL);
         
         initialScore = strength.finalScore;
-        if(initialScore <= 0) initialScore = (type == POSITION_TYPE_BUY) ? MinBuySignalScore : MinSellSignalScore;
+        if(initialScore <= 0) initialScore = (type == POSITION_TYPE_BUY) ? atlasRuntime.minBuySignalScore : atlasRuntime.minSellSignalScore;
         
         RegisterManagedPosition(ticket, type, initialScore, posEntryPrice);
 
@@ -902,6 +2416,7 @@ void OnDeinit(const int reason)
 void OnTimer()
 {
     ReadAtlasCommand();
+    ApplyAtlasRuntimeMaintenance();
     WriteAtlasStatus();
 }
 
@@ -1164,7 +2679,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         // Recover the entry-thesis score from the limit-order comment; fall back to the
         // direction's min threshold if absent (e.g. EA restarted before the fill).
         double score = ParseLimitEntryScore(posComment);
-        if(score <= 0) score = (ptype == POSITION_TYPE_BUY) ? MinBuySignalScore : MinSellSignalScore;
+        if(score <= 0) score = (ptype == POSITION_TYPE_BUY) ? atlasRuntime.minBuySignalScore : atlasRuntime.minSellSignalScore;
 
         RegisterManagedPosition(posID, ptype, score, entryPrice);
 
@@ -1298,7 +2813,7 @@ double GetTotalFloatingPL()
 // +------------------------------------------------------------------+
 double GetBasketFloatingPL()
 {
-    if(!EnableHedgeChain) return GetTotalFloatingPL();
+    if(!atlasRuntime.enableHedgeChain) return GetTotalFloatingPL();
 
     double total = 0;
     for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -1377,28 +2892,33 @@ void CheckForTradingSignal()
 {
     // NEW-BAR ENTRY GATE
     // When enabled, evaluate/open entries only once per newly closed bar.
-    // Position management still runs every tick (ManagePositions in OnTick).
-    // This stabilizes signals (no intrabar repaint) and makes "Open prices"/
-    // "1-minute OHLC" backtests representative of live behavior.
-    if(EnableNewBarEntryOnly)
+    if(atlasRuntime.enableNewBarEntryOnly)
     {
         datetime currBarTime = iTime(_Symbol, _Period, 0);
-        if(lastEntryBarTime == currBarTime) return;
+        if(lastEntryBarTime == currBarTime)
+        {
+            AtlasSetDecisionReason(POSITION_TYPE_BUY, "WAITING_FOR_NEW_BAR");
+            AtlasSetDecisionReason(POSITION_TYPE_SELL, "WAITING_FOR_NEW_BAR");
+            return;
+        }
         lastEntryBarTime = currBarTime;
     }
+
+    atlasBuyEntryEligible = false;
+    atlasSellEntryEligible = false;
+    atlasBuyBlockReason = "EVALUATING";
+    atlasSellBlockReason = "EVALUATING";
 
     // Check Signals
     double buySignal = BuySignal();
     double sellSignal = SellSignal();
 
     // Process signals
-    // Fresh entries use a pending pullback limit when EnableLimitEntry is on, otherwise
-    // a market order. (Virtual-SL re-entries always stay market — they exist to restore
-    // exposure immediately and must not risk going unfilled. See TryVirtualSLReentry.)
     if(buySignal > sellSignal)
     {
         if(!EnableBuyOrders || !atlasBuyEnabled)
         {
+            AtlasSetDecisionReason(POSITION_TYPE_BUY, "BUY_DIRECTION_DISABLED");
             LogPrint("[ATLAS] BUY entry blocked.");
             return;
         }
@@ -1412,6 +2932,7 @@ void CheckForTradingSignal()
     {
         if(!EnableSellOrders || !atlasSellEnabled)
         {
+            AtlasSetDecisionReason(POSITION_TYPE_SELL, "SELL_DIRECTION_DISABLED");
             LogPrint("[ATLAS] SELL entry blocked.");
             return;
         }
@@ -1420,6 +2941,11 @@ void CheckForTradingSignal()
             PlaceLimitEntry(ORDER_TYPE_SELL, sellSignal);
         else
             OpenPosition(ORDER_TYPE_SELL, sellSignal);
+    }
+    else if(buySignal > 0 && sellSignal > 0)
+    {
+        AtlasSetDecisionReason(POSITION_TYPE_BUY, "SIGNAL_TIE");
+        AtlasSetDecisionReason(POSITION_TYPE_SELL, "SIGNAL_TIE");
     }
 }
 
@@ -1435,7 +2961,9 @@ double BuySignal()
     SignalStrength strength = GetSignalStrength(ORDER_TYPE_BUY);
 
     double adjustedScore = strength.finalScore;
-    double adjustedThreshold = MinBuySignalScore;
+    double adjustedThreshold = atlasRuntime.minBuySignalScore;
+    atlasBuyAdjustedScore = adjustedScore;
+    atlasBuyEffectiveThreshold = adjustedThreshold;
 
     // CONSECUTIVE CANDLE THRESHOLD ESCALATION
     // When previous candles opened buy positions, raise the threshold
@@ -1484,8 +3012,12 @@ double BuySignal()
         }
     }
 
+    atlasBuyAdjustedScore = adjustedScore;
+    atlasBuyEffectiveThreshold = adjustedThreshold;
+
     if (adjustedScore >= adjustedThreshold) 
     {   
+        AtlasSetDecisionReason(POSITION_TYPE_BUY, "SIGNAL_READY", true);
         LogPrint("BUY SIGNAL RECEIVED (Score: ", DoubleToString(strength.finalScore, 1), 
                  " | Adjusted: ", DoubleToString(adjustedScore, 1), 
                  " / Threshold: ", DoubleToString(adjustedThreshold, 1), ")");
@@ -1500,6 +3032,7 @@ double BuySignal()
         return adjustedScore;
     }
     
+    AtlasSetDecisionReason(POSITION_TYPE_BUY, "SCORE_BELOW_THRESHOLD");
     return 0;
 }
 
@@ -1515,7 +3048,9 @@ double SellSignal()
     SignalStrength strength = GetSignalStrength(ORDER_TYPE_SELL);
 
     double adjustedScore = strength.finalScore;
-    double adjustedThreshold = MinSellSignalScore;
+    double adjustedThreshold = atlasRuntime.minSellSignalScore;
+    atlasSellAdjustedScore = adjustedScore;
+    atlasSellEffectiveThreshold = adjustedThreshold;
 
     // CONSECUTIVE CANDLE THRESHOLD ESCALATION
     // When previous candles opened sell positions, raise the threshold
@@ -1564,8 +3099,12 @@ double SellSignal()
         }
     }
 
+    atlasSellAdjustedScore = adjustedScore;
+    atlasSellEffectiveThreshold = adjustedThreshold;
+
     if (adjustedScore >= adjustedThreshold)
     {
+        AtlasSetDecisionReason(POSITION_TYPE_SELL, "SIGNAL_READY", true);
         LogPrint("SELL SIGNAL RECEIVED (Score: ", DoubleToString(strength.finalScore, 1), 
                  " | Adjusted: ", DoubleToString(adjustedScore, 1), 
                  " / Threshold: ", DoubleToString(adjustedThreshold, 1), ")");
@@ -1580,6 +3119,7 @@ double SellSignal()
         return adjustedScore;
     }
     
+    AtlasSetDecisionReason(POSITION_TYPE_SELL, "SCORE_BELOW_THRESHOLD");
     return 0;
 }
 
@@ -1598,11 +3138,12 @@ bool CheckEntryConditions(ENUM_POSITION_TYPE dir, double price)
     int oppOnBar  = isBuy ? sellsOnCurrentBar : buysOnCurrentBar;
 
     // Per-candle trade limit
-    if(MaxTradesPerCandle > 0)
+    if(atlasRuntime.maxTradesPerCandle > 0)
     {
         int onCandle = (currentBarTime == currBarTime) ? sameOnBar : 0;
-        if(onCandle >= MaxTradesPerCandle)
+        if(onCandle >= atlasRuntime.maxTradesPerCandle)
         {
+            AtlasSetDecisionReason(dir, "MAX_TRADES_PER_CANDLE");
             return false;
         }
     }
@@ -1610,6 +3151,7 @@ bool CheckEntryConditions(ENUM_POSITION_TYPE dir, double price)
     // Prevent opposite direction trades on the same candle
     if(oppOnBar > 0)
     {
+        AtlasSetDecisionReason(dir, "OPPOSITE_TRADE_ON_CANDLE");
         return false;
     }
 
@@ -1619,6 +3161,7 @@ bool CheckEntryConditions(ENUM_POSITION_TYPE dir, double price)
         PositionLossState lossState = GetOpenPositionLossState(dir);
         if(lossState.losingCount >= MaxLosingPositionsSameDir)
         {
+            AtlasSetDecisionReason(dir, "MAX_LOSING_SAME_DIRECTION");
             LogPrint("[DAMPENED] ", dirName, " BLOCKED: ", lossState.losingCount,
                      " losing ", dirName, "s >= max ", MaxLosingPositionsSameDir);
             return false;
@@ -1630,13 +3173,14 @@ bool CheckEntryConditions(ENUM_POSITION_TYPE dir, double price)
     {
         if(currBarTime < cooldownUntilBarTime)
         {
+            AtlasSetDecisionReason(dir, "CONSECUTIVE_LOSS_COOLDOWN");
             LogPrint("[COOLDOWN] ", dirName, " BLOCKED: cooldown active until ",
                      TimeToString(cooldownUntilBarTime));
             return false;
         }
         else
         {
-            cooldownUntilBarTime = 0; // Cooldown expired
+            cooldownUntilBarTime = 0;
         }
     }
 
@@ -1653,10 +3197,12 @@ bool CheckEntryConditions(ENUM_POSITION_TYPE dir, double price)
 
         if(distance < minDistance)
         {
+            AtlasSetDecisionReason(dir, "DUPLICATE_DISTANCE");
             return false;
         }
     }
 
+    AtlasSetDecisionReason(dir, "ENTRY_CONDITIONS_OK");
     return true;
 }
 // +------------------------------------------------------------------+
@@ -1837,7 +3383,7 @@ double ComputeRawScore(ENUM_ORDER_TYPE orderType, int signalIndex, SignalStrengt
     // DEAD-MARKET FILTER: when ATR has collapsed relative to its average the
     // market is too quiet to scalp profitably (costs dominate). Block the signal.
     // Guard volRatio > 0 so we don't block when ATR data is unavailable.
-    if(MinVolRatioToTrade > 0 && volRatio > 0 && volRatio < MinVolRatioToTrade)
+    if(atlasRuntime.minVolRatioToTrade > 0 && volRatio > 0 && volRatio < atlasRuntime.minVolRatioToTrade)
         return 0;
 
     double chopScore = 0;
@@ -2301,7 +3847,7 @@ void ManageLosingPositions()
 
         // HEDGE CHAIN: chain logic exclusively manages legs of an active chain.
         // Skip the standard loss management (health close, partial, SL tighten, re-entry).
-        if(EnableHedgeChain && managedPositions[posIndex].chainId != 0)
+        if(atlasRuntime.enableHedgeChain && managedPositions[posIndex].chainId != 0)
             continue;
 
         double entryPrice = managedPositions[posIndex].entryPrice;
@@ -2431,7 +3977,7 @@ void ManageLosingPositions()
                 ClosePosition(ticket);
                 
                 // Virtual SL Re-entry after L3 full close
-                if(EnableVirtualSLReentry)
+                if(atlasRuntime.enableVirtualSlReentry)
                 {
                     TryVirtualSLReentry(posType, initialScore);
                 }
@@ -2680,7 +4226,7 @@ void ManageLosingPositions()
             ClosePosition(ticket);
             
             // Virtual SL + Re-entry: try to re-enter at better price if signal supports it
-            if(EnableVirtualSLReentry)
+            if(atlasRuntime.enableVirtualSlReentry)
             {
                 TryVirtualSLReentry(posType, initialScore);
             }
@@ -2745,9 +4291,9 @@ void TryVirtualSLReentry(ENUM_POSITION_TYPE posType, double initialScore)
 
     // NEW-BAR ENTRY GATE (optional for re-entries)
     // By default re-entries fire intrabar (immediately at the better price). When
-    // ReentryRespectsNewBarGate is enabled alongside EnableNewBarEntryOnly, a re-entry
+    // ReentryRespectsNewBarGate is enabled alongside the effective new-bar-only runtime mode, a re-entry
     // is only allowed once per closed bar — keeping backtests free of intrabar entries.
-    if(EnableNewBarEntryOnly && ReentryRespectsNewBarGate)
+    if(atlasRuntime.enableNewBarEntryOnly && ReentryRespectsNewBarGate)
     {
         datetime reentryBarTime = iTime(_Symbol, _Period, 0);
         if(lastEntryBarTime == reentryBarTime) return;
@@ -2759,7 +4305,7 @@ void TryVirtualSLReentry(ENUM_POSITION_TYPE posType, double initialScore)
     if(isNearMarketClose) return;
     if(isOrderSendLocked) return;
     if(CountLosingPositions() >= MaxHoldingLossPositions) return;
-    if(CountOpenOrders() >= MaxOpenOrders) return;
+    if(CountOpenOrders() >= atlasRuntime.maxOpenOrders) return;
     
     // Get current signal strength for the same direction
     ENUM_ORDER_TYPE orderType = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
@@ -2797,7 +4343,7 @@ void TryVirtualSLReentry(ENUM_POSITION_TYPE posType, double initialScore)
         OpenPosition(orderType, strength.finalScore);
 
         // Mark this bar as consumed so the gate (and a normal entry this bar) won't double-enter
-        if(EnableNewBarEntryOnly && ReentryRespectsNewBarGate)
+        if(atlasRuntime.enableNewBarEntryOnly && ReentryRespectsNewBarGate)
             lastEntryBarTime = iTime(_Symbol, _Period, 0);
     }
     else
@@ -2848,7 +4394,7 @@ void ManageTrailingTPSL(ulong ticket)
 
     // HEDGE CHAIN: skip any leg that belongs to an active chain. The chain logic
     // (ManageHedgeChains) exclusively manages these legs (covered / roll / stop).
-    if(EnableHedgeChain)
+    if(atlasRuntime.enableHedgeChain)
     {
         int hpi = GetManagedPositionIndex(ticket);
         if(hpi != -1 && managedPositions[hpi].chainId != 0)
@@ -3360,17 +4906,24 @@ ulong GetLastPositionTicket(ENUM_POSITION_TYPE type)
 // Open Position
 void OpenPosition(ENUM_ORDER_TYPE orderType, double signalScore = 0)
 {   
+    ENUM_POSITION_TYPE atlasDir = (orderType == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+
     if(!IsAllowedToOpenPosition())
+    {
+        AtlasSetDecisionReason(atlasDir, atlasLastGlobalBlockReason);
         return;
+    }
 
     if(orderType == ORDER_TYPE_BUY && !atlasBuyEnabled)
     {
+        AtlasSetDecisionReason(POSITION_TYPE_BUY, "BUY_DIRECTION_DISABLED");
         LogPrint("[ATLAS] BUY market order blocked.");
         return;
     }
 
     if(orderType == ORDER_TYPE_SELL && !atlasSellEnabled)
     {
+        AtlasSetDecisionReason(POSITION_TYPE_SELL, "SELL_DIRECTION_DISABLED");
         LogPrint("[ATLAS] SELL market order blocked.");
         return;
     }
@@ -3419,12 +4972,17 @@ void OpenPosition(ENUM_ORDER_TYPE orderType, double signalScore = 0)
             request.tp = NormalizeDouble(price - (tpPoints * _Point), _Digits);
     }
 
+    AtlasBeginOrderAttempt(orderType, "MARKET");
     bool orderResult = OrderSend(request, result);
+    atlasLastOrderRetcode = (long)result.retcode;
     
     if(orderResult)
     {
         if(result.retcode == TRADE_RETCODE_DONE)
         {   
+            atlasLastOrderSuccess = true;
+            atlasLastOrderTicket = result.order;
+            AtlasSetDecisionReason(atlasDir, "ORDER_OPENED", true);
             double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
             double equityDropAmount = lastPeakEquity - currentEquity;
             
@@ -3481,11 +5039,14 @@ void OpenPosition(ENUM_ORDER_TYPE orderType, double signalScore = 0)
         }
         else
         {
+            AtlasSetDecisionReason(atlasDir, "ORDER_REJECTED");
             LogPrint("Order failed. Return code: ", result.retcode);
         }
     }
     else
     {
+        atlasLastOrderRetcode = (long)result.retcode;
+        AtlasSetDecisionReason(atlasDir, "ORDER_SEND_ERROR");
         LogPrint("OrderSend error: ", GetLastError());
     }
 
@@ -3765,7 +5326,7 @@ bool ReseedCycle(ulong id, ulong olderTicket, ulong hedgeTicket, double hedgeLot
 // +------------------------------------------------------------------+
 void ManageHedgeChains()
 {
-    if(!EnableHedgeChain) return;
+    if(!atlasRuntime.enableHedgeChain) return;
 
     // Current ATR (closed-candle [1] for stability, matching ManageLosingPositions)
     double bufATR[];
@@ -4100,33 +5661,44 @@ double ComputeLimitEntryPrice(ENUM_ORDER_TYPE dir, double atr)
 // +------------------------------------------------------------------+
 void PlaceLimitEntry(ENUM_ORDER_TYPE dir, double signalScore)
 {
+    ENUM_POSITION_TYPE atlasDir = (dir == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+
     if(!IsAllowedToOpenPosition())
+    {
+        AtlasSetDecisionReason(atlasDir, atlasLastGlobalBlockReason);
         return;
+    }
 
     if(dir == ORDER_TYPE_BUY && !atlasBuyEnabled)
     {
+        AtlasSetDecisionReason(POSITION_TYPE_BUY, "BUY_DIRECTION_DISABLED");
         LogPrint("[ATLAS] BUY limit order blocked.");
         return;
     }
 
     if(dir == ORDER_TYPE_SELL && !atlasSellEnabled)
     {
+        AtlasSetDecisionReason(POSITION_TYPE_SELL, "SELL_DIRECTION_DISABLED");
         LogPrint("[ATLAS] SELL limit order blocked.");
         return;
     }
 
     // One working pending at a time (one entry decision per signal)
-    if(CountWorkingLimitOrders() > 0) return;
+    if(CountWorkingLimitOrders() > 0)
+    {
+        AtlasSetDecisionReason(atlasDir, "WORKING_LIMIT_EXISTS");
+        return;
+    }
 
     // Current ATR drives both the fixed depth and the cap for structural anchors
     double bufATR[];
     ArraySetAsSeries(bufATR, true);
-    if(CopyBuffer(atrSignalHandle, 0, 0, 1, bufATR) < 1) return;
+    if(CopyBuffer(atrSignalHandle, 0, 0, 1, bufATR) < 1) { AtlasSetDecisionReason(atlasDir, "ATR_UNAVAILABLE"); return; }
     double atr = bufATR[0];
-    if(atr <= 0) return;
+    if(atr <= 0) { AtlasSetDecisionReason(atlasDir, "ATR_INVALID"); return; }
 
     double entry = ComputeLimitEntryPrice(dir, atr);
-    if(entry <= 0) return;
+    if(entry <= 0) { AtlasSetDecisionReason(atlasDir, "LIMIT_PRICE_INVALID"); return; }
 
     double currentLot = CalculateDynamicLotSize(signalScore);
     double ref = (dir == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
@@ -4164,8 +5736,15 @@ void PlaceLimitEntry(ENUM_ORDER_TYPE dir, double signalScore)
             request.tp = NormalizeDouble(entry - tpPts * _Point, _Digits);
     }
 
-    if(OrderSend(request, result) && result.retcode == TRADE_RETCODE_DONE)
+    AtlasBeginOrderAttempt(dir, "LIMIT");
+    bool atlasLimitSendOk = OrderSend(request, result);
+    atlasLastOrderRetcode = (long)result.retcode;
+
+    if(atlasLimitSendOk && result.retcode == TRADE_RETCODE_DONE)
     {
+        atlasLastOrderSuccess = true;
+        atlasLastOrderTicket = result.order;
+        AtlasSetDecisionReason(atlasDir, "LIMIT_ORDER_PLACED", true);
         double depthPts = MathAbs(ref - entry) / _Point;
         LogPrint("+-----------------------------------------+");
         LogPrint("[LIMIT ENTRY PLACED] ", dir == ORDER_TYPE_BUY ? "BUY LIMIT" : "SELL LIMIT",
@@ -4177,6 +5756,7 @@ void PlaceLimitEntry(ENUM_ORDER_TYPE dir, double signalScore)
     }
     else
     {
+        AtlasSetDecisionReason(atlasDir, atlasLimitSendOk ? "LIMIT_ORDER_REJECTED" : "LIMIT_ORDER_SEND_ERROR");
         LogPrint("[LIMIT ENTRY] OrderSend failed. Retcode: ", result.retcode, " Error: ", GetLastError());
     }
 
@@ -4262,7 +5842,7 @@ void ManagePendingOrders()
         {
             bool buy = (ot == ORDER_TYPE_BUY_LIMIT);
             SignalStrength s = GetSignalStrength(buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
-            double thr = buy ? MinBuySignalScore : MinSellSignalScore;
+            double thr = buy ? atlasRuntime.minBuySignalScore : atlasRuntime.minSellSignalScore;
             if(s.finalScore < thr)
             {
                 LogPrint("[LIMIT ENTRY] Signal faded (", DoubleToString(s.finalScore, 1),
@@ -4332,7 +5912,7 @@ void CloseAllPositions(bool unProfitableOnly = false, bool skipChainLegs = false
                 if (unProfitableOnly && profit >= 0) continue;
 
                 // Leave active hedge-chain legs alone (basket stop only sweeps normal trades)
-                if(skipChainLegs && EnableHedgeChain)
+                if(skipChainLegs && atlasRuntime.enableHedgeChain)
                 {
                     int idx = GetManagedPositionIndex(ticket);
                     if(idx != -1 && managedPositions[idx].chainId != 0) continue;
@@ -4409,10 +5989,16 @@ bool ModifyPosition(ulong ticket, double newSL, double newTP)
 // Helper function to check is allowed to open position
 bool IsAllowedToOpenPosition()
 {
+    atlasLastGlobalBlockReason = "NONE";
+
     if(!atlasEnabled)
+    {
+        atlasLastGlobalBlockReason = "ATLAS_DISABLED";
         return false;
+    }
     if (targetEquityReached || minimumEquityReached || minEquityTriggersExceeded)
     {
+        atlasLastGlobalBlockReason = "EQUITY_GUARD";
         LogPrint("+-----------------------------------------+");
         LogPrint("OPEN ORDER BLOCKED!");
         LogPrint("Trading Stopped! Opening new order are not allowed!");
@@ -4422,6 +6008,7 @@ bool IsAllowedToOpenPosition()
 
     if (isPaused || isOutsideTradingHours || isLeverageDiffFromInitial)
     {
+        atlasLastGlobalBlockReason = isPaused ? "TRADING_PAUSED" : (isOutsideTradingHours ? "OUTSIDE_TRADING_HOURS" : "LEVERAGE_CHANGED");
         LogPrint("+-----------------------------------------+");
         LogPrint("OPEN ORDER BLOCKED!");
         LogPrint("Trading Paused! Opening new order are not allowed during pause period!");
@@ -4431,6 +6018,7 @@ bool IsAllowedToOpenPosition()
     
     if(isNearMarketClose)
     {
+        atlasLastGlobalBlockReason = "MARKET_CLOSE_FILTER";
         LogPrint("+-----------------------------------------+");
         LogPrint("OPEN ORDER BLOCKED!");
         LogPrint("Market closing soon! No opening new positions.");
@@ -4440,6 +6028,7 @@ bool IsAllowedToOpenPosition()
 
     if (CountLosingPositions() >= MaxHoldingLossPositions)
     {
+        atlasLastGlobalBlockReason = "MAX_HOLDING_LOSS_POSITIONS";
         LogPrint("+-----------------------------------------+");
         LogPrint("OPEN ORDER BLOCKED!");
         LogPrint("Maximum holding loss positions reached!");
@@ -4447,8 +6036,9 @@ bool IsAllowedToOpenPosition()
         return false;
     }
 
-    if (CountOpenOrders() >= MaxOpenOrders)
+    if (CountOpenOrders() >= atlasRuntime.maxOpenOrders)
     {
+        atlasLastGlobalBlockReason = "MAX_OPEN_ORDERS";
         LogPrint("+-----------------------------------------+");
         LogPrint("OPEN ORDER BLOCKED!");
         LogPrint("Maximum consecutive open order reached!");
@@ -4457,6 +6047,7 @@ bool IsAllowedToOpenPosition()
     }
 
     if (isOrderSendLocked) {
+        atlasLastGlobalBlockReason = "ORDER_SEND_LOCKED";
         LogPrint("+-----------------------------------------+");
         LogPrint("OPEN ORDER BLOCKED!");
         LogPrint("An order is still being processed!");
@@ -4466,6 +6057,7 @@ bool IsAllowedToOpenPosition()
 
     if (IsSpreadTooWide())
     {
+        atlasLastGlobalBlockReason = "SPREAD_TOO_WIDE";
         LogPrint("+-----------------------------------------+");
         LogPrint("OPEN ORDER BLOCKED!");
         LogPrint("Spread too wide for entry.");
@@ -4614,9 +6206,9 @@ int CountOpenOrdersByType(ENUM_POSITION_TYPE posType)
 //+-------------------------------------------------------------------+
 double CalculateDynamicLotSize(double signalScore = 0)
 {
-    if(!EnableDynamicLots) return BaseLotSize;
+    if(!atlasRuntime.enableDynamicLots) return atlasRuntime.baseLotSize;
     
-    double currentLot = BaseLotSize;
+    double currentLot = atlasRuntime.baseLotSize;
     double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
     
     // Calculate equity drop from peak as percentage
@@ -4649,7 +6241,7 @@ double CalculateDynamicLotSize(double signalScore = 0)
     
     // APPLY LIMITS
     // Apply user-defined limits
-    if(currentLot < BaseLotSize) currentLot = BaseLotSize;
+    if(currentLot < atlasRuntime.baseLotSize) currentLot = atlasRuntime.baseLotSize;
     if(currentLot > MaxLotSize) currentLot = MaxLotSize;
     
     // Round to 2 decimal places (standard lot step)
@@ -4720,7 +6312,7 @@ double CalculateDynamicLotSize(double signalScore = 0)
               " (Required margin: $", marginNeeded, ", Available: $", availableMargin, ")");
     }
     
-    LogPrint("Dynamic Lot Calculation: Base=", BaseLotSize, 
+    LogPrint("Dynamic Lot Calculation: Base=", atlasRuntime.baseLotSize, 
              " | Equity Drop Steps=", equitySteps, " (+", equityLotIncrease, ")",
              " | Signal Steps=", (signalScore >= MinSignalStrengthForLot ? (signalScore - MinSignalStrengthForLot) / 2 : 0),
              " | Final Lot=", currentLot);
@@ -6042,7 +7634,7 @@ void UpdateDashboard()
     currentY += lineHeight + 5;
 
     // Hedge Chain status (only when feature enabled)
-    if(EnableHedgeChain)
+    if(atlasRuntime.enableHedgeChain)
     {
         // Count distinct active chains, total chain legs, and deepest cycle in progress
         ulong dashIds[];
@@ -6083,11 +7675,11 @@ void UpdateDashboard()
     DrawDashboardLabel("NyaoDash_SigHead", "SIGNAL STRENGTH:", startX, currentY, headersize, colorHeader, true);
     currentY += lineHeight;
 
-    string reqBuyText = StringFormat("Min Buy: %.2f", MinBuySignalScore);
+    string reqBuyText = StringFormat("Min Buy: %.2f", atlasRuntime.minBuySignalScore);
     DrawDashboardLabel("NyaoDash_ReqBuy", reqBuyText, startX, currentY, detailsSize, colorText);
     currentY += lineHeight;
 
-    string reqSellText = StringFormat("Min Sell: %.2f", MinSellSignalScore);
+    string reqSellText = StringFormat("Min Sell: %.2f", atlasRuntime.minSellSignalScore);
     DrawDashboardLabel("NyaoDash_ReqSell", reqSellText, startX, currentY, detailsSize, colorText);
     currentY += lineHeight;
 
