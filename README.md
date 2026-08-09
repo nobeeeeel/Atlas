@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="atlas-logo.png" alt="Atlas — Adaptive Trading Intelligence" width="220">
+</p>
+
 # Atlas --- Adaptive Trading Intelligence
 
 **Current release:** Atlas 1.30.19 · Nyao 44.3
+
+**Documentation:** [Architecture](docs/architecture.md) · [Nyao MT5 Execution Layer](external/nyao/README.md)
 
 Atlas is an adaptive trading intelligence and risk-governance platform
 built around MetaTrader 5. Atlas performs deterministic market, capital,
