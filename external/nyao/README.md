@@ -56,6 +56,10 @@ Having an existing position is not by itself a reason to block another
 independent opportunity. Atlas reserves active risk and provides the
 remaining deterministic capacity.
 
+Likewise, a **watching but uncommitted zone** is not by itself a reason to
+suspend an aligned scalp. Zone exclusivity begins at the deterministic
+campaign commit boundary, not merely when price enters a priority zone.
+
 ## Dynamic spread and structure handling
 
 Nyao participates in Atlas's structure-aware execution-economics model.
@@ -84,7 +88,7 @@ loss.
 
 ## Concurrent risk units
 
-Nyao 44.4 is compatible with Atlas concurrent portfolio allocation.
+Nyao 44.3 is compatible with Atlas concurrent portfolio allocation.
 
 Existing exposure is represented by strategic risk units rather than a
 blanket global lock. Nyao therefore permits another qualified entry when
@@ -121,25 +125,56 @@ or upgrade, further expansion is not allowed until Atlas has established
 a finite adopted chain budget. Existing positions may still be managed
 or reduced while authority is reconciled.
 
+## Zone-aware scalping and zone campaigns
 
-## Zone-aware scalp coexistence
+Nyao 44.4 implements the Atlas zone execution-state boundary instead of
+treating every qualified zone as an immediate global scalp suspension.
 
-Nyao 44.4 distinguishes a zone that is being **watched** from a zone campaign that has been **committed**. In `ZONE_AWARE_SCALP`, ordinary scalp evaluation continues but Nyao deterministically suppresses the direction opposite the Atlas zone. The aligned direction still has to pass the normal signal, spread/structure, capital, duplicate-distance and broker-volume gates.
+### Zone-aware scalp / watching
 
-When Atlas reports the zone as execution-ready, Nyao crosses the commit boundary: new scalp entries are suspended and the zone executor owns fresh-entry authority. Existing positions continue to be managed normally.
+When Atlas identifies a qualified zone but the campaign has **not yet
+passed all commit gates**, Nyao remains on the normal scalp execution
+path with deterministic zone context.
 
-Atlas may continue applying autonomous Gemini/Nyao scalp-policy updates while a zone is only being watched. Once a committed campaign is acknowledged, new policy activation is deferred until the campaign releases execution authority so that the runtime does not drift underneath an active campaign.
+For a SELL zone:
 
-## Zone campaigns
+- SELL-aligned scalps may continue through normal Nyao signal,
+  execution-economics, duplicate, cooldown, broker and capital gates.
+- BUY scalps are blocked as counter-directional zone exposure.
 
-Zone entries carry immutable Atlas zone-plan lineage so multiple layers
-can be reconstructed as one strategic campaign.
+For a BUY zone, the directional rule is reversed.
 
-Nyao may execute and manage zone layers when Atlas zone authority,
-confirmation, capital and broker feasibility agree. The existence of
-unrelated exposure no longer creates an automatic zone lock when
-portfolio capacity remains.
+The presence of a watching zone does not lower scalp thresholds or
+override scalp transaction-cost feasibility.
 
+### Zone campaign commit
+
+Atlas requests exclusive zone execution only when the campaign has passed
+its deterministic commit gates, including:
+
+- zone confirmation;
+- required directional evidence;
+- adaptive zone execution economics;
+- broker feasibility;
+- Atlas capital authority.
+
+At that boundary, Nyao suspends conflicting fresh scalps and executes the
+zone campaign under the immutable Atlas plan identity.
+
+### Prospective zone headroom
+
+Atlas may reduce the risk authority of an aligned scalp while a zone is
+watching so the prospective zone campaign retains enough operating
+headroom to commit on the next decision cycle. Nyao treats that reduced
+scalp authority as final and does not substitute unused margin for the
+reserved Atlas capacity.
+
+### Adaptive zone execution economics
+
+The direct legacy ATR spread veto is not authoritative for zone
+campaigns. Atlas supplies bounded dynamic stop/target spread ratios based
+on campaign geometry and quality. ATR remains context. Nyao enforces the
+Atlas-supplied execution economics at the live execution tick.
 ## Outcome telemetry
 
 Nyao exposes sufficient MT5 history for Atlas to reconstruct
@@ -152,15 +187,24 @@ be reconstructed from MT5 history rather than silently omitted.
 
 ## Runtime policy
 
-Atlas can control permitted Nyao runtime parameters through the
+Atlas controls permitted Nyao runtime parameters through the
 command/policy bridge. Applied command versions and policy epochs are
 acknowledged back to Atlas so outcomes can be attributed to the policy
 that existed at entry.
 
-Gemini may reason about or propose permitted policy changes through
-Atlas, but Nyao must continue to enforce Atlas deterministic risk and
-broker constraints regardless of AI output.
+While Atlas is in **zone-aware scalp / watching** mode, normal scheduled or
+autonomous Gemini policy updates may continue because no zone campaign has
+yet committed execution authority. Gemini receives the active zone as
+read-only scalp context through Atlas.
 
+Once a zone campaign crosses the deterministic commit boundary, new policy
+activation is deferred until the campaign reaches a clean mode boundary.
+Gemini may continue analysing and producing candidates, but Nyao does not
+accept mid-campaign policy drift for the committed campaign.
+
+Gemini may reason about or propose permitted policy changes through Atlas,
+but Nyao must continue to enforce Atlas deterministic risk, zone authority
+and broker constraints regardless of AI output.
 ## Operational checks
 
 Before relying on live execution, verify: - MT5 terminal is connected; -
@@ -180,4 +224,4 @@ rather than historical development phases.
 
 ## Adaptive zone cost ratios
 
-Atlas 1.30.21 supplies dynamic zone stop/target cost ratios and sets the legacy direct zone ATR spread ratio to zero. Nyao 44.4 interprets a zero ATR ratio as disabled and continues to perform its final live bid/ask check against the supplied stop/target ratios. **Nyao 44.4 must be recompiled for the zone-aware scalp coexistence state introduced in this release.**
+Atlas 1.30.20 supplies dynamic zone stop/target cost ratios and sets the legacy direct zone ATR spread ratio to zero. Nyao 44.3 already interprets a zero ATR ratio as disabled and continues to perform its final live bid/ask check against the supplied stop/target ratios, so no MQL recompilation is required for this Atlas-side economics upgrade.

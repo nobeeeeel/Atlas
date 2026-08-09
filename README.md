@@ -62,6 +62,15 @@ Atlas can allocate a bounded share of the current operating envelope to a qualif
 ### Adaptive zone execution economics
 Zone campaigns use campaign-aware transaction-cost economics. The legacy direct `ATR × fixed ratio` veto is disabled in the Nyao directive; ATR remains market context while bounded dynamic stop/target cost ratios are derived from zone quality, confirmation progress and campaign reward/risk geometry.
 
+### Zone-aware execution lanes
+
+Atlas separates **zone context** from **zone commitment**. A detected but
+uncommitted zone informs scalping instead of automatically freezing it.
+Only a fully qualified campaign receives exclusive fresh-entry priority.
+
+This makes the execution engine opportunity-efficient without weakening
+the zone campaign's deterministic authority.
+
 ### Concurrent portfolio risk allocation
 
 Existing positions no longer create a blanket account-wide exposure
@@ -106,29 +115,60 @@ exits when available. It tracks exact realised P/L, reconstructs trades
 that occur between polls, preserves policy attribution and maintains
 immutable lineage for recovery and zone campaigns.
 
-
-### Zone-aware scalp coexistence
-A detected zone owns **context before execution**. While a qualified campaign is still waiting for confirmation or acceptable execution economics, Atlas keeps a `ZONE_AWARE_SCALP` lane open instead of idling the symbol. Scalp entries are constrained to the zone-aligned direction, keep their normal score/cost/risk gates, and are clipped when necessary to preserve prospective campaign headroom. Once every deterministic zone commit gate passes, Atlas atomically suspends new scalps and transfers fresh-entry authority to the zone campaign.
-
-Gemini receives the same zone state as read-only scalp context. Autonomous Nyao policy updates may continue while the zone is only being watched; new policy activation is deferred once the campaign crosses the commit boundary and remains deferred until campaign authority is released.
-
 ### Zone campaigns
 
 Atlas maintains deterministic higher-timeframe zone context and can
-execute layered zone campaigns when geometry, confirmation, capital and
-broker feasibility agree. When a full zone campaign does not own
-execution, qualified zone context may still inform normal scalping
-according to the active authority rules.
+execute layered zone campaigns when geometry, confirmation, capital,
+execution economics and broker feasibility agree.
 
+Zone ownership is now stateful rather than binary:
+
+- **Normal scalp** — no priority zone owns context.
+- **Zone-aware scalp / watching** — a qualified zone exists, but the
+  campaign is not yet ready to commit. Aligned scalps may continue through
+  their normal signal, structure, cost and capital gates while the zone
+  remains deterministic context.
+- **Zone campaign committed** — confirmation, directional evidence,
+  spread economics, broker feasibility and capital authority all pass.
+  Atlas atomically gives the campaign execution priority and suspends
+  conflicting fresh scalps.
+
+For a SELL zone in the watching state, SELL-aligned scalps may continue
+while counter-direction BUY scalps are deterministically blocked. The
+inverse applies to a BUY zone.
+
+Atlas also protects **prospective zone headroom** while a campaign is
+watching. A scalp may be clipped when necessary so it cannot consume the
+capital a higher-priority zone would need if it becomes executable on the
+next decision cycle.
+
+This allows Atlas to avoid wasting valid scalp opportunities while still
+preserving the higher-timeframe zone thesis and campaign priority.
 ### Atlas Brain / Gemini
 
 Gemini can reason about market context, performance evidence and Nyao
 policy parameters, but deterministic safety remains Atlas-owned.
 
-Gemini cannot override: - operator portfolio risk appetite; - Atlas
-capital sizing; - broker feasibility; - recovery-chain ceilings; -
-deterministic zone geometry; - hard execution and risk governors.
+Zone information is part of Gemini's scalp-policy context. While Atlas is
+in **zone-aware scalp / watching** mode, Gemini continues scheduled or
+autonomous policy analysis with the active zone side, timeframe, quality,
+higher-timeframe structure, price location and campaign feasibility
+available as read-only context.
 
+When Atlas crosses the deterministic **zone commit boundary**, new policy
+activation is deferred until the campaign reaches a clean boundary.
+Gemini may continue analysing evidence and producing candidates, but an
+active committed campaign is not allowed to experience mid-campaign
+runtime-policy drift.
+
+Gemini cannot override:
+
+- operator portfolio risk appetite;
+- Atlas capital sizing and prospective zone headroom;
+- broker feasibility;
+- recovery-chain ceilings;
+- deterministic zone geometry or commit authority;
+- hard execution and risk governors.
 ## Runtime architecture
 
 ``` text
