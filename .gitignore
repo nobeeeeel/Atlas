@@ -1,11 +1,31 @@
-__pycache__/
-
+# Secrets and local configuration
 .env
+.env.*
+!.env.example
 
+# Python environments and generated files
+.venv/
 venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
+# Atlas runtime state and local evidence
+data/
+runtime/
+logs/
+*.log
+
+# MT5/local terminal artifacts
+external/nyao/settings.dat
+*.dxvk-cache
+
+# Editors and operating systems
 .idea/
-
 .vscode/
-
-*.pyc
+.DS_Store
+Thumbs.db

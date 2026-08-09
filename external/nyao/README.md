@@ -277,3 +277,49 @@ Results in the Strategy Tester only mean something if the test mirrors live cond
 **Repository**: [https://github.com/elrizwiraswara/nyao_scalper_mt5](https://github.com/elrizwiraswara/nyao_scalper_mt5)
 
 > **Disclaimer:** I do not sell or commercialize this EA under my name. If you encounter anyone selling it claiming to represent me, please treat it as a scam and report it.
+
+## Atlas integration
+
+This directory is Atlas's canonical Nyao source and deployment bundle. Atlas's
+version adds symbol-scoped bridge telemetry, runtime policy controls, authoritative
+MT5 exit-deal reporting, and zone-execution support. Integration behavior and API
+contracts are documented in the Atlas root README and architecture document.
+
+---
+
+## Atlas-integrated Nyao 44.3
+
+The canonical EA bundled with the current Atlas repository is **Nyao 44.3**. The upstream strategy documentation above remains useful for understanding the EA's native controls, but when Nyao runs under Atlas its execution is additionally governed by Atlas command, policy, capital, lineage, and composite-risk authority.
+
+### Atlas/Nyao execution boundary
+
+Nyao remains the final MT5/broker execution authority: it observes the broker contract, calculates executable volume and stop risk, manages positions, and writes live telemetry. Atlas supplies deterministic strategy/risk authority and may veto or reduce new risk before `OrderSend`.
+
+Current integrated behavior includes:
+
+- **Structure-aware spread economics (P3.29):** a symbol is not rejected merely because spread exceeds a fixed point threshold. Nyao/Atlas evaluate whether the spread can be economically supported by the planned stop/target and current volatility without absurd stop expansion.
+- **Immutable recovery lineage:** new hedge children carry chain identity in entry telemetry/comment metadata so Atlas can reconstruct a recovery unit after restart or history reconciliation.
+- **Composite losing-risk-unit counting:** Nyao 44.3 counts a recovery chain as one strategic losing unit using the chain's combined state instead of counting every hedge leg as an independent losing position.
+- **Frozen recovery authority:** additional recovery legs must remain inside the chain budget granted by Atlas. A recovery chain cannot consume otherwise-unallocated portfolio capacity.
+- **Concurrent fresh-risk support:** the existence of another Atlas position no longer implies a global fresh-entry lock. Nyao receives Atlas's current capital decision and can execute another qualified opportunity when portfolio capacity and all execution gates permit it.
+- **Broker minimum remains authoritative:** if Atlas's safe mathematical size is below the broker's executable minimum, Nyao must not round risk upward merely to force a trade.
+
+### Current paired release
+
+```text
+Atlas                  1.30.19
+Nyao                   44.3
+Capital engine         atlas-capital-regime-v2.0
+Portfolio allocator    atlas-concurrent-risk-allocation-v1
+Recovery risk engine   nyao-recovery-risk-v2
+```
+
+### Risk semantics under Atlas
+
+The operator-configurable Atlas portfolio ceiling (1–20%) is an **aggregate hard ceiling**, not Nyao's per-trade risk. Nyao must continue to obey the smaller per-opportunity sizing authority supplied by Atlas and the actual broker stop-loss calculation. Atlas may reduce its operating envelope at any time because of drawdown, loss protection, volatility, market risk, concentration, unresolved recovery authority, or capacity exhaustion.
+
+### Compilation and deployment
+
+When `external/nyao/nyao_scalper.mq5` changes, compile it successfully in MetaEditor before replacing the retained `nyao_scalper.ex5`. Atlas-only dashboard/API/capital-policy changes do not require an EA recompile unless the MQ5 bridge or execution logic also changed.
+
+For the current release, Nyao **44.3** is the expected EA version paired with Atlas **1.30.19**.

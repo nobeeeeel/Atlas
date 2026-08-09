@@ -148,6 +148,21 @@ def _signature(status: dict[str, Any], intelligence: dict[str, Any]) -> dict[str
         "spread_within_limit": status.get("spread_within_limit"),
         "buy_block_reason": status.get("buy_block_reason"),
         "sell_block_reason": status.get("sell_block_reason"),
+        "duplicate_filter_enabled": status.get(
+            "runtime_enable_duplicate_distance_filter"
+        ),
+        "buy_duplicate_blocked": status.get(
+            "buy_duplicate_blocked"
+        ),
+        "sell_duplicate_blocked": status.get(
+            "sell_duplicate_blocked"
+        ),
+        "buy_duplicate_reference_ticket": status.get(
+            "buy_duplicate_reference_ticket"
+        ),
+        "sell_duplicate_reference_ticket": status.get(
+            "sell_duplicate_reference_ticket"
+        ),
     }
 
 
@@ -186,6 +201,48 @@ def _build_record(
             "current_atr": status.get("current_atr"),
             "average_atr": status.get("average_atr"),
             "volatility_ratio": status.get("volatility_ratio"),
+        },
+        "duplicate_distance": {
+            "enabled": status.get(
+                "runtime_enable_duplicate_distance_filter"
+            ),
+            "zone_points": status.get("runtime_zone_points"),
+            "buy_multiplier": status.get(
+                "runtime_buy_duplicate_multiplier"
+            ),
+            "sell_multiplier": status.get(
+                "runtime_sell_duplicate_multiplier"
+            ),
+            "buy_reference_active": status.get(
+                "buy_duplicate_reference_active"
+            ),
+            "sell_reference_active": status.get(
+                "sell_duplicate_reference_active"
+            ),
+            "buy_blocked": status.get(
+                "buy_duplicate_blocked"
+            ),
+            "sell_blocked": status.get(
+                "sell_duplicate_blocked"
+            ),
+            "buy_reference_ticket": status.get(
+                "buy_duplicate_reference_ticket"
+            ),
+            "sell_reference_ticket": status.get(
+                "sell_duplicate_reference_ticket"
+            ),
+            "buy_distance_points": status.get(
+                "buy_duplicate_distance_points"
+            ),
+            "sell_distance_points": status.get(
+                "sell_duplicate_distance_points"
+            ),
+            "buy_required_distance_points": status.get(
+                "buy_duplicate_required_distance_points"
+            ),
+            "sell_required_distance_points": status.get(
+                "sell_duplicate_required_distance_points"
+            ),
         },
         "account": {
             "balance": status.get("balance"),

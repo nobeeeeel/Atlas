@@ -1,29 +1,270 @@
 from datetime import datetime, timezone
+import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field, ValidationError
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from backend.app.bridge.protocol import COMMANDS_FILE, STATUS_FILE
 from backend.app.bridge.reader import read_json
 from backend.app.bridge.schemas import Command, Status
 from backend.app.bridge.writer import write_json
+from backend.app.intelligence.symbol_namespace import (
+    discover_bridge_symbols,
+    resolve_default_symbol,
+    safe_symbol,
+    scoped_symbol_storage,
+    symbol_bridge_paths,
+)
+from backend.app.intelligence.account_identity import (
+    account_identity,
+    scoped_account_performance,
+)
 from backend.app.intelligence.advisor import generate_advice
+from backend.app.intelligence.analytics import analyze_history
+from backend.app.intelligence.outcome_analytics import (
+    analyze_trade_outcomes,
+    evaluate_policy_performance,
+)
+from backend.app.intelligence.recovery_attribution import analyze_recovery_chains
+from backend.app.intelligence.risk_units import build_risk_units
+from backend.app.intelligence.recovery_risk import build_recovery_risk_ledger
+from backend.app.intelligence.shadow_policy import (
+    build_shadow_policy,
+    get_shadow_history,
+    record_shadow_policy,
+)
+from backend.app.intelligence.shadow_evaluation import evaluate_shadow_policies
+from backend.app.intelligence.shadow_replay import run_shadow_replay
+from backend.app.intelligence.policy_epoch import get_policy_epoch_registry
+from backend.app.intelligence.position_policy_resolver import build_position_management_policy_diagnostics
+from backend.app.intelligence.shadow_epoch_divergence import (
+    build_shadow_epoch_divergence,
+    coerce_shadow_test_value,
+)
+from backend.app.intelligence.policy_decision_engine import (
+    build_policy_decision,
+    get_policy_decision_history,
+    get_policy_decision_stability,
+    record_policy_decision,
+)
+from backend.app.intelligence.advisory_policy_proposal import (
+    build_advisory_policy_proposal,
+    build_llm_policy_advisory_proposal,
+    get_all_advisory_policy_proposals,
+    get_advisory_policy_proposal,
+    get_advisory_policy_proposals,
+    llm_advisory_context_status,
+    persist_advisory_policy_proposal,
+)
+from backend.app.intelligence.advisory_review_workflow import (
+    ReviewWorkflowError,
+    approve_proposal,
+    get_proposal_review_status,
+    get_review_events,
+    reconcile_advisory_review_state,
+    reject_proposal,
+    request_human_review,
+    verify_review_event_chain,
+)
+from backend.app.intelligence.supervised_command_proposal import (
+    SupervisedCommandBuildError,
+    build_supervised_command_proposal,
+    get_supervised_command_proposal,
+    get_supervised_command_proposals,
+)
+from backend.app.intelligence.supervised_execution_gate import (
+    SupervisedExecutionError,
+    execute_supervised_command,
+    get_execution_events,
+    preflight_supervised_execution,
+    verify_execution_event_chain,
+    get_execution_arm_state,
+    arm_supervised_execution,
+    disarm_supervised_execution,
+)
+from backend.app.intelligence.nyao_execution_confirmation import (
+    NyaoAckError,
+    evaluate_nyao_ack,
+    find_latest_execution_id,
+)
+from backend.app.intelligence.execution_recovery_diagnostics import (
+    build_execution_recovery_diagnostics,
+)
+from backend.app.intelligence.outcomes import (
+    get_outcome_summary,
+    get_trade_outcomes,
+    track_trade_outcomes,
+)
 from backend.app.intelligence.history import (
     get_history,
     get_history_summary,
     record_intelligence_snapshot,
 )
+from backend.app.intelligence.parameter_registry import (
+    all_parameters,
+    get_parameter,
+    registry_summary,
+)
+from backend.app.intelligence.parameter_intelligence import (
+    build_parameter_intelligence,
+)
+from backend.app.intelligence.parameter_evidence import (
+    build_parameter_evidence,
+)
+from backend.app.intelligence.scalping_responsiveness import (
+    analyze_scalping_responsiveness,
+)
+from backend.app.intelligence.market_candles import (
+    build_market_candle_report,
+    load_market_candle_export,
+)
+from backend.app.intelligence.zone_engine import build_zone_map
+from backend.app.intelligence.zone_execution_plan import (
+    build_zone_execution_plan,
+    persist_zone_execution_directive,
+)
+from backend.app.intelligence.zone_policy import (
+    ZonePolicy,
+    apply_zone_policy,
+    get_zone_policy,
+)
+from backend.app.intelligence.capital_sizing import build_capital_sizing_plan
+from backend.app.intelligence.risk_appetite import get_risk_appetite, update_risk_appetite
+from backend.app.intelligence.autonomous_policy import (
+    apply_autonomous_llm_policy,
+    apply_pending_autonomous_policy,
+    apply_ready_loss_protection_consensus,
+    get_autonomous_policy_events,
+    get_pending_autonomous_policy,
+    get_autonomous_policy_consensus,
+)
+from backend.app.intelligence.llm_cycle_scheduler import (
+    claim_llm_cycle,
+    complete_llm_cycle,
+    get_llm_cycle_schedule,
+    recover_interrupted_llm_cycle,
+    update_llm_cycle_schedule,
+)
+from backend.app.agents.llm_provider import (
+    build_configured_provider,
+    configured_llm_status,
+    LlmProviderError,
+)
+from backend.app.agents.llm_review import run_analyst_critic_review
+from backend.app.agents.policy_proposal import (
+    build_atlas_prior_analysis,
+    build_policy_input,
+    run_policy_proposal,
+)
 
 
 app = FastAPI(
     title="Atlas",
-    version="0.5.0",
+    version="1.30.19",
 )
 
+
+class AdvisoryReviewActionRequest(BaseModel):
+    reviewer: str = Field(default="human_operator", min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=2000)
+    expected_runtime_fingerprint: str = Field(min_length=1, max_length=128)
+    expected_proposed_policy_epoch: int = Field(ge=0)
+
+
+class SupervisedCommandBuildRequest(BaseModel):
+    reviewer: str = Field(default="human_operator", min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=2000)
+    expected_runtime_fingerprint: str = Field(min_length=1, max_length=128)
+    expected_proposed_policy_epoch: int = Field(ge=0)
+    expected_review_snapshot_hash: str = Field(min_length=1, max_length=128)
+
+
+class SupervisedExecutionArmRequest(BaseModel):
+    actor: str = Field(default="human_operator", min_length=1, max_length=120)
+    confirmation_phrase: str = Field(min_length=1, max_length=128)
+    minutes: int = Field(default=30, ge=1, le=120)
+
+
+class SupervisedExecutionDisarmRequest(BaseModel):
+    actor: str = Field(default="human_operator", min_length=1, max_length=120)
+
+
+class SupervisedExecutionRequest(BaseModel):
+    actor: str = Field(default="human_operator", min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=2000)
+    confirmation_phrase: str = Field(min_length=1, max_length=128)
+    allow_test_override_execution: bool = False
+    expected_source_proposal_id: str = Field(min_length=1, max_length=128)
+    expected_runtime_fingerprint: str = Field(min_length=1, max_length=128)
+    expected_target_policy_epoch: int = Field(ge=0)
+    expected_review_snapshot_hash: str = Field(min_length=1, max_length=128)
+    expected_baseline_command_version: int = Field(ge=0)
+    expected_baseline_policy_epoch: int = Field(ge=0)
+
+
+class LlmReviewRequest(BaseModel):
+    run_critic: bool = True
+
+
+class LlmCycleScheduleRequest(BaseModel):
+    enabled: bool
+    interval_minutes: int = Field(default=240, ge=15, le=1440)
+    execution_mode: str = Field(default="SUPERVISED", pattern="^(SUPERVISED|AUTONOMOUS)$")
+    minimum_dwell_minutes: int = Field(default=240, ge=30, le=1440)
+    minimum_confidence: float = Field(default=70.0, ge=0.0, le=100.0)
+
+
+class ZonePolicyUpdateRequest(BaseModel):
+    policy: ZonePolicy
+    expected_current_epoch: int = Field(ge=1)
+    source: str = Field(default="ATLAS_OPERATOR", min_length=1, max_length=120)
+
+
+class RiskAppetiteUpdateRequest(BaseModel):
+    portfolio_hard_risk_pct: float = Field(ge=1.0, le=20.0)
+    actor: str = Field(default="human_operator", min_length=1, max_length=120)
+
+
+def _raise_review_workflow_error(exc: ReviewWorkflowError) -> None:
+    raise HTTPException(
+        status_code=exc.http_status,
+        detail=exc.as_detail(),
+    ) from exc
+
+
+def _raise_supervised_command_build_error(
+    exc: SupervisedCommandBuildError,
+) -> None:
+    raise HTTPException(
+        status_code=exc.http_status,
+        detail=exc.as_detail(),
+    ) from exc
+
+
+def _raise_supervised_execution_error(
+    exc: SupervisedExecutionError,
+) -> None:
+    raise HTTPException(
+        status_code=exc.http_status,
+        detail=exc.as_detail(),
+    ) from exc
+
+
+def _raise_nyao_ack_error(exc: NyaoAckError) -> None:
+    raise HTTPException(
+        status_code=exc.http_status,
+        detail=exc.as_detail(),
+    ) from exc
+
 RUNTIME_CONTROL_GROUPS = json.loads(
-    r'''[{"name":"Entry / execution","controls":[{"name":"enable_buy_orders","mql_type":"bool","default":"true","status_key":"runtime_enable_buy_orders","label":"Enable Buy Orders","kind":"bool"},{"name":"enable_sell_orders","mql_type":"bool","default":"true","status_key":"runtime_enable_sell_orders","label":"Enable Sell Orders","kind":"bool"},{"name":"enable_new_bar_entry_only","mql_type":"bool","default":"true","status_key":"runtime_enable_new_bar_entry_only","label":"Enable New Bar Entry Only","kind":"bool"},{"name":"enable_max_spread_filter","mql_type":"bool","default":"true","status_key":"runtime_enable_max_spread_filter","label":"Enable Max Spread Filter","kind":"bool"},{"name":"max_spread_points","mql_type":"double","default":"0","status_key":"runtime_max_spread_points","label":"Max Spread Points","kind":"number","min":0,"max":100000,"step":1},{"name":"max_spread_atr_ratio","mql_type":"double","default":"0.25","status_key":"runtime_max_spread_atr_ratio","label":"Max Spread ATR Ratio","kind":"number","min":0,"max":10,"step":0.01},{"name":"base_lot_size","mql_type":"double","default":"0.01","status_key":"runtime_base_lot_size","label":"Base Lot Size","kind":"number","min":0.01,"max":5,"step":0.01},{"name":"max_open_orders","mql_type":"int","default":"8","status_key":"runtime_max_open_orders","label":"Max Open Orders","kind":"number","min":1,"max":50,"step":1},{"name":"max_trades_per_candle","mql_type":"int","default":"1","status_key":"runtime_max_trades_per_candle","label":"Max Trades Per Candle","kind":"number","min":0,"max":20,"step":1},{"name":"consecutive_candle_threshold_boost","mql_type":"double","default":"1.0","status_key":"runtime_consecutive_candle_threshold_boost","label":"Consecutive Candle Threshold Boost","kind":"number","min":0,"max":10,"step":0.1},{"name":"max_consecutive_candle_boosts","mql_type":"int","default":"3","status_key":"runtime_max_consecutive_candle_boosts","label":"Max Consecutive Candle Boosts","kind":"number","min":0,"max":100,"step":1},{"name":"zone_points","mql_type":"double","default":"500","status_key":"runtime_zone_points","label":"Zone Points","kind":"number","min":0,"max":1000000,"step":1},{"name":"buy_duplicate_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_buy_duplicate_multiplier","label":"Buy Duplicate Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"sell_duplicate_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_sell_duplicate_multiplier","label":"Sell Duplicate Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"min_break_even_profit","mql_type":"double","default":"0.5","status_key":"runtime_min_break_even_profit","label":"Min Break Even Profit","kind":"number","min":0,"max":1000000,"step":0.1},{"name":"profit_threshold_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_profit_threshold_multiplier","label":"Profit Threshold Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"loss_threshold_multiplier","mql_type":"double","default":"2.0","status_key":"runtime_loss_threshold_multiplier","label":"Loss Threshold Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"min_buy_signal_score","mql_type":"double","default":"4.5","status_key":"runtime_min_buy_signal_score","label":"Min Buy Signal Score","kind":"number","min":0,"max":10,"step":0.1},{"name":"min_sell_signal_score","mql_type":"double","default":"4.5","status_key":"runtime_min_sell_signal_score","label":"Min Sell Signal Score","kind":"number","min":0,"max":10,"step":0.1}],"description":"Controls when fresh positions may open, order frequency, spread gating, lot size and duplicate-entry protection.","danger":false},{"name":"Signal / indicator behavior","controls":[{"name":"directional_body_lookback","mql_type":"int","default":"10","status_key":"runtime_directional_body_lookback","label":"Directional Body Lookback","kind":"number","min":1,"max":500,"step":1},{"name":"ema_fast_period","mql_type":"int","default":"5","status_key":"runtime_ema_fast_period","label":"EMA Fast Period","kind":"number","min":1,"max":500,"step":1},{"name":"ema_slow_period","mql_type":"int","default":"12","status_key":"runtime_ema_slow_period","label":"EMA Slow Period","kind":"number","min":1,"max":500,"step":1},{"name":"slope_lookback","mql_type":"int","default":"3","status_key":"runtime_slope_lookback","label":"Slope Lookback","kind":"number","min":1,"max":100,"step":1},{"name":"rsi_period","mql_type":"int","default":"8","status_key":"runtime_rsi_period","label":"RSI Period","kind":"number","min":2,"max":500,"step":1},{"name":"atr_period","mql_type":"int","default":"8","status_key":"runtime_atr_period","label":"ATR Period","kind":"number","min":1,"max":500,"step":1},{"name":"atr_avg_lookback","mql_type":"int","default":"10","status_key":"runtime_atr_avg_lookback","label":"ATR Avg Lookback","kind":"number","min":1,"max":500,"step":1},{"name":"min_vol_ratio_to_trade","mql_type":"double","default":"0.6","status_key":"runtime_min_vol_ratio_to_trade","label":"Min Vol Ratio To Trade","kind":"number","min":0,"max":10,"step":0.01},{"name":"impulse_lookback","mql_type":"int","default":"3","status_key":"runtime_impulse_lookback","label":"Impulse Lookback","kind":"number","min":1,"max":100,"step":1},{"name":"impulse_boost_weight","mql_type":"double","default":"1.0","status_key":"runtime_impulse_boost_weight","label":"Impulse Boost Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"signal_smoothing_candles","mql_type":"int","default":"2","status_key":"runtime_signal_smoothing_candles","label":"Signal Smoothing Candles","kind":"number","min":1,"max":10,"step":1},{"name":"current_candle_blend","mql_type":"double","default":"0.40","status_key":"runtime_current_candle_blend","label":"Current Candle Blend","kind":"number","min":0,"max":1,"step":0.01},{"name":"velocity_window","mql_type":"double","default":"2.0","status_key":"runtime_velocity_window","label":"Velocity Window","kind":"number","min":0.0001,"max":100,"step":0.1},{"name":"rsi_overbought","mql_type":"int","default":"80","status_key":"runtime_rsi_overbought","label":"RSI Overbought","kind":"number","min":0,"max":100,"step":1},{"name":"rsi_oversold","mql_type":"int","default":"20","status_key":"runtime_rsi_oversold","label":"RSI Oversold","kind":"number","min":0,"max":100,"step":1},{"name":"rsi_momentum_buy","mql_type":"int","default":"60","status_key":"runtime_rsi_momentum_buy","label":"RSI Momentum Buy","kind":"number","min":0,"max":100,"step":1},{"name":"rsi_momentum_sell","mql_type":"int","default":"40","status_key":"runtime_rsi_momentum_sell","label":"RSI Momentum Sell","kind":"number","min":0,"max":100,"step":1}],"description":"Controls indicator periods, smoothing, volatility gating and RSI behavior. EMA/RSI/ATR period changes trigger controlled indicator-handle rebuilds in Nyao.","danger":false},{"name":"Score weights","controls":[{"name":"trend_weight","mql_type":"double","default":"1.5","status_key":"runtime_trend_weight","label":"Trend Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"slope_weight","mql_type":"double","default":"1.5","status_key":"runtime_slope_weight","label":"Slope Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"momentum_base_weight","mql_type":"double","default":"1.0","status_key":"runtime_momentum_base_weight","label":"Momentum Base Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"momentum_trigger_weight","mql_type":"double","default":"0.5","status_key":"runtime_momentum_trigger_weight","label":"Momentum Trigger Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"body_momentum_weight","mql_type":"double","default":"1.5","status_key":"runtime_body_momentum_weight","label":"Body Momentum Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"chop_score_high","mql_type":"double","default":"2.0","status_key":"runtime_chop_score_high","label":"Chop Score High","kind":"number","min":0,"max":10,"step":0.1},{"name":"chop_score_med","mql_type":"double","default":"1.0","status_key":"runtime_chop_score_med","label":"Chop Score Med","kind":"number","min":0,"max":10,"step":0.1},{"name":"chop_score_low","mql_type":"double","default":"0.0","status_key":"runtime_chop_score_low","label":"Chop Score Low","kind":"number","min":0,"max":10,"step":0.1},{"name":"volatility_score_high","mql_type":"double","default":"1.0","status_key":"runtime_volatility_score_high","label":"Volatility Score High","kind":"number","min":0,"max":10,"step":0.1},{"name":"volatility_score_low","mql_type":"double","default":"0.0","status_key":"runtime_volatility_score_low","label":"Volatility Score Low","kind":"number","min":0,"max":10,"step":0.1},{"name":"peak_score_weight","mql_type":"double","default":"1.0","status_key":"runtime_peak_score_weight","label":"Peak Score Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"wick_rejection_weight","mql_type":"double","default":"1.0","status_key":"runtime_wick_rejection_weight","label":"Wick Rejection Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"min_body_ratio","mql_type":"double","default":"1.5","status_key":"runtime_min_body_ratio","label":"Min Body Ratio","kind":"number","min":0,"max":100,"step":0.1}],"description":"Changes how Nyao composes its signal score. Use carefully: these directly change what qualifies as a strong signal.","danger":false},{"name":"Limit entry","controls":[{"name":"enable_limit_entry","mql_type":"bool","default":"false","status_key":"runtime_enable_limit_entry","label":"Enable Limit Entry","kind":"bool"},{"name":"limit_entry_anchor","mql_type":"ENUM_LIMIT_ANCHOR","default":"LIMIT_ANCHOR_FIXED_ATR","status_key":"runtime_limit_entry_anchor","label":"Limit Entry Anchor","kind":"select","options":[{"value":0,"label":"Fixed ATR"},{"value":1,"label":"Swing"},{"value":2,"label":"EMA"},{"value":3,"label":"Smart"}]},{"name":"limit_entry_atr_fraction","mql_type":"double","default":"0.25","status_key":"runtime_limit_entry_atr_fraction","label":"Limit Entry ATR Fraction","kind":"number","min":0,"max":10,"step":0.01},{"name":"limit_entry_expiry_bars","mql_type":"int","default":"1","status_key":"runtime_limit_entry_expiry_bars","label":"Limit Entry Expiry Bars","kind":"number","min":0,"max":1000,"step":1},{"name":"limit_entry_cancel_on_flip","mql_type":"bool","default":"true","status_key":"runtime_limit_entry_cancel_on_flip","label":"Limit Entry Cancel On Flip","kind":"bool"}],"description":"Controls whether fresh entries use pending pullback orders instead of immediate market orders.","danger":false},{"name":"Signal dampening","controls":[{"name":"enable_signal_dampening","mql_type":"bool","default":"true","status_key":"runtime_enable_signal_dampening","label":"Enable Signal Dampening","kind":"bool"},{"name":"max_losing_positions_same_dir","mql_type":"int","default":"2","status_key":"runtime_max_losing_positions_same_dir","label":"Max Losing Positions Same Dir","kind":"number","min":0,"max":50,"step":1},{"name":"losing_pos_score_penalty","mql_type":"double","default":"1.5","status_key":"runtime_losing_pos_score_penalty","label":"Losing Pos Score Penalty","kind":"number","min":0,"max":10,"step":0.1},{"name":"drawdown_threshold_pct","mql_type":"double","default":"3.0","status_key":"runtime_drawdown_threshold_pct","label":"Drawdown Threshold %","kind":"number","min":0,"max":100,"step":0.1},{"name":"drawdown_score_boost","mql_type":"double","default":"2.0","status_key":"runtime_drawdown_score_boost","label":"Drawdown Score Boost","kind":"number","min":0,"max":10,"step":0.1},{"name":"consecutive_losses_before_cooldown","mql_type":"int","default":"3","status_key":"runtime_consecutive_losses_before_cooldown","label":"Consecutive Losses Before Cooldown","kind":"number","min":0,"max":100,"step":1},{"name":"consecutive_loss_cooldown_bars","mql_type":"int","default":"3","status_key":"runtime_consecutive_loss_cooldown_bars","label":"Consecutive Loss Cooldown Bars","kind":"number","min":0,"max":1000,"step":1}],"description":"Reduces repeated entries during drawdown, losing-position clusters and consecutive-loss periods.","danger":false},{"name":"Loss / health management","controls":[{"name":"enable_loss_management","mql_type":"bool","default":"true","status_key":"runtime_enable_loss_management","label":"Enable Loss Management","kind":"bool"},{"name":"max_holding_loss_positions","mql_type":"int","default":"2","status_key":"runtime_max_holding_loss_positions","label":"Max Holding Loss Positions","kind":"number","min":0,"max":50,"step":1},{"name":"min_health_score","mql_type":"double","default":"0.40","status_key":"runtime_min_health_score","label":"Min Health Score","kind":"number","min":0,"max":1,"step":0.01},{"name":"max_adverse_atr","mql_type":"double","default":"1.5","status_key":"runtime_max_adverse_atr","label":"Max Adverse ATR","kind":"number","min":0,"max":100,"step":0.1},{"name":"health_trend_weight","mql_type":"double","default":"0.40","status_key":"runtime_health_trend_weight","label":"Health Trend Weight","kind":"number","min":0,"max":100,"step":0.01},{"name":"health_rsi_weight","mql_type":"double","default":"0.25","status_key":"runtime_health_rsi_weight","label":"Health RSI Weight","kind":"number","min":0,"max":100,"step":0.01},{"name":"health_atr_weight","mql_type":"double","default":"0.25","status_key":"runtime_health_atr_weight","label":"Health ATR Weight","kind":"number","min":0,"max":100,"step":0.01},{"name":"health_swing_weight","mql_type":"double","default":"0.10","status_key":"runtime_health_swing_weight","label":"Health Swing Weight","kind":"number","min":0,"max":100,"step":0.01},{"name":"health_rsi_buy_min","mql_type":"double","default":"40.0","status_key":"runtime_health_rsi_buy_min","label":"Health RSI Buy Min","kind":"number","min":0,"max":100,"step":0.1},{"name":"health_rsi_sell_max","mql_type":"double","default":"60.0","status_key":"runtime_health_rsi_sell_max","label":"Health RSI Sell Max","kind":"number","min":0,"max":100,"step":0.1},{"name":"health_swing_lookback","mql_type":"int","default":"20","status_key":"runtime_health_swing_lookback","label":"Health Swing Lookback","kind":"number","min":1,"max":1000,"step":1},{"name":"health_grace_bars","mql_type":"int","default":"2","status_key":"runtime_health_grace_bars","label":"Health Grace Bars","kind":"number","min":0,"max":1000,"step":1},{"name":"enable_partial_close","mql_type":"bool","default":"true","status_key":"runtime_enable_partial_close","label":"Enable Partial Close","kind":"bool"},{"name":"partial_close75_pct","mql_type":"double","default":"0.25","status_key":"runtime_partial_close75_pct","label":"Partial Close 75 %","kind":"number","min":0,"max":1,"step":0.01},{"name":"partial_close50_pct","mql_type":"double","default":"0.50","status_key":"runtime_partial_close50_pct","label":"Partial Close 50 %","kind":"number","min":0,"max":1,"step":0.01},{"name":"partial_close25_pct","mql_type":"double","default":"1.00","status_key":"runtime_partial_close25_pct","label":"Partial Close 25 %","kind":"number","min":0,"max":1,"step":0.01},{"name":"enable_health_sl_tightening","mql_type":"bool","default":"true","status_key":"runtime_enable_health_sl_tightening","label":"Enable Health SL Tightening","kind":"bool"},{"name":"sl_tighten_atr_multiplier","mql_type":"double","default":"2.0","status_key":"runtime_sl_tighten_atr_multiplier","label":"SL Tighten ATR Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"sl_tighten_min_health_pct","mql_type":"double","default":"0.50","status_key":"runtime_sl_tighten_min_health_pct","label":"SL Tighten Min Health %","kind":"number","min":0,"max":1,"step":0.01},{"name":"enable_break_even_on_spread","mql_type":"bool","default":"true","status_key":"runtime_enable_break_even_on_spread","label":"Enable Break Even On Spread","kind":"bool"},{"name":"break_even_spread_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_break_even_spread_multiplier","label":"Break Even Spread Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"enable_virtual_sl_reentry","mql_type":"bool","default":"true","status_key":"runtime_enable_virtual_sl_reentry","label":"Enable Virtual SL Reentry","kind":"bool"},{"name":"reentry_respects_new_bar_gate","mql_type":"bool","default":"false","status_key":"runtime_reentry_respects_new_bar_gate","label":"Reentry Respects New Bar Gate","kind":"bool"},{"name":"reentry_min_signal_pct","mql_type":"double","default":"0.75","status_key":"runtime_reentry_min_signal_pct","label":"Reentry Min Signal %","kind":"number","min":0,"max":2,"step":0.01},{"name":"enable_profit_offset_sl","mql_type":"bool","default":"true","status_key":"runtime_enable_profit_offset_sl","label":"Enable Profit Offset SL","kind":"bool"},{"name":"consecutive_wins_required","mql_type":"int","default":"3","status_key":"runtime_consecutive_wins_required","label":"Consecutive Wins Required","kind":"number","min":0,"max":100,"step":1},{"name":"min_offset_profit","mql_type":"double","default":"1.0","status_key":"runtime_min_offset_profit","label":"Min Offset Profit","kind":"number","min":0,"max":1000000,"step":0.1}],"description":"Controls position health scoring, partial closes, break-even behavior, SL tightening and virtual-SL re-entry.","danger":true},{"name":"Hedge chain","controls":[{"name":"enable_hedge_chain","mql_type":"bool","default":"true","status_key":"runtime_enable_hedge_chain","label":"Enable Hedge Chain","kind":"bool"},{"name":"hedge_trigger_atr","mql_type":"double","default":"1.5","status_key":"runtime_hedge_trigger_atr","label":"Hedge Trigger ATR","kind":"number","min":0,"max":100,"step":0.1},{"name":"hedge_require_signal","mql_type":"bool","default":"true","status_key":"runtime_hedge_require_signal","label":"Hedge Require Signal","kind":"bool"},{"name":"hedge_min_signal_score","mql_type":"double","default":"4.5","status_key":"runtime_hedge_min_signal_score","label":"Hedge Min Signal Score","kind":"number","min":0,"max":10,"step":0.1},{"name":"hedge_auto_lot","mql_type":"bool","default":"true","status_key":"runtime_hedge_auto_lot","label":"Hedge Auto Lot","kind":"bool"},{"name":"hedge_recovery_atr","mql_type":"double","default":"1.0","status_key":"runtime_hedge_recovery_atr","label":"Hedge Recovery ATR","kind":"number","min":0,"max":100,"step":0.1},{"name":"hedge_lot_multiplier","mql_type":"double","default":"2.0","status_key":"runtime_hedge_lot_multiplier","label":"Hedge Lot Multiplier","kind":"number","min":0,"max":20,"step":0.1},{"name":"hedge_max_lot","mql_type":"double","default":"0.10","status_key":"runtime_hedge_max_lot","label":"Hedge Max Lot","kind":"number","min":0.01,"max":5,"step":0.01},{"name":"hedge_recovery_pct","mql_type":"double","default":"110.0","status_key":"runtime_hedge_recovery_pct","label":"Hedge Recovery %","kind":"number","min":0,"max":1000,"step":1},{"name":"hedge_roll_min_profit","mql_type":"double","default":"0.5","status_key":"runtime_hedge_roll_min_profit","label":"Hedge Roll Min Profit","kind":"number","min":0,"max":1000000,"step":0.1},{"name":"hedge_cycle_levels","mql_type":"int","default":"2","status_key":"runtime_hedge_cycle_levels","label":"Hedge Cycle Levels","kind":"number","min":1,"max":20,"step":1},{"name":"enable_hedge_cycle_reset","mql_type":"bool","default":"false","status_key":"runtime_enable_hedge_cycle_reset","label":"Enable Hedge Cycle Reset","kind":"bool"},{"name":"hedge_cycle_partial_pct","mql_type":"double","default":"50.0","status_key":"runtime_hedge_cycle_partial_pct","label":"Hedge Cycle Partial %","kind":"number","min":0,"max":100,"step":1},{"name":"hedge_max_cycles","mql_type":"int","default":"3","status_key":"runtime_hedge_max_cycles","label":"Hedge Max Cycles","kind":"number","min":0,"max":100,"step":1},{"name":"hedge_max_chain_loss_usd","mql_type":"double","default":"0.0","status_key":"runtime_hedge_max_chain_loss_usd","label":"Hedge Max Chain Loss USD","kind":"number","min":0,"max":100000000,"step":1},{"name":"hedge_max_chain_loss_pct","mql_type":"double","default":"0.0","status_key":"runtime_hedge_max_chain_loss_pct","label":"Hedge Max Chain Loss %","kind":"number","min":0,"max":100,"step":0.1},{"name":"hedge_clear_root_sl","mql_type":"bool","default":"true","status_key":"runtime_hedge_clear_root_sl","label":"Hedge Clear Root SL","kind":"bool"},{"name":"hedge_trail_atr","mql_type":"double","default":"0.5","status_key":"runtime_hedge_trail_atr","label":"Hedge Trail ATR","kind":"number","min":0,"max":100,"step":0.1}],"description":"High-risk recovery subsystem. Changes can affect existing recovery chains and exposure.","danger":true},{"name":"Dynamic sizing","controls":[{"name":"enable_dynamic_lots","mql_type":"bool","default":"true","status_key":"runtime_enable_dynamic_lots","label":"Enable Dynamic Lots","kind":"bool"},{"name":"equity_drop_percent","mql_type":"double","default":"5.0","status_key":"runtime_equity_drop_percent","label":"Equity Drop Percent","kind":"number","min":0,"max":100,"step":0.1},{"name":"max_equity_drop_lot_steps","mql_type":"int","default":"2","status_key":"runtime_max_equity_drop_lot_steps","label":"Max Equity Drop Lot Steps","kind":"number","min":0,"max":100,"step":1},{"name":"min_signal_strength_for_lot","mql_type":"double","default":"8.0","status_key":"runtime_min_signal_strength_for_lot","label":"Min Signal Strength For Lot","kind":"number","min":0,"max":10,"step":0.1},{"name":"lot_step_size","mql_type":"double","default":"0.01","status_key":"runtime_lot_step_size","label":"Lot Step Size","kind":"number","min":0,"max":5,"step":0.01},{"name":"max_lot_size","mql_type":"double","default":"0.05","status_key":"runtime_max_lot_size","label":"Max Lot Size","kind":"number","min":0.01,"max":5,"step":0.01}],"description":"Controls drawdown/signal-based lot increases. Changes can alter future position size.","danger":true},{"name":"Equity protection","controls":[{"name":"enable_basket_stop","mql_type":"bool","default":"true","status_key":"runtime_enable_basket_stop","label":"Enable Basket Stop","kind":"bool"},{"name":"max_basket_loss_pct","mql_type":"double","default":"8.0","status_key":"runtime_max_basket_loss_pct","label":"Max Basket Loss %","kind":"number","min":0,"max":100,"step":0.1},{"name":"min_equity_percent","mql_type":"double","default":"70.0","status_key":"runtime_min_equity_percent","label":"Min Equity Percent","kind":"number","min":0,"max":1000,"step":0.1},{"name":"max_drawdown_from_peak","mql_type":"double","default":"0","status_key":"runtime_max_drawdown_from_peak","label":"Max Drawdown From Peak","kind":"number","min":0,"max":100000000,"step":1},{"name":"pause_minutes","mql_type":"int","default":"5","status_key":"runtime_pause_minutes","label":"Pause Minutes","kind":"number","min":0,"max":1440,"step":1},{"name":"pause_minutes_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_pause_minutes_multiplier","label":"Pause Minutes Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"max_pause_minutes","mql_type":"int","default":"120","status_key":"runtime_max_pause_minutes","label":"Max Pause Minutes","kind":"number","min":0,"max":10080,"step":1},{"name":"max_min_equity_triggers","mql_type":"int","default":"0","status_key":"runtime_max_min_equity_triggers","label":"Max Min Equity Triggers","kind":"number","min":0,"max":1000,"step":1},{"name":"reset_on_new_peak","mql_type":"bool","default":"true","status_key":"runtime_reset_on_new_peak","label":"Reset On New Peak","kind":"bool"},{"name":"target_equity","mql_type":"double","default":"0","status_key":"runtime_target_equity","label":"Target Equity","kind":"number","min":0,"max":1000000000,"step":1},{"name":"minimum_equity","mql_type":"double","default":"20","status_key":"runtime_minimum_equity","label":"Minimum Equity","kind":"number","min":0,"max":1000000000,"step":1}],"description":"Account-level circuit breakers, basket loss limits, trading pauses and equity targets.","danger":true},{"name":"TP / SL / risk reward","controls":[{"name":"enable_take_profit","mql_type":"bool","default":"false","status_key":"runtime_enable_take_profit","label":"Enable Take Profit","kind":"bool"},{"name":"tp_input_type","mql_type":"ENUM_INPUT_TYPE","default":"INPUT_DOLLAR","status_key":"runtime_tp_input_type","label":"TP Input Type","kind":"select","options":[{"value":0,"label":"Dollar"},{"value":1,"label":"Percent"},{"value":2,"label":"Points"}]},{"name":"tp_value","mql_type":"double","default":"10.0","status_key":"runtime_tp_value","label":"TP Value","kind":"number","min":0,"max":100000000,"step":0.1},{"name":"enable_stop_loss","mql_type":"bool","default":"true","status_key":"runtime_enable_stop_loss","label":"Enable Stop Loss","kind":"bool"},{"name":"sl_input_type","mql_type":"ENUM_INPUT_TYPE","default":"INPUT_PERCENT","status_key":"runtime_sl_input_type","label":"SL Input Type","kind":"select","options":[{"value":0,"label":"Dollar"},{"value":1,"label":"Percent"},{"value":2,"label":"Points"}]},{"name":"sl_value","mql_type":"double","default":"10.0","status_key":"runtime_sl_value","label":"SL Value","kind":"number","min":0,"max":100000000,"step":0.1},{"name":"enable_risk_reward","mql_type":"bool","default":"false","status_key":"runtime_enable_risk_reward","label":"Enable Risk Reward","kind":"bool"},{"name":"rr_risk_mode","mql_type":"ENUM_RR_RISK_MODE","default":"RR_RISK_ATR","status_key":"runtime_rr_risk_mode","label":"R:R Risk Mode","kind":"select","options":[{"value":0,"label":"Manual"},{"value":1,"label":"ATR"}]},{"name":"rr_risk_input_type","mql_type":"ENUM_INPUT_TYPE","default":"INPUT_POINTS","status_key":"runtime_rr_risk_input_type","label":"R:R Risk Input Type","kind":"select","options":[{"value":0,"label":"Dollar"},{"value":1,"label":"Percent"},{"value":2,"label":"Points"}]},{"name":"rr_risk_value","mql_type":"double","default":"200.0","status_key":"runtime_rr_risk_value","label":"R:R Risk Value","kind":"number","min":0,"max":100000000,"step":0.1},{"name":"rr_atr_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_rr_atr_multiplier","label":"R:R ATR Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"risk_reward_ratio","mql_type":"double","default":"1.5","status_key":"runtime_risk_reward_ratio","label":"Risk Reward Ratio","kind":"number","min":0,"max":100,"step":0.1}],"description":"Controls initial take-profit, stop-loss and independent risk:reward placement.","danger":true},{"name":"Trailing","controls":[{"name":"enable_trailing","mql_type":"bool","default":"true","status_key":"runtime_enable_trailing","label":"Enable Trailing","kind":"bool"},{"name":"trailing_enable_break_even_lock","mql_type":"bool","default":"true","status_key":"runtime_trailing_enable_break_even_lock","label":"Trailing Enable Break Even Lock","kind":"bool"},{"name":"trailing_sl_on_profitable_only","mql_type":"bool","default":"true","status_key":"runtime_trailing_sl_on_profitable_only","label":"Trailing SL On Profitable Only","kind":"bool"},{"name":"enable_adaptive_tp","mql_type":"bool","default":"true","status_key":"runtime_enable_adaptive_tp","label":"Enable Adaptive TP","kind":"bool"},{"name":"enable_adaptive_sl","mql_type":"bool","default":"true","status_key":"runtime_enable_adaptive_sl","label":"Enable Adaptive SL","kind":"bool"},{"name":"ts_input_type","mql_type":"ENUM_INPUT_TYPE","default":"INPUT_DOLLAR","status_key":"runtime_ts_input_type","label":"Ts Input Type","kind":"select","options":[{"value":0,"label":"Dollar"},{"value":1,"label":"Percent"},{"value":2,"label":"Points"}]},{"name":"trailing_distance_value","mql_type":"double","default":"0.2","status_key":"runtime_trailing_distance_value","label":"Trailing Distance Value","kind":"number","min":0,"max":100000000,"step":0.01},{"name":"trailing_value_multiplier","mql_type":"double","default":"0.2","status_key":"runtime_trailing_value_multiplier","label":"Trailing Value Multiplier","kind":"number","min":0,"max":100,"step":0.01}],"description":"Controls trailing, break-even locks and adaptive exit behavior.","danger":true},{"name":"Operational filters / diagnostics","controls":[{"name":"enable_discord_alerts","mql_type":"bool","default":"false","status_key":"runtime_enable_discord_alerts","label":"Enable Discord Alerts","kind":"bool"},{"name":"enable_trading_hours","mql_type":"bool","default":"false","status_key":"runtime_enable_trading_hours","label":"Enable Trading Hours","kind":"bool"},{"name":"trading_start_time","mql_type":"string","default":"\"00:00\"","status_key":"runtime_trading_start_time","label":"Trading Start Time","kind":"time"},{"name":"trading_end_time","mql_type":"string","default":"\"23:59\"","status_key":"runtime_trading_end_time","label":"Trading End Time","kind":"time"},{"name":"enable_reports","mql_type":"bool","default":"true","status_key":"runtime_enable_reports","label":"Enable Reports","kind":"bool"},{"name":"send_report_every_hour","mql_type":"int","default":"1","status_key":"runtime_send_report_every_hour","label":"Send Report Every Hour","kind":"number","min":1,"max":168,"step":1},{"name":"enable_market_close_filter","mql_type":"bool","default":"true","status_key":"runtime_enable_market_close_filter","label":"Enable Market Close Filter","kind":"bool"},{"name":"minutes_before_close","mql_type":"int","default":"30","status_key":"runtime_minutes_before_close","label":"Minutes Before Close","kind":"number","min":0,"max":1440,"step":1},{"name":"enable_news_filter","mql_type":"bool","default":"true","status_key":"runtime_enable_news_filter","label":"Enable News Filter","kind":"bool"},{"name":"news_minutes_before","mql_type":"int","default":"30","status_key":"runtime_news_minutes_before","label":"News Minutes Before","kind":"number","min":0,"max":1440,"step":1},{"name":"news_minutes_after","mql_type":"int","default":"30","status_key":"runtime_news_minutes_after","label":"News Minutes After","kind":"number","min":0,"max":1440,"step":1},{"name":"enable_leverage_pause","mql_type":"bool","default":"true","status_key":"runtime_enable_leverage_pause","label":"Enable Leverage Pause","kind":"bool"},{"name":"enable_logging","mql_type":"bool","default":"false","status_key":"runtime_enable_logging","label":"Enable Logging","kind":"bool"}],"description":"Trading hours, market-close/news/leverage filters plus reports, alerts and logging.","danger":false}]'''
+    r'''[{"name":"Entry / execution","controls":[{"name":"enable_buy_orders","mql_type":"bool","default":"true","status_key":"runtime_enable_buy_orders","label":"Enable Buy Orders","kind":"bool"},{"name":"enable_sell_orders","mql_type":"bool","default":"true","status_key":"runtime_enable_sell_orders","label":"Enable Sell Orders","kind":"bool"},{"name":"enable_new_bar_entry_only","mql_type":"bool","default":"true","status_key":"runtime_enable_new_bar_entry_only","label":"Enable New Bar Entry Only","kind":"bool"},{"name":"enable_max_spread_filter","mql_type":"bool","default":"true","status_key":"runtime_enable_max_spread_filter","label":"Enable Max Spread Filter","kind":"bool"},{"name":"max_spread_points","mql_type":"double","default":"0","status_key":"runtime_max_spread_points","label":"Max Spread Points","kind":"number","min":0,"max":100000,"step":1},{"name":"max_spread_atr_ratio","mql_type":"double","default":"0.25","status_key":"runtime_max_spread_atr_ratio","label":"Max Spread ATR Ratio","kind":"number","min":0,"max":10,"step":0.01},{"name":"base_lot_size","mql_type":"double","default":"0.01","status_key":"runtime_base_lot_size","label":"Base Lot Size","kind":"number","min":0.01,"max":5,"step":0.01},{"name":"max_open_orders","mql_type":"int","default":"8","status_key":"runtime_max_open_orders","label":"Max Open Orders","kind":"number","min":1,"max":50,"step":1},{"name":"max_trades_per_candle","mql_type":"int","default":"1","status_key":"runtime_max_trades_per_candle","label":"Max Trades Per Candle","kind":"number","min":0,"max":20,"step":1},{"name":"consecutive_candle_threshold_boost","mql_type":"double","default":"1.0","status_key":"runtime_consecutive_candle_threshold_boost","label":"Consecutive Candle Threshold Boost","kind":"number","min":0,"max":10,"step":0.1},{"name":"max_consecutive_candle_boosts","mql_type":"int","default":"3","status_key":"runtime_max_consecutive_candle_boosts","label":"Max Consecutive Candle Boosts","kind":"number","min":0,"max":100,"step":1},{"name":"enable_duplicate_distance_filter","mql_type":"bool","default":"true","status_key":"runtime_enable_duplicate_distance_filter","label":"Enable Duplicate Distance Filter","kind":"bool"},{"name":"zone_points","mql_type":"double","default":"500","status_key":"runtime_zone_points","label":"Zone Points","kind":"number","min":0,"max":1000000,"step":1},{"name":"buy_duplicate_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_buy_duplicate_multiplier","label":"Buy Duplicate Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"sell_duplicate_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_sell_duplicate_multiplier","label":"Sell Duplicate Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"min_break_even_profit","mql_type":"double","default":"0.5","status_key":"runtime_min_break_even_profit","label":"Min Break Even Profit","kind":"number","min":0,"max":1000000,"step":0.1},{"name":"profit_threshold_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_profit_threshold_multiplier","label":"Profit Threshold Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"loss_threshold_multiplier","mql_type":"double","default":"2.0","status_key":"runtime_loss_threshold_multiplier","label":"Loss Threshold Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"min_buy_signal_score","mql_type":"double","default":"4.5","status_key":"runtime_min_buy_signal_score","label":"Min Buy Signal Score","kind":"number","min":0,"max":10,"step":0.1},{"name":"min_sell_signal_score","mql_type":"double","default":"4.5","status_key":"runtime_min_sell_signal_score","label":"Min Sell Signal Score","kind":"number","min":0,"max":10,"step":0.1}],"description":"Controls when fresh positions may open, order frequency, spread gating, lot size and duplicate-entry protection.","danger":false},{"name":"Signal / indicator behavior","controls":[{"name":"directional_body_lookback","mql_type":"int","default":"10","status_key":"runtime_directional_body_lookback","label":"Directional Body Lookback","kind":"number","min":1,"max":500,"step":1},{"name":"ema_fast_period","mql_type":"int","default":"5","status_key":"runtime_ema_fast_period","label":"EMA Fast Period","kind":"number","min":1,"max":500,"step":1},{"name":"ema_slow_period","mql_type":"int","default":"12","status_key":"runtime_ema_slow_period","label":"EMA Slow Period","kind":"number","min":1,"max":500,"step":1},{"name":"slope_lookback","mql_type":"int","default":"3","status_key":"runtime_slope_lookback","label":"Slope Lookback","kind":"number","min":1,"max":100,"step":1},{"name":"rsi_period","mql_type":"int","default":"8","status_key":"runtime_rsi_period","label":"RSI Period","kind":"number","min":2,"max":500,"step":1},{"name":"atr_period","mql_type":"int","default":"8","status_key":"runtime_atr_period","label":"ATR Period","kind":"number","min":1,"max":500,"step":1},{"name":"atr_avg_lookback","mql_type":"int","default":"10","status_key":"runtime_atr_avg_lookback","label":"ATR Avg Lookback","kind":"number","min":1,"max":500,"step":1},{"name":"min_vol_ratio_to_trade","mql_type":"double","default":"0.6","status_key":"runtime_min_vol_ratio_to_trade","label":"Min Vol Ratio To Trade","kind":"number","min":0,"max":10,"step":0.01},{"name":"impulse_lookback","mql_type":"int","default":"3","status_key":"runtime_impulse_lookback","label":"Impulse Lookback","kind":"number","min":1,"max":100,"step":1},{"name":"impulse_boost_weight","mql_type":"double","default":"1.0","status_key":"runtime_impulse_boost_weight","label":"Impulse Boost Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"signal_smoothing_candles","mql_type":"int","default":"2","status_key":"runtime_signal_smoothing_candles","label":"Signal Smoothing Candles","kind":"number","min":1,"max":10,"step":1},{"name":"current_candle_blend","mql_type":"double","default":"0.40","status_key":"runtime_current_candle_blend","label":"Current Candle Blend","kind":"number","min":0,"max":1,"step":0.01},{"name":"velocity_window","mql_type":"double","default":"2.0","status_key":"runtime_velocity_window","label":"Velocity Window","kind":"number","min":0.0001,"max":100,"step":0.1},{"name":"rsi_overbought","mql_type":"int","default":"80","status_key":"runtime_rsi_overbought","label":"RSI Overbought","kind":"number","min":0,"max":100,"step":1},{"name":"rsi_oversold","mql_type":"int","default":"20","status_key":"runtime_rsi_oversold","label":"RSI Oversold","kind":"number","min":0,"max":100,"step":1},{"name":"rsi_momentum_buy","mql_type":"int","default":"60","status_key":"runtime_rsi_momentum_buy","label":"RSI Momentum Buy","kind":"number","min":0,"max":100,"step":1},{"name":"rsi_momentum_sell","mql_type":"int","default":"40","status_key":"runtime_rsi_momentum_sell","label":"RSI Momentum Sell","kind":"number","min":0,"max":100,"step":1}],"description":"Controls indicator periods, smoothing, volatility gating and RSI behavior. EMA/RSI/ATR period changes trigger controlled indicator-handle rebuilds in Nyao.","danger":false},{"name":"Score weights","controls":[{"name":"trend_weight","mql_type":"double","default":"1.5","status_key":"runtime_trend_weight","label":"Trend Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"slope_weight","mql_type":"double","default":"1.5","status_key":"runtime_slope_weight","label":"Slope Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"momentum_base_weight","mql_type":"double","default":"1.0","status_key":"runtime_momentum_base_weight","label":"Momentum Base Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"momentum_trigger_weight","mql_type":"double","default":"0.5","status_key":"runtime_momentum_trigger_weight","label":"Momentum Trigger Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"body_momentum_weight","mql_type":"double","default":"1.5","status_key":"runtime_body_momentum_weight","label":"Body Momentum Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"chop_score_high","mql_type":"double","default":"2.0","status_key":"runtime_chop_score_high","label":"Chop Score High","kind":"number","min":0,"max":10,"step":0.1},{"name":"chop_score_med","mql_type":"double","default":"1.0","status_key":"runtime_chop_score_med","label":"Chop Score Med","kind":"number","min":0,"max":10,"step":0.1},{"name":"chop_score_low","mql_type":"double","default":"0.0","status_key":"runtime_chop_score_low","label":"Chop Score Low","kind":"number","min":0,"max":10,"step":0.1},{"name":"volatility_score_high","mql_type":"double","default":"1.0","status_key":"runtime_volatility_score_high","label":"Volatility Score High","kind":"number","min":0,"max":10,"step":0.1},{"name":"volatility_score_low","mql_type":"double","default":"0.0","status_key":"runtime_volatility_score_low","label":"Volatility Score Low","kind":"number","min":0,"max":10,"step":0.1},{"name":"peak_score_weight","mql_type":"double","default":"1.0","status_key":"runtime_peak_score_weight","label":"Peak Score Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"wick_rejection_weight","mql_type":"double","default":"1.0","status_key":"runtime_wick_rejection_weight","label":"Wick Rejection Weight","kind":"number","min":0,"max":10,"step":0.1},{"name":"min_body_ratio","mql_type":"double","default":"1.5","status_key":"runtime_min_body_ratio","label":"Min Body Ratio","kind":"number","min":0,"max":100,"step":0.1}],"description":"Changes how Nyao composes its signal score. Use carefully: these directly change what qualifies as a strong signal.","danger":false},{"name":"Limit entry","controls":[{"name":"enable_limit_entry","mql_type":"bool","default":"false","status_key":"runtime_enable_limit_entry","label":"Enable Limit Entry","kind":"bool"},{"name":"limit_entry_anchor","mql_type":"ENUM_LIMIT_ANCHOR","default":"LIMIT_ANCHOR_FIXED_ATR","status_key":"runtime_limit_entry_anchor","label":"Limit Entry Anchor","kind":"select","options":[{"value":0,"label":"Fixed ATR"},{"value":1,"label":"EMA"},{"value":2,"label":"Swing"},{"value":3,"label":"Smart"}]},{"name":"limit_entry_atr_fraction","mql_type":"double","default":"0.25","status_key":"runtime_limit_entry_atr_fraction","label":"Limit Entry ATR Fraction","kind":"number","min":0,"max":10,"step":0.01},{"name":"limit_entry_expiry_bars","mql_type":"int","default":"1","status_key":"runtime_limit_entry_expiry_bars","label":"Limit Entry Expiry Bars","kind":"number","min":0,"max":1000,"step":1},{"name":"limit_entry_cancel_on_flip","mql_type":"bool","default":"true","status_key":"runtime_limit_entry_cancel_on_flip","label":"Limit Entry Cancel On Flip","kind":"bool"}],"description":"Controls whether fresh entries use pending pullback orders instead of immediate market orders.","danger":false},{"name":"Signal dampening","controls":[{"name":"enable_signal_dampening","mql_type":"bool","default":"true","status_key":"runtime_enable_signal_dampening","label":"Enable Signal Dampening","kind":"bool"},{"name":"max_losing_positions_same_dir","mql_type":"int","default":"2","status_key":"runtime_max_losing_positions_same_dir","label":"Max Losing Positions Same Dir","kind":"number","min":0,"max":50,"step":1},{"name":"losing_pos_score_penalty","mql_type":"double","default":"1.5","status_key":"runtime_losing_pos_score_penalty","label":"Losing Pos Score Penalty","kind":"number","min":0,"max":10,"step":0.1},{"name":"drawdown_threshold_pct","mql_type":"double","default":"3.0","status_key":"runtime_drawdown_threshold_pct","label":"Drawdown Threshold %","kind":"number","min":0,"max":100,"step":0.1},{"name":"drawdown_score_boost","mql_type":"double","default":"2.0","status_key":"runtime_drawdown_score_boost","label":"Drawdown Score Boost","kind":"number","min":0,"max":10,"step":0.1},{"name":"consecutive_losses_before_cooldown","mql_type":"int","default":"3","status_key":"runtime_consecutive_losses_before_cooldown","label":"Consecutive Losses Before Cooldown","kind":"number","min":0,"max":100,"step":1},{"name":"consecutive_loss_cooldown_bars","mql_type":"int","default":"3","status_key":"runtime_consecutive_loss_cooldown_bars","label":"Consecutive Loss Cooldown Bars","kind":"number","min":0,"max":1000,"step":1}],"description":"Reduces repeated entries during drawdown, losing-position clusters and consecutive-loss periods.","danger":false},{"name":"Loss / health management","controls":[{"name":"enable_loss_management","mql_type":"bool","default":"true","status_key":"runtime_enable_loss_management","label":"Enable Loss Management","kind":"bool"},{"name":"max_holding_loss_positions","mql_type":"int","default":"2","status_key":"runtime_max_holding_loss_positions","label":"Max Holding Loss Positions","kind":"number","min":0,"max":50,"step":1},{"name":"min_health_score","mql_type":"double","default":"0.40","status_key":"runtime_min_health_score","label":"Min Health Score","kind":"number","min":0,"max":1,"step":0.01},{"name":"max_adverse_atr","mql_type":"double","default":"1.5","status_key":"runtime_max_adverse_atr","label":"Max Adverse ATR","kind":"number","min":0,"max":100,"step":0.1},{"name":"health_trend_weight","mql_type":"double","default":"0.40","status_key":"runtime_health_trend_weight","label":"Health Trend Weight","kind":"number","min":0,"max":100,"step":0.01},{"name":"health_rsi_weight","mql_type":"double","default":"0.25","status_key":"runtime_health_rsi_weight","label":"Health RSI Weight","kind":"number","min":0,"max":100,"step":0.01},{"name":"health_atr_weight","mql_type":"double","default":"0.25","status_key":"runtime_health_atr_weight","label":"Health ATR Weight","kind":"number","min":0,"max":100,"step":0.01},{"name":"health_swing_weight","mql_type":"double","default":"0.10","status_key":"runtime_health_swing_weight","label":"Health Swing Weight","kind":"number","min":0,"max":100,"step":0.01},{"name":"health_rsi_buy_min","mql_type":"double","default":"40.0","status_key":"runtime_health_rsi_buy_min","label":"Health RSI Buy Min","kind":"number","min":0,"max":100,"step":0.1},{"name":"health_rsi_sell_max","mql_type":"double","default":"60.0","status_key":"runtime_health_rsi_sell_max","label":"Health RSI Sell Max","kind":"number","min":0,"max":100,"step":0.1},{"name":"health_swing_lookback","mql_type":"int","default":"20","status_key":"runtime_health_swing_lookback","label":"Health Swing Lookback","kind":"number","min":1,"max":1000,"step":1},{"name":"health_grace_bars","mql_type":"int","default":"2","status_key":"runtime_health_grace_bars","label":"Health Grace Bars","kind":"number","min":0,"max":1000,"step":1},{"name":"enable_partial_close","mql_type":"bool","default":"true","status_key":"runtime_enable_partial_close","label":"Enable Partial Close","kind":"bool"},{"name":"partial_close75_pct","mql_type":"double","default":"0.25","status_key":"runtime_partial_close75_pct","label":"Partial Close 75 %","kind":"number","min":0,"max":1,"step":0.01},{"name":"partial_close50_pct","mql_type":"double","default":"0.50","status_key":"runtime_partial_close50_pct","label":"Partial Close 50 %","kind":"number","min":0,"max":1,"step":0.01},{"name":"partial_close25_pct","mql_type":"double","default":"1.00","status_key":"runtime_partial_close25_pct","label":"Partial Close 25 %","kind":"number","min":0,"max":1,"step":0.01},{"name":"enable_health_sl_tightening","mql_type":"bool","default":"true","status_key":"runtime_enable_health_sl_tightening","label":"Enable Health SL Tightening","kind":"bool"},{"name":"sl_tighten_atr_multiplier","mql_type":"double","default":"2.0","status_key":"runtime_sl_tighten_atr_multiplier","label":"SL Tighten ATR Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"sl_tighten_min_health_pct","mql_type":"double","default":"0.50","status_key":"runtime_sl_tighten_min_health_pct","label":"SL Tighten Min Health %","kind":"number","min":0,"max":1,"step":0.01},{"name":"enable_break_even_on_spread","mql_type":"bool","default":"true","status_key":"runtime_enable_break_even_on_spread","label":"Enable Break Even On Spread","kind":"bool"},{"name":"break_even_spread_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_break_even_spread_multiplier","label":"Break Even Spread Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"enable_virtual_sl_reentry","mql_type":"bool","default":"true","status_key":"runtime_enable_virtual_sl_reentry","label":"Enable Virtual SL Reentry","kind":"bool"},{"name":"reentry_respects_new_bar_gate","mql_type":"bool","default":"false","status_key":"runtime_reentry_respects_new_bar_gate","label":"Reentry Respects New Bar Gate","kind":"bool"},{"name":"reentry_min_signal_pct","mql_type":"double","default":"0.75","status_key":"runtime_reentry_min_signal_pct","label":"Reentry Min Signal %","kind":"number","min":0,"max":2,"step":0.01},{"name":"enable_profit_offset_sl","mql_type":"bool","default":"true","status_key":"runtime_enable_profit_offset_sl","label":"Enable Profit Offset SL","kind":"bool"},{"name":"consecutive_wins_required","mql_type":"int","default":"3","status_key":"runtime_consecutive_wins_required","label":"Consecutive Wins Required","kind":"number","min":0,"max":100,"step":1},{"name":"min_offset_profit","mql_type":"double","default":"1.0","status_key":"runtime_min_offset_profit","label":"Min Offset Profit","kind":"number","min":0,"max":1000000,"step":0.1}],"description":"Controls position health scoring, partial closes, break-even behavior, SL tightening and virtual-SL re-entry.","danger":true},{"name":"Hedge chain","controls":[{"name":"enable_hedge_chain","mql_type":"bool","default":"true","status_key":"runtime_enable_hedge_chain","label":"Enable Hedge Chain","kind":"bool"},{"name":"hedge_trigger_atr","mql_type":"double","default":"1.5","status_key":"runtime_hedge_trigger_atr","label":"Hedge Trigger ATR","kind":"number","min":0,"max":100,"step":0.1},{"name":"hedge_require_signal","mql_type":"bool","default":"true","status_key":"runtime_hedge_require_signal","label":"Hedge Require Signal","kind":"bool"},{"name":"hedge_min_signal_score","mql_type":"double","default":"4.5","status_key":"runtime_hedge_min_signal_score","label":"Hedge Min Signal Score","kind":"number","min":0,"max":10,"step":0.1},{"name":"hedge_auto_lot","mql_type":"bool","default":"true","status_key":"runtime_hedge_auto_lot","label":"Hedge Auto Lot","kind":"bool"},{"name":"hedge_recovery_atr","mql_type":"double","default":"1.0","status_key":"runtime_hedge_recovery_atr","label":"Hedge Recovery ATR","kind":"number","min":0,"max":100,"step":0.1},{"name":"hedge_lot_multiplier","mql_type":"double","default":"2.0","status_key":"runtime_hedge_lot_multiplier","label":"Hedge Lot Multiplier","kind":"number","min":0,"max":20,"step":0.1},{"name":"hedge_max_lot","mql_type":"double","default":"0.10","status_key":"runtime_hedge_max_lot","label":"Hedge Max Lot","kind":"number","min":0.01,"max":5,"step":0.01},{"name":"hedge_recovery_pct","mql_type":"double","default":"110.0","status_key":"runtime_hedge_recovery_pct","label":"Hedge Recovery %","kind":"number","min":0,"max":1000,"step":1},{"name":"hedge_roll_min_profit","mql_type":"double","default":"0.5","status_key":"runtime_hedge_roll_min_profit","label":"Hedge Roll Min Profit","kind":"number","min":0,"max":1000000,"step":0.1},{"name":"hedge_cycle_levels","mql_type":"int","default":"2","status_key":"runtime_hedge_cycle_levels","label":"Hedge Cycle Levels","kind":"number","min":1,"max":20,"step":1},{"name":"enable_hedge_cycle_reset","mql_type":"bool","default":"false","status_key":"runtime_enable_hedge_cycle_reset","label":"Enable Hedge Cycle Reset","kind":"bool"},{"name":"hedge_cycle_partial_pct","mql_type":"double","default":"50.0","status_key":"runtime_hedge_cycle_partial_pct","label":"Hedge Cycle Partial %","kind":"number","min":0,"max":100,"step":1},{"name":"hedge_max_cycles","mql_type":"int","default":"3","status_key":"runtime_hedge_max_cycles","label":"Hedge Max Cycles","kind":"number","min":0,"max":100,"step":1},{"name":"hedge_max_chain_loss_usd","mql_type":"double","default":"0.0","status_key":"runtime_hedge_max_chain_loss_usd","label":"Hedge Max Chain Loss USD","kind":"number","min":0,"max":100000000,"step":1},{"name":"hedge_max_chain_loss_pct","mql_type":"double","default":"0.0","status_key":"runtime_hedge_max_chain_loss_pct","label":"Hedge Max Chain Loss %","kind":"number","min":0,"max":100,"step":0.1},{"name":"hedge_clear_root_sl","mql_type":"bool","default":"true","status_key":"runtime_hedge_clear_root_sl","label":"Hedge Clear Root SL","kind":"bool"},{"name":"hedge_trail_atr","mql_type":"double","default":"0.5","status_key":"runtime_hedge_trail_atr","label":"Hedge Trail ATR","kind":"number","min":0,"max":100,"step":0.1}],"description":"High-risk recovery subsystem. Changes can affect existing recovery chains and exposure.","danger":true},{"name":"Dynamic sizing","controls":[{"name":"enable_dynamic_lots","mql_type":"bool","default":"true","status_key":"runtime_enable_dynamic_lots","label":"Enable Dynamic Lots","kind":"bool"},{"name":"equity_drop_percent","mql_type":"double","default":"5.0","status_key":"runtime_equity_drop_percent","label":"Equity Drop Percent","kind":"number","min":0,"max":100,"step":0.1},{"name":"max_equity_drop_lot_steps","mql_type":"int","default":"2","status_key":"runtime_max_equity_drop_lot_steps","label":"Max Equity Drop Lot Steps","kind":"number","min":0,"max":100,"step":1},{"name":"min_signal_strength_for_lot","mql_type":"double","default":"8.0","status_key":"runtime_min_signal_strength_for_lot","label":"Min Signal Strength For Lot","kind":"number","min":0,"max":10,"step":0.1},{"name":"lot_step_size","mql_type":"double","default":"0.01","status_key":"runtime_lot_step_size","label":"Lot Step Size","kind":"number","min":0,"max":5,"step":0.01},{"name":"max_lot_size","mql_type":"double","default":"0.05","status_key":"runtime_max_lot_size","label":"Max Lot Size","kind":"number","min":0.01,"max":5,"step":0.01}],"description":"Controls drawdown/signal-based lot increases. Changes can alter future position size.","danger":true},{"name":"Equity protection","controls":[{"name":"enable_basket_stop","mql_type":"bool","default":"true","status_key":"runtime_enable_basket_stop","label":"Enable Basket Stop","kind":"bool"},{"name":"max_basket_loss_pct","mql_type":"double","default":"8.0","status_key":"runtime_max_basket_loss_pct","label":"Max Basket Loss %","kind":"number","min":0,"max":100,"step":0.1},{"name":"min_equity_percent","mql_type":"double","default":"70.0","status_key":"runtime_min_equity_percent","label":"Min Equity Percent","kind":"number","min":0,"max":1000,"step":0.1},{"name":"max_drawdown_from_peak","mql_type":"double","default":"0","status_key":"runtime_max_drawdown_from_peak","label":"Max Drawdown From Peak","kind":"number","min":0,"max":100000000,"step":1},{"name":"pause_minutes","mql_type":"int","default":"5","status_key":"runtime_pause_minutes","label":"Pause Minutes","kind":"number","min":0,"max":1440,"step":1},{"name":"pause_minutes_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_pause_minutes_multiplier","label":"Pause Minutes Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"max_pause_minutes","mql_type":"int","default":"120","status_key":"runtime_max_pause_minutes","label":"Max Pause Minutes","kind":"number","min":0,"max":10080,"step":1},{"name":"max_min_equity_triggers","mql_type":"int","default":"0","status_key":"runtime_max_min_equity_triggers","label":"Max Min Equity Triggers","kind":"number","min":0,"max":1000,"step":1},{"name":"reset_on_new_peak","mql_type":"bool","default":"true","status_key":"runtime_reset_on_new_peak","label":"Reset On New Peak","kind":"bool"},{"name":"target_equity","mql_type":"double","default":"0","status_key":"runtime_target_equity","label":"Target Equity","kind":"number","min":0,"max":1000000000,"step":1},{"name":"minimum_equity","mql_type":"double","default":"20","status_key":"runtime_minimum_equity","label":"Minimum Equity","kind":"number","min":0,"max":1000000000,"step":1}],"description":"Account-level circuit breakers, basket loss limits, trading pauses and equity targets.","danger":true},{"name":"TP / SL / risk reward","controls":[{"name":"enable_take_profit","mql_type":"bool","default":"false","status_key":"runtime_enable_take_profit","label":"Enable Take Profit","kind":"bool"},{"name":"tp_input_type","mql_type":"ENUM_INPUT_TYPE","default":"INPUT_DOLLAR","status_key":"runtime_tp_input_type","label":"TP Input Type","kind":"select","options":[{"value":0,"label":"Dollar"},{"value":1,"label":"Percent"},{"value":2,"label":"Points"}]},{"name":"tp_value","mql_type":"double","default":"10.0","status_key":"runtime_tp_value","label":"TP Value","kind":"number","min":0,"max":100000000,"step":0.1},{"name":"enable_stop_loss","mql_type":"bool","default":"true","status_key":"runtime_enable_stop_loss","label":"Enable Stop Loss","kind":"bool"},{"name":"sl_input_type","mql_type":"ENUM_INPUT_TYPE","default":"INPUT_PERCENT","status_key":"runtime_sl_input_type","label":"SL Input Type","kind":"select","options":[{"value":0,"label":"Dollar"},{"value":1,"label":"Percent"},{"value":2,"label":"Points"}]},{"name":"sl_value","mql_type":"double","default":"10.0","status_key":"runtime_sl_value","label":"SL Value","kind":"number","min":0,"max":100000000,"step":0.1},{"name":"enable_risk_reward","mql_type":"bool","default":"false","status_key":"runtime_enable_risk_reward","label":"Enable Risk Reward","kind":"bool"},{"name":"rr_risk_mode","mql_type":"ENUM_RR_RISK_MODE","default":"RR_RISK_ATR","status_key":"runtime_rr_risk_mode","label":"R:R Risk Mode","kind":"select","options":[{"value":0,"label":"Manual"},{"value":1,"label":"ATR"}]},{"name":"rr_risk_input_type","mql_type":"ENUM_INPUT_TYPE","default":"INPUT_POINTS","status_key":"runtime_rr_risk_input_type","label":"R:R Risk Input Type","kind":"select","options":[{"value":0,"label":"Dollar"},{"value":1,"label":"Percent"},{"value":2,"label":"Points"}]},{"name":"rr_risk_value","mql_type":"double","default":"200.0","status_key":"runtime_rr_risk_value","label":"R:R Risk Value","kind":"number","min":0,"max":100000000,"step":0.1},{"name":"rr_atr_multiplier","mql_type":"double","default":"1.5","status_key":"runtime_rr_atr_multiplier","label":"R:R ATR Multiplier","kind":"number","min":0,"max":100,"step":0.1},{"name":"risk_reward_ratio","mql_type":"double","default":"1.5","status_key":"runtime_risk_reward_ratio","label":"Risk Reward Ratio","kind":"number","min":0,"max":100,"step":0.1}],"description":"Controls initial take-profit, stop-loss and independent risk:reward placement.","danger":true},{"name":"Trailing","controls":[{"name":"enable_trailing","mql_type":"bool","default":"true","status_key":"runtime_enable_trailing","label":"Enable Trailing","kind":"bool"},{"name":"trailing_enable_break_even_lock","mql_type":"bool","default":"true","status_key":"runtime_trailing_enable_break_even_lock","label":"Trailing Enable Break Even Lock","kind":"bool"},{"name":"trailing_sl_on_profitable_only","mql_type":"bool","default":"true","status_key":"runtime_trailing_sl_on_profitable_only","label":"Trailing SL On Profitable Only","kind":"bool"},{"name":"enable_adaptive_tp","mql_type":"bool","default":"true","status_key":"runtime_enable_adaptive_tp","label":"Enable Adaptive TP","kind":"bool"},{"name":"enable_adaptive_sl","mql_type":"bool","default":"true","status_key":"runtime_enable_adaptive_sl","label":"Enable Adaptive SL","kind":"bool"},{"name":"ts_input_type","mql_type":"ENUM_INPUT_TYPE","default":"INPUT_DOLLAR","status_key":"runtime_ts_input_type","label":"Ts Input Type","kind":"select","options":[{"value":0,"label":"Dollar"},{"value":1,"label":"Percent"},{"value":2,"label":"Points"}]},{"name":"trailing_distance_value","mql_type":"double","default":"0.2","status_key":"runtime_trailing_distance_value","label":"Trailing Distance Value","kind":"number","min":0,"max":100000000,"step":0.01},{"name":"trailing_value_multiplier","mql_type":"double","default":"0.2","status_key":"runtime_trailing_value_multiplier","label":"Trailing Value Multiplier","kind":"number","min":0,"max":100,"step":0.01}],"description":"Controls trailing, break-even locks and adaptive exit behavior.","danger":true},{"name":"Operational filters / diagnostics","controls":[{"name":"enable_discord_alerts","mql_type":"bool","default":"false","status_key":"runtime_enable_discord_alerts","label":"Enable Discord Alerts","kind":"bool"},{"name":"enable_trading_hours","mql_type":"bool","default":"false","status_key":"runtime_enable_trading_hours","label":"Enable Trading Hours","kind":"bool"},{"name":"trading_start_time","mql_type":"string","default":"\"00:00\"","status_key":"runtime_trading_start_time","label":"Trading Start Time","kind":"time"},{"name":"trading_end_time","mql_type":"string","default":"\"23:59\"","status_key":"runtime_trading_end_time","label":"Trading End Time","kind":"time"},{"name":"enable_reports","mql_type":"bool","default":"true","status_key":"runtime_enable_reports","label":"Enable Reports","kind":"bool"},{"name":"send_report_every_hour","mql_type":"int","default":"1","status_key":"runtime_send_report_every_hour","label":"Send Report Every Hour","kind":"number","min":1,"max":168,"step":1},{"name":"enable_market_close_filter","mql_type":"bool","default":"true","status_key":"runtime_enable_market_close_filter","label":"Enable Market Close Filter","kind":"bool"},{"name":"minutes_before_close","mql_type":"int","default":"30","status_key":"runtime_minutes_before_close","label":"Minutes Before Close","kind":"number","min":0,"max":1440,"step":1},{"name":"enable_news_filter","mql_type":"bool","default":"true","status_key":"runtime_enable_news_filter","label":"Enable News Filter","kind":"bool"},{"name":"news_minutes_before","mql_type":"int","default":"30","status_key":"runtime_news_minutes_before","label":"News Minutes Before","kind":"number","min":0,"max":1440,"step":1},{"name":"news_minutes_after","mql_type":"int","default":"30","status_key":"runtime_news_minutes_after","label":"News Minutes After","kind":"number","min":0,"max":1440,"step":1},{"name":"enable_leverage_pause","mql_type":"bool","default":"true","status_key":"runtime_enable_leverage_pause","label":"Enable Leverage Pause","kind":"bool"},{"name":"enable_logging","mql_type":"bool","default":"false","status_key":"runtime_enable_logging","label":"Enable Logging","kind":"bool"}],"description":"Trading hours, market-close/news/leverage filters plus reports, alerts and logging.","danger":false}]'''
 )
 
 
@@ -35,6 +276,93 @@ def _model_dump(model: Any, *, exclude_none: bool = False, exclude_unset: bool =
     )
 
 
+
+# ---------------------------------------------------------------------
+# Atlas v1.1 multi-symbol compatibility layer.
+#
+# Nyao instances now use:
+#   MQL5/Files/Atlas/<SYMBOL>/commands.json
+#   MQL5/Files/Atlas/<SYMBOL>/status.json
+#
+# The existing Atlas intelligence code is reused unchanged, while its
+# persisted state is redirected into data/symbols/<SYMBOL>/ per request.
+# ---------------------------------------------------------------------
+_LEGACY_COMMANDS_FILE = COMMANDS_FILE
+_LEGACY_STATUS_FILE = STATUS_FILE
+_ATLAS_BRIDGE_DIR = STATUS_FILE.parent
+_SYMBOL_REQUEST_LOCK = asyncio.Lock()
+
+
+def _requested_symbol(request: Request) -> str | None:
+    explicit = request.query_params.get("symbol")
+    if explicit:
+        return explicit
+
+    return resolve_default_symbol(
+        _ATLAS_BRIDGE_DIR,
+        legacy_status_file=_LEGACY_STATUS_FILE,
+    )
+
+
+@app.middleware("http")
+async def atlas_symbol_namespace_middleware(
+    request: Request,
+    call_next,
+):
+    global COMMANDS_FILE, STATUS_FILE
+
+    # Dashboard HTML, health, and symbol discovery are not symbol-scoped.
+    if (
+        not request.url.path.startswith("/api/v1/")
+        or request.url.path == "/api/v1/atlas/symbols"
+    ):
+        return await call_next(request)
+
+    symbol = _requested_symbol(request)
+    if not symbol:
+        return await call_next(request)
+
+    async with _SYMBOL_REQUEST_LOCK:
+        previous_command_file = COMMANDS_FILE
+        previous_status_file = STATUS_FILE
+
+        command_file, status_file, _runtime_file = symbol_bridge_paths(
+            _ATLAS_BRIDGE_DIR,
+            symbol,
+        )
+        command_file.parent.mkdir(parents=True, exist_ok=True)
+
+        COMMANDS_FILE = command_file
+        STATUS_FILE = status_file
+
+        try:
+            with scoped_symbol_storage(symbol):
+                with scoped_account_performance(read_json(status_file) or {}):
+                    response = await call_next(request)
+                    response.headers["X-Atlas-Symbol"] = str(symbol)
+                    return response
+        finally:
+            COMMANDS_FILE = previous_command_file
+            STATUS_FILE = previous_status_file
+
+
+@app.get("/api/v1/atlas/symbols")
+def get_atlas_symbols() -> dict[str, Any]:
+    symbols = discover_bridge_symbols(_ATLAS_BRIDGE_DIR)
+    default_symbol = resolve_default_symbol(
+        _ATLAS_BRIDGE_DIR,
+        legacy_status_file=_LEGACY_STATUS_FILE,
+    )
+    return {
+        "multi_symbol_version": "1.1",
+        "symbols": symbols,
+        "symbol_count": len(symbols),
+        "default_symbol": default_symbol,
+        "bridge_root": str(_ATLAS_BRIDGE_DIR),
+        "storage_model": "ONE_BRAIN_SEPARATE_SYMBOL_STATE",
+    }
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     return {"message": "Welcome to Atlas"}
@@ -44,9 +372,9 @@ def root() -> dict[str, str]:
 def health() -> dict[str, str]:
     return {
         "status": "running",
-        "version": "0.5.0",
+        "version": "1.30.19",
         "strategy": "nyao",
-        "environment": "demo",
+        "execution_model": "account_environment_agnostic",
     }
 
 
@@ -55,7 +383,38 @@ def get_nyao_command() -> dict:
     command_data = read_json(COMMANDS_FILE)
 
     if not command_data:
-        command = Command()
+        status_data = read_json(STATUS_FILE) or {}
+        runtime = {
+            key.removeprefix("runtime_"): value
+            for key, value in status_data.items()
+            if key.startswith("runtime_")
+        }
+
+        seed: dict[str, Any] = {
+            **runtime,
+            "command_version": int(
+                status_data.get("applied_command_version") or 0
+            ),
+            "policy_epoch": int(
+                status_data.get("policy_epoch") or 1
+            ),
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+        # Preserve current bridge enable flags if Nyao reports them.
+        for source_key, target_key in (
+            ("atlas_enabled", "enabled"),
+            ("atlas_buy_enabled", "buy_enabled"),
+            ("atlas_sell_enabled", "sell_enabled"),
+        ):
+            if source_key in status_data:
+                seed[target_key] = status_data[source_key]
+
+        try:
+            command = Command.model_validate(seed)
+        except Exception:
+            command = Command()
+
         write_json(command, COMMANDS_FILE)
         return _model_dump(command, exclude_none=True)
 
@@ -84,14 +443,22 @@ def update_nyao_command(command: Command) -> dict:
         exclude_unset=True,
     )
 
-    # Atlas owns these two fields.
+    # Atlas owns command/policy metadata.
     incoming.pop("command_version", None)
+    incoming.pop("policy_epoch", None)
     incoming.pop("updated_at", None)
 
     merged = {**existing, **incoming}
     previous_version = int(existing.get("command_version", 0))
+    previous_policy_epoch = int(existing.get("policy_epoch", 1) or 1)
+
+    metadata_keys = {"command_version", "policy_epoch", "updated_at"}
+    before_material = {k: v for k, v in existing.items() if k not in metadata_keys}
+    after_material = {k: v for k, v in merged.items() if k not in metadata_keys}
+    material_change = before_material != after_material
 
     merged["command_version"] = previous_version + 1
+    merged["policy_epoch"] = previous_policy_epoch + (1 if material_change else 0)
     merged["updated_at"] = datetime.now(timezone.utc)
 
     try:
@@ -123,6 +490,177 @@ def receive_nyao_status(status: Status) -> dict[str, object]:
     }
 
 
+@app.get("/api/v1/atlas/market-candles")
+def get_market_candles(include_bars: bool = False) -> dict[str, Any]:
+    """Validate Nyao's symbol-scoped, closed-bar M30/H1/H4 export."""
+    status_data = read_json(STATUS_FILE) or {}
+    expected_symbol = str(status_data.get("symbol") or "").strip() or None
+    candle_file = STATUS_FILE.parent / "candles.json"
+    payload, read_error = load_market_candle_export(candle_file)
+    return build_market_candle_report(
+        payload,
+        source_path=candle_file,
+        expected_symbol=expected_symbol,
+        include_bars=include_bars,
+        read_error=read_error,
+    )
+
+
+@app.get("/api/v1/atlas/zone-map")
+def get_zone_map() -> dict[str, Any]:
+    """Build an analysis-only deterministic zone map from validated candles."""
+    status_data = read_json(STATUS_FILE) or {}
+    expected_symbol = str(status_data.get("symbol") or "").strip() or None
+    candle_file = STATUS_FILE.parent / "candles.json"
+    payload, read_error = load_market_candle_export(candle_file)
+    candle_report = build_market_candle_report(
+        payload,
+        source_path=candle_file,
+        expected_symbol=expected_symbol,
+        include_bars=True,
+        read_error=read_error,
+    )
+    return build_zone_map(candle_report)
+
+
+def _persist_zone_campaign(
+    plan: dict[str, Any],
+    status_data: dict[str, Any],
+    directive_path: Path,
+) -> dict[str, Any]:
+    """Persist one immutable broker campaign and align the API snapshot to it."""
+    directive = persist_zone_execution_directive(
+        plan,
+        directive_path,
+        status_data=status_data,
+    )
+    if directive.get("campaign_locked"):
+        snapshot = directive.get("plan_snapshot")
+        if isinstance(snapshot, dict) and snapshot:
+            plan.clear()
+            plan.update(snapshot)
+        else:
+            active_plan = dict(plan.get("zone_plan") or {})
+            active_plan.update({
+                "plan_id": directive.get("plan_id"),
+                "side": directive.get("side"),
+                "stop_loss": directive.get("stop_loss"),
+                "entries": [
+                    {
+                        "leg": leg,
+                        "entry_price": directive.get(f"entry_{leg}_price"),
+                        "risk_allocation_pct": directive.get(f"entry_{leg}_risk_pct"),
+                        "order_type": (
+                            "MARKET_ON_CONFIRMATION"
+                            if leg == 1
+                            else "VIRTUAL_MARKET_ON_TOUCH"
+                        ),
+                    }
+                    for leg in range(1, 4)
+                ],
+                "take_profits": [
+                    {
+                        "target": leg,
+                        "price": directive.get(f"tp_{leg}_price"),
+                        "close_allocation_pct": directive.get(f"tp_{leg}_close_pct"),
+                    }
+                    for leg in range(1, 4)
+                ],
+            })
+            risk = dict(active_plan.get("risk") or {})
+            campaign_risk_pct = float(directive.get("account_risk_pct") or 0.0)
+            risk["account_risk_pct"] = campaign_risk_pct
+            campaign_equity = float(
+                status_data.get("equity") or status_data.get("balance") or 0.0
+            )
+            risk["maximum_loss_account_currency"] = round(
+                campaign_equity * campaign_risk_pct / 100.0,
+                2,
+            )
+            active_plan["risk"] = risk
+            plan["zone_plan"] = active_plan
+            plan["zone_map_id"] = directive.get("zone_map_id")
+        plan["state"] = "ZONE_CAMPAIGN_ACTIVE"
+        plan["mode"] = "ZONE_MODE"
+        plan["ordinary_scalping_allowed"] = False
+        preview = dict(plan.get("directive_preview") or {})
+        preview.update({
+            "suspend_ordinary_scalp_entries": True,
+            "zone_entry_allowed": True,
+            "plan_id": directive.get("plan_id"),
+        })
+        plan["directive_preview"] = preview
+        spread_assessment = (
+            ((plan.get("zone_plan") or {}).get("confirmation") or {}).get(
+                "spread_assessment"
+            )
+            or {}
+        )
+        plan["blockers"] = (
+            [
+                "Active position management continues; new virtual zone layers "
+                "wait until the dedicated zone spread gate is clear."
+            ]
+            if spread_assessment.get("zone_spread_within_limit") is False
+            else []
+        )
+        plan["campaign_lock"] = {
+            "active": True,
+            "plan_id": directive.get("plan_id"),
+            "reason": directive.get("campaign_lock_reason"),
+        }
+    else:
+        plan["campaign_lock"] = {"active": False}
+    return directive
+
+
+@app.get("/api/v1/atlas/zone-execution-plan")
+def get_zone_execution_plan() -> dict[str, Any]:
+    """Build a non-executing scalp/zone mode directive from live Nyao state."""
+    status_data = read_json(STATUS_FILE) or {}
+    expected_symbol = str(status_data.get("symbol") or "").strip() or None
+    candle_file = STATUS_FILE.parent / "candles.json"
+    payload, read_error = load_market_candle_export(candle_file)
+    candle_report = build_market_candle_report(
+        payload,
+        source_path=candle_file,
+        expected_symbol=expected_symbol,
+        include_bars=True,
+        read_error=read_error,
+    )
+    capital_sizing = build_capital_sizing_plan(
+        status_data,
+        get_trade_outcomes(closed_limit=50, include_active=False),
+    )
+    plan = build_zone_execution_plan(
+        build_zone_map(candle_report), status_data, capital_sizing
+    )
+    directive_path = STATUS_FILE.parent / "zone_directive.json"
+    _persist_zone_campaign(
+        plan,
+        status_data,
+        directive_path,
+    )
+    return plan
+
+
+@app.get("/api/v1/atlas/zone-policy")
+def get_atlas_zone_policy() -> dict[str, Any]:
+    return get_zone_policy()
+
+
+@app.put("/api/v1/atlas/zone-policy")
+def update_atlas_zone_policy(request: ZonePolicyUpdateRequest) -> dict[str, Any]:
+    try:
+        return apply_zone_policy(
+            request.policy.model_dump(mode="json"),
+            source=request.source,
+            expected_current_epoch=request.expected_current_epoch,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/api/v1/atlas/intelligence")
 def get_atlas_intelligence() -> dict:
     status_data = read_json(STATUS_FILE)
@@ -141,9 +679,677 @@ def get_atlas_intelligence() -> dict:
         status_payload,
         intelligence,
     )
+    outcome_result = track_trade_outcomes(
+        status_payload,
+        intelligence,
+    )
+    shadow_policy = build_shadow_policy(
+        status_payload,
+        intelligence,
+    )
+    shadow_history = record_shadow_policy(
+        shadow_policy,
+    )
+    management_policy_diagnostics = build_position_management_policy_diagnostics(
+        status_payload,
+    )
+    shadow_epoch_divergence = build_shadow_epoch_divergence(
+        status_payload,
+        shadow_policy,
+    )
+    shadow_evaluation = evaluate_shadow_policies(
+        recent_limit=50,
+    )
+    shadow_replay = run_shadow_replay(
+        recent_limit=100,
+    )
+    policy_decision = build_policy_decision(
+        status_payload,
+        intelligence,
+        shadow_policy,
+        shadow_evaluation=shadow_evaluation,
+        shadow_replay=shadow_replay,
+    )
+    policy_decision_history = record_policy_decision(
+        policy_decision,
+    )
+    advisory_proposal = build_advisory_policy_proposal(
+        policy_decision,
+    )
+    advisory_proposal_persistence = persist_advisory_policy_proposal(
+        advisory_proposal,
+    )
 
     intelligence["history"] = history_result
+    intelligence["outcomes"] = outcome_result
+    intelligence["shadow_policy"] = shadow_policy
+    intelligence["shadow_history"] = shadow_history
+    intelligence["management_policy_diagnostics"] = management_policy_diagnostics
+    intelligence["shadow_epoch_divergence"] = shadow_epoch_divergence
+    intelligence["policy_decision"] = policy_decision
+    intelligence["policy_decision_history"] = policy_decision_history
+    intelligence["advisory_proposal"] = advisory_proposal
+    intelligence["advisory_proposal_persistence"] = (
+        advisory_proposal_persistence
+    )
     return intelligence
+
+
+@app.get("/api/v1/atlas/management-policy-diagnostics")
+def get_management_policy_diagnostics() -> dict:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(
+            status_code=503,
+            detail="Nyao status is not available yet.",
+        )
+    status = Status.model_validate(status_data)
+    return build_position_management_policy_diagnostics(
+        status.model_dump(mode="json"),
+    )
+
+
+@app.get("/api/v1/atlas/shadow-epoch-divergence")
+def get_shadow_epoch_divergence(
+    test_control: str | None = None,
+    test_value: str | None = None,
+) -> dict:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(
+            status_code=503,
+            detail="Nyao status is not available yet.",
+        )
+
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    intelligence = generate_advice(status_payload)
+    shadow_policy = build_shadow_policy(
+        status_payload,
+        intelligence,
+    )
+
+    coerced_value = None
+    if test_control is not None:
+        if test_value is None:
+            raise HTTPException(
+                status_code=422,
+                detail="test_value is required when test_control is supplied.",
+            )
+        current_runtime_value = status_payload.get(f"runtime_{test_control}")
+        if current_runtime_value is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{test_control!r} is not present in the current Nyao runtime.",
+            )
+        try:
+            coerced_value = coerce_shadow_test_value(
+                test_value,
+                current_runtime_value,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        return build_shadow_epoch_divergence(
+            status_payload,
+            shadow_policy,
+            test_control=test_control,
+            test_value=coerced_value,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/atlas/policy-decision")
+def get_atlas_policy_decision() -> dict:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(
+            status_code=503,
+            detail="Nyao status is not available yet.",
+        )
+
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    intelligence = generate_advice(status_payload)
+    shadow_policy = build_shadow_policy(
+        status_payload,
+        intelligence,
+    )
+    shadow_evaluation = evaluate_shadow_policies(
+        recent_limit=50,
+    )
+    shadow_replay = run_shadow_replay(
+        recent_limit=100,
+    )
+
+    decision = build_policy_decision(
+        status_payload,
+        intelligence,
+        shadow_policy,
+        shadow_evaluation=shadow_evaluation,
+        shadow_replay=shadow_replay,
+    )
+    history = record_policy_decision(decision)
+    proposal = build_advisory_policy_proposal(decision)
+    proposal_persistence = persist_advisory_policy_proposal(
+        proposal,
+    )
+    active_llm = _find_current_llm_advisory_proposal(
+        status_payload,
+        read_json(COMMANDS_FILE) or {},
+    )
+    active_proposal = active_llm["proposal"] if active_llm else proposal
+    review_reconciliation = reconcile_advisory_review_state(
+        active_proposal,
+    )
+
+    return {
+        "decision": decision,
+        "history": history,
+        "advisory_proposal": active_proposal,
+        "deterministic_advisory_proposal": proposal,
+        "active_llm_context": active_llm,
+        "advisory_proposal_persistence": proposal_persistence,
+        "advisory_review_reconciliation": review_reconciliation,
+    }
+
+
+def _find_current_llm_advisory_proposal(
+    status_payload: dict[str, Any],
+    current_command: dict[str, Any],
+) -> dict[str, Any] | None:
+    pending = get_pending_autonomous_policy()
+    pending_proposal = pending.get("advisory") or {}
+    pending_account = str(pending_proposal.get("account_fingerprint") or "")
+    live_account = str(account_identity(status_payload).get("fingerprint") or "")
+    pending_baseline_epoch = int(
+        pending_proposal.get("current_policy_epoch") or 0
+    )
+    command_epoch = int(current_command.get("policy_epoch") or 0)
+    if (
+        pending.get("status") == "PENDING_MODE_BOUNDARY"
+        and pending_proposal.get("mode") == "LLM_POLICY_PROPOSAL"
+        and pending_account
+        and pending_account == live_account
+        and pending_baseline_epoch == command_epoch
+    ):
+        return {
+            "proposal": pending_proposal,
+            "context_status": {
+                "current": True,
+                "phase": "PRE_APPLY",
+                "reason": "PENDING_MODE_BOUNDARY",
+                "command_policy_epoch": command_epoch,
+                "pending_since": pending.get("queued_at"),
+            },
+        }
+    llm_candidates = [
+        proposal
+        for proposal in reversed(get_all_advisory_policy_proposals())
+        if proposal.get("mode") == "LLM_POLICY_PROPOSAL"
+    ]
+    for proposal in llm_candidates:
+        context_status = llm_advisory_context_status(
+            proposal,
+            current_status=status_payload,
+            current_command=current_command,
+        )
+        approval_status = (proposal.get("approval") or {}).get("status")
+        active_pre_apply = (
+            context_status.get("phase") == "PRE_APPLY"
+            and approval_status in {"NOT_REQUESTED", "PENDING_APPROVAL", "APPROVED"}
+        )
+        # Applied proposals remain the current policy record even after their
+        # one-time approval expires; hiding them caused the dashboard to fall
+        # back to a fresh "ready for human" deterministic proposal.
+        applied = context_status.get("phase") == "APPLYING_OR_APPLIED"
+        if context_status.get("current") and (active_pre_apply or applied):
+            return {"proposal": proposal, "context_status": context_status}
+    return None
+
+
+def _build_current_advisory_context() -> dict:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(
+            status_code=503,
+            detail="Nyao status is not available yet.",
+        )
+
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    current_command = read_json(COMMANDS_FILE) or {}
+
+    active_llm = _find_current_llm_advisory_proposal(
+        status_payload,
+        current_command,
+    )
+    if active_llm:
+        proposal = active_llm["proposal"]
+        reconciliation = reconcile_advisory_review_state(proposal)
+        return {
+            "status_payload": status_payload,
+            "proposal": proposal,
+            "persistence": {
+                "persisted": True,
+                "action": "REUSED_CURRENT_LLM_POLICY",
+                "proposal_id": proposal.get("proposal_id"),
+            },
+            "reconciliation": reconciliation,
+            "llm_context_status": active_llm["context_status"],
+        }
+
+    intelligence = generate_advice(status_payload)
+    shadow_policy = build_shadow_policy(status_payload, intelligence)
+    shadow_evaluation = evaluate_shadow_policies(recent_limit=50)
+    shadow_replay = run_shadow_replay(recent_limit=100)
+    decision = build_policy_decision(
+        status_payload,
+        intelligence,
+        shadow_policy,
+        shadow_evaluation=shadow_evaluation,
+        shadow_replay=shadow_replay,
+    )
+    record_policy_decision(decision)
+    proposal = build_advisory_policy_proposal(decision)
+    persistence = persist_advisory_policy_proposal(proposal)
+    reconciliation = reconcile_advisory_review_state(proposal)
+    return {
+        "status_payload": status_payload,
+        "proposal": proposal,
+        "persistence": persistence,
+        "reconciliation": reconciliation,
+    }
+
+
+def _advisory_lifecycle(
+    proposal: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose post-execution state without rewriting the immutable proposal."""
+    context_status = context.get("llm_context_status") or {}
+    if context_status.get("phase") == "APPLYING_OR_APPLIED":
+        target = int(proposal.get("proposed_policy_epoch") or 0)
+        applied_epoch = int(context_status.get("status_policy_epoch") or 0)
+        state = "APPLIED" if target and applied_epoch == target else "AWAITING_NYAO_ACK"
+        return {
+            "state": state,
+            "phase": context_status.get("phase"),
+            "manual_action_complete": True,
+            "target_policy_epoch": target,
+            "applied_policy_epoch": applied_epoch,
+        }
+    schedule = get_llm_cycle_schedule()
+    if (
+        schedule.get("execution_mode") == "AUTONOMOUS"
+        and proposal.get("review_state") == "READY_FOR_AUTONOMOUS_APPLY"
+    ):
+        latest_matches = (
+            schedule.get("last_advisory_proposal_id") == proposal.get("proposal_id")
+        )
+        auto_status = (
+            str(schedule.get("last_auto_apply_status") or "EVALUATING")
+            if latest_matches else "EVALUATING"
+        )
+        state = {
+            "MINIMUM_DWELL_ACTIVE": "AUTO_APPLY_DEFERRED_DWELL",
+            "CONSENSUS_NOT_READY": "AUTO_APPLY_DEFERRED_CONSENSUS",
+            "DEFERRED_ACTIVE_ZONE_PLAN": "AUTO_APPLY_DEFERRED_ZONE",
+            "RISK_GOVERNOR_VETO": "AUTO_APPLY_BLOCKED_RISK",
+            "CONFIDENCE_BELOW_70": "AUTO_APPLY_BLOCKED_CONFIDENCE",
+        }.get(auto_status, f"AUTO_{auto_status}")
+        return {
+            "state": state,
+            "phase": context_status.get("phase") or "PRE_APPLY",
+            "manual_action_complete": False,
+            "autonomous": True,
+            "auto_apply_status": auto_status,
+            "seconds_until_auto_apply_eligible": schedule.get(
+                "seconds_until_auto_apply_eligible"
+            ),
+        }
+    return {
+        "state": proposal.get("review_state") or "UNKNOWN",
+        "phase": context_status.get("phase") or "PRE_APPLY",
+        "manual_action_complete": False,
+    }
+
+
+@app.get("/api/v1/atlas/advisory-proposal")
+def get_atlas_advisory_proposal() -> dict:
+    context = _build_current_advisory_context()
+    proposal = dict(context["proposal"])
+    proposal["lifecycle"] = _advisory_lifecycle(proposal, context)
+    return {
+        "proposal": proposal,
+        "persistence": context["persistence"],
+        "review_reconciliation": context["reconciliation"],
+        "llm_context_status": context.get("llm_context_status"),
+    }
+
+
+@app.get("/api/v1/atlas/advisory-proposals")
+def get_atlas_advisory_proposals(
+    limit: int = 100,
+) -> dict:
+    return get_advisory_policy_proposals(limit=limit)
+
+
+@app.get("/api/v1/atlas/advisory-proposals/{proposal_id}")
+def get_atlas_advisory_proposal_by_id(
+    proposal_id: str,
+) -> dict:
+    proposal = get_advisory_policy_proposal(proposal_id)
+    if proposal is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Advisory proposal not found.",
+        )
+    return proposal
+
+
+@app.post("/api/v1/atlas/advisory-proposals/{proposal_id}/request-review")
+def request_atlas_advisory_proposal_review(
+    proposal_id: str,
+    request: AdvisoryReviewActionRequest,
+) -> dict:
+    try:
+        return request_human_review(
+            proposal_id,
+            reviewer=request.reviewer,
+            note=request.note,
+            expected_runtime_fingerprint=request.expected_runtime_fingerprint,
+            expected_proposed_policy_epoch=request.expected_proposed_policy_epoch,
+        )
+    except ReviewWorkflowError as exc:
+        _raise_review_workflow_error(exc)
+
+
+@app.post("/api/v1/atlas/advisory-proposals/{proposal_id}/approve")
+def approve_atlas_advisory_proposal(
+    proposal_id: str,
+    request: AdvisoryReviewActionRequest,
+) -> dict:
+    try:
+        return approve_proposal(
+            proposal_id,
+            reviewer=request.reviewer,
+            note=request.note,
+            expected_runtime_fingerprint=request.expected_runtime_fingerprint,
+            expected_proposed_policy_epoch=request.expected_proposed_policy_epoch,
+        )
+    except ReviewWorkflowError as exc:
+        _raise_review_workflow_error(exc)
+
+
+@app.post("/api/v1/atlas/advisory-proposals/{proposal_id}/reject")
+def reject_atlas_advisory_proposal(
+    proposal_id: str,
+    request: AdvisoryReviewActionRequest,
+) -> dict:
+    try:
+        return reject_proposal(
+            proposal_id,
+            reviewer=request.reviewer,
+            note=request.note,
+            expected_runtime_fingerprint=request.expected_runtime_fingerprint,
+            expected_proposed_policy_epoch=request.expected_proposed_policy_epoch,
+        )
+    except ReviewWorkflowError as exc:
+        _raise_review_workflow_error(exc)
+
+
+@app.get("/api/v1/atlas/advisory-proposals/{proposal_id}/review")
+def get_atlas_advisory_proposal_review(
+    proposal_id: str,
+) -> dict:
+    try:
+        return get_proposal_review_status(proposal_id)
+    except ReviewWorkflowError as exc:
+        _raise_review_workflow_error(exc)
+
+
+@app.get("/api/v1/atlas/advisory-review-events")
+def get_atlas_advisory_review_events(
+    limit: int = 100,
+    proposal_id: str | None = None,
+) -> dict:
+    return get_review_events(
+        limit=limit,
+        proposal_id=proposal_id,
+    )
+
+
+@app.get("/api/v1/atlas/advisory-review-events/verify")
+def verify_atlas_advisory_review_event_chain() -> dict:
+    return verify_review_event_chain()
+
+
+@app.post(
+    "/api/v1/atlas/advisory-proposals/{proposal_id}/supervised-command-proposal"
+)
+def build_atlas_supervised_command_proposal(
+    proposal_id: str,
+    request: SupervisedCommandBuildRequest,
+) -> dict:
+    current = _build_current_advisory_context()
+    current_command = read_json(COMMANDS_FILE) or {}
+    try:
+        result = build_supervised_command_proposal(
+            proposal_id,
+            current_proposal=current["proposal"],
+            current_status=current["status_payload"],
+            current_command=current_command,
+            reviewer=request.reviewer,
+            note=request.note,
+            expected_runtime_fingerprint=request.expected_runtime_fingerprint,
+            expected_proposed_policy_epoch=request.expected_proposed_policy_epoch,
+            expected_review_snapshot_hash=request.expected_review_snapshot_hash,
+        )
+    except SupervisedCommandBuildError as exc:
+        _raise_supervised_command_build_error(exc)
+
+    result["current_advisory_reconciliation"] = current["reconciliation"]
+    return result
+
+
+@app.get("/api/v1/atlas/supervised-execution-arm")
+def get_atlas_supervised_execution_arm() -> dict:
+    return get_execution_arm_state()
+
+
+@app.post("/api/v1/atlas/supervised-execution-arm")
+def arm_atlas_supervised_execution(
+    request: SupervisedExecutionArmRequest,
+) -> dict:
+    try:
+        return arm_supervised_execution(
+            actor=request.actor,
+            confirmation_phrase=request.confirmation_phrase,
+            minutes=request.minutes,
+        )
+    except SupervisedExecutionError as exc:
+        _raise_supervised_execution_error(exc)
+
+
+@app.post("/api/v1/atlas/supervised-execution-arm/disarm")
+def disarm_atlas_supervised_execution(
+    request: SupervisedExecutionDisarmRequest,
+) -> dict:
+    return disarm_supervised_execution(actor=request.actor)
+
+
+@app.get("/api/v1/atlas/supervised-command-proposals")
+def get_atlas_supervised_command_proposals(limit: int = 100) -> dict:
+    return get_supervised_command_proposals(limit=limit)
+
+
+@app.get("/api/v1/atlas/supervised-command-proposals/{supervised_command_id}")
+def get_atlas_supervised_command_proposal(
+    supervised_command_id: str,
+) -> dict:
+    proposal = get_supervised_command_proposal(supervised_command_id)
+    if proposal is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Supervised command proposal not found.",
+        )
+    return proposal
+
+
+@app.get(
+    "/api/v1/atlas/supervised-command-proposals/{supervised_command_id}/execution-preflight"
+)
+def get_atlas_supervised_execution_preflight(
+    supervised_command_id: str,
+) -> dict:
+    current = _build_current_advisory_context()
+    current_command = read_json(COMMANDS_FILE) or {}
+    try:
+        return preflight_supervised_execution(
+            supervised_command_id,
+            current_proposal=current["proposal"],
+            current_status=current["status_payload"],
+            current_command=current_command,
+        )
+    except SupervisedExecutionError as exc:
+        _raise_supervised_execution_error(exc)
+
+
+@app.post(
+    "/api/v1/atlas/supervised-command-proposals/{supervised_command_id}/execute"
+)
+def execute_atlas_supervised_command(
+    supervised_command_id: str,
+    request: SupervisedExecutionRequest,
+) -> dict:
+    # Rebuild/reconcile Atlas context immediately before the one narrow write.
+    current = _build_current_advisory_context()
+    current_command = read_json(COMMANDS_FILE) or {}
+
+    try:
+        return execute_supervised_command(
+            supervised_command_id,
+            command_file=COMMANDS_FILE,
+            current_proposal=current["proposal"],
+            current_status=current["status_payload"],
+            current_command=current_command,
+            actor=request.actor,
+            note=request.note,
+            confirmation_phrase=request.confirmation_phrase,
+            allow_test_override_execution=request.allow_test_override_execution,
+            expected_source_proposal_id=request.expected_source_proposal_id,
+            expected_runtime_fingerprint=request.expected_runtime_fingerprint,
+            expected_target_policy_epoch=request.expected_target_policy_epoch,
+            expected_review_snapshot_hash=request.expected_review_snapshot_hash,
+            expected_baseline_command_version=request.expected_baseline_command_version,
+            expected_baseline_policy_epoch=request.expected_baseline_policy_epoch,
+        )
+    except SupervisedExecutionError as exc:
+        _raise_supervised_execution_error(exc)
+
+
+@app.get("/api/v1/atlas/supervised-execution-events")
+def get_atlas_supervised_execution_events(
+    limit: int = 200,
+    supervised_command_id: str | None = None,
+) -> dict:
+    return get_execution_events(
+        limit=limit,
+        supervised_command_id=supervised_command_id,
+    )
+
+
+@app.get("/api/v1/atlas/supervised-execution-events/verify")
+def verify_atlas_supervised_execution_event_chain() -> dict:
+    return verify_execution_event_chain()
+
+
+@app.get("/api/v1/atlas/supervised-executions/{execution_id}/nyao-ack")
+def get_atlas_nyao_execution_ack(execution_id: str) -> dict:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(
+            status_code=503,
+            detail="Nyao status is not available yet.",
+        )
+    try:
+        return evaluate_nyao_ack(
+            execution_id,
+            current_status=status_data,
+            record_transition=False,
+        )
+    except NyaoAckError as exc:
+        _raise_nyao_ack_error(exc)
+
+
+@app.post("/api/v1/atlas/supervised-executions/{execution_id}/nyao-ack/refresh")
+def refresh_atlas_nyao_execution_ack(execution_id: str) -> dict:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(
+            status_code=503,
+            detail="Nyao status is not available yet.",
+        )
+    try:
+        return evaluate_nyao_ack(
+            execution_id,
+            current_status=status_data,
+            record_transition=True,
+        )
+    except NyaoAckError as exc:
+        _raise_nyao_ack_error(exc)
+
+
+@app.get("/api/v1/atlas/supervised-command-proposals/{supervised_command_id}/latest-nyao-ack")
+def get_latest_atlas_nyao_ack_for_command(
+    supervised_command_id: str,
+) -> dict:
+    execution_id = find_latest_execution_id(
+        supervised_command_id=supervised_command_id,
+    )
+    if not execution_id:
+        raise HTTPException(
+            status_code=404,
+            detail="No completed supervised execution exists for this supervised command.",
+        )
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(
+            status_code=503,
+            detail="Nyao status is not available yet.",
+        )
+    try:
+        return evaluate_nyao_ack(
+            execution_id,
+            current_status=status_data,
+            record_transition=False,
+        )
+    except NyaoAckError as exc:
+        _raise_nyao_ack_error(exc)
+
+
+@app.get("/api/v1/atlas/execution-recovery-diagnostics")
+def get_atlas_execution_recovery_diagnostics(
+    supervised_command_id: str | None = None,
+) -> dict:
+    return build_execution_recovery_diagnostics(
+        supervised_command_id=supervised_command_id,
+    )
+
+
+@app.get("/api/v1/atlas/policy-decision-stability")
+def get_atlas_policy_decision_stability() -> dict:
+    return get_policy_decision_stability()
+
+
+@app.get("/api/v1/atlas/policy-decision-history")
+def get_atlas_policy_decision_history(
+    limit: int = 200,
+) -> dict:
+    return get_policy_decision_history(limit=limit)
 
 
 @app.get("/api/v1/atlas/history")
@@ -162,6 +1368,139 @@ def get_atlas_history(
 @app.get("/api/v1/atlas/history/summary")
 def get_atlas_history_summary() -> dict:
     return get_history_summary()
+
+
+@app.get("/api/v1/atlas/analytics")
+def get_atlas_analytics() -> dict:
+    return analyze_history()
+
+
+@app.get("/api/v1/atlas/outcome-analytics")
+def get_atlas_outcome_analytics() -> dict:
+    return analyze_trade_outcomes()
+
+
+@app.get("/api/v1/atlas/policy-performance")
+def get_atlas_policy_performance() -> dict:
+    return evaluate_policy_performance()
+
+
+@app.get("/api/v1/atlas/recovery-attribution")
+def get_atlas_recovery_attribution() -> dict:
+    return analyze_recovery_chains()
+
+
+@app.get("/api/v1/atlas/risk-units")
+def get_atlas_risk_units() -> dict:
+    outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+    return build_risk_units(outcomes)
+
+
+@app.get("/api/v1/atlas/risk-appetite")
+def get_atlas_risk_appetite() -> dict:
+    return get_risk_appetite()
+
+
+@app.put("/api/v1/atlas/risk-appetite")
+def put_atlas_risk_appetite(request: RiskAppetiteUpdateRequest) -> dict:
+    try:
+        return update_risk_appetite(
+            request.portfolio_hard_risk_pct,
+            actor=request.actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/atlas/capital-sizing")
+def get_atlas_capital_sizing() -> dict:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+    status = Status.model_validate(status_data).model_dump(mode="json")
+    outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+    return build_capital_sizing_plan(status, outcomes)
+
+
+@app.get("/api/v1/atlas/recovery-risk")
+def get_atlas_recovery_risk() -> dict:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+    status = Status.model_validate(status_data).model_dump(mode="json")
+    outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+    return build_recovery_risk_ledger(status, outcomes)
+
+
+@app.get("/api/v1/atlas/shadow-policy")
+def get_atlas_shadow_policy() -> dict:
+    status_data = read_json(STATUS_FILE)
+
+    if not status_data:
+        raise HTTPException(
+            status_code=503,
+            detail="Nyao status is not available yet.",
+        )
+
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    intelligence = generate_advice(status_payload)
+    policy = build_shadow_policy(
+        status_payload,
+        intelligence,
+    )
+    history = record_shadow_policy(policy)
+
+    return {
+        "policy": policy,
+        "history": history,
+    }
+
+
+@app.get("/api/v1/atlas/shadow-history")
+def get_atlas_shadow_history(
+    limit: int = 200,
+) -> dict:
+    return get_shadow_history(limit=limit)
+
+
+@app.get("/api/v1/atlas/shadow-evaluation")
+def get_atlas_shadow_evaluation(
+    recent_limit: int = 50,
+) -> dict:
+    return evaluate_shadow_policies(
+        recent_limit=recent_limit,
+    )
+
+
+@app.get("/api/v1/atlas/shadow-replay")
+def get_atlas_shadow_replay(
+    recent_limit: int = 100,
+) -> dict:
+    return run_shadow_replay(
+        recent_limit=recent_limit,
+    )
+
+
+@app.get("/api/v1/atlas/policy-epochs")
+def get_atlas_policy_epochs(limit: int = 200) -> dict:
+    return get_policy_epoch_registry(limit=limit)
+
+
+@app.get("/api/v1/atlas/outcomes")
+def get_atlas_outcomes(
+    closed_limit: int = 200,
+    include_active: bool = True,
+) -> dict:
+    return get_trade_outcomes(
+        closed_limit=closed_limit,
+        include_active=include_active,
+    )
+
+
+@app.get("/api/v1/atlas/outcomes/summary")
+def get_atlas_outcomes_summary() -> dict:
+    return get_outcome_summary()
 
 
 @app.post("/api/v1/atlas/history/snapshot")
@@ -191,2153 +1530,2764 @@ def force_atlas_history_snapshot() -> dict:
     }
 
 
+@app.get("/api/v1/atlas/parameter-registry")
+def get_atlas_parameter_registry(name: str | None = None) -> dict[str, Any]:
+    if name:
+        parameter = get_parameter(name)
+        if parameter is None:
+            raise HTTPException(status_code=404, detail="Parameter not found.")
+        return {"summary": registry_summary(), "parameter": parameter}
+    return {"summary": registry_summary(), "parameters": all_parameters()}
+
+
+@app.get("/api/v1/atlas/parameter-intelligence")
+def get_atlas_parameter_intelligence() -> dict[str, Any]:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    intelligence = generate_advice(status_payload)
+    current_command = read_json(COMMANDS_FILE) or {}
+    return build_parameter_intelligence(
+        status_payload,
+        intelligence,
+        current_command=current_command,
+    )
+
+
+@app.get("/api/v1/atlas/parameter-evidence")
+def get_atlas_parameter_evidence(name: str | None = None) -> dict[str, Any]:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    evidence = build_parameter_evidence(status_payload)
+    if name:
+        item = evidence.get(name)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Parameter evidence not found.")
+        return {"symbol": status_payload.get("symbol"), "evidence": item}
+    return {
+        "symbol": status_payload.get("symbol"),
+        "parameter_count": len(evidence),
+        "evidence": evidence,
+    }
+
+
+@app.get("/api/v1/atlas/llm-evidence-packet")
+def get_atlas_llm_evidence_packet() -> dict[str, Any]:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    intelligence = generate_advice(status_payload)
+    current_command = read_json(COMMANDS_FILE) or {}
+    result = build_parameter_intelligence(
+        status_payload,
+        intelligence,
+        current_command=current_command,
+    )
+    return result["llm_evidence_packet"]
+
+
+@app.get("/api/v1/atlas/scalping-responsiveness")
+def get_atlas_scalping_responsiveness() -> dict[str, Any]:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+    status_payload = Status.model_validate(status_data).model_dump(mode="json")
+    return analyze_scalping_responsiveness(
+        status_payload,
+        read_json(COMMANDS_FILE) or {},
+        history=get_history(limit=720),
+        trade_outcomes=get_trade_outcomes(closed_limit=2_000, include_active=False),
+    )
+
+
+@app.get("/api/v1/atlas/llm/status")
+def get_atlas_llm_status() -> dict[str, Any]:
+    status = configured_llm_status()
+    return {
+        "foundation_version": "3.6",
+        **status,
+        "analyst_enabled": bool(status.get("enabled")) and bool(status.get("model")),
+        "critic_enabled": bool(status.get("enabled")) and bool(status.get("model")),
+        "human_review_required": True,
+        "eligible_for_execution": False,
+    }
+
+
+def _build_full_llm_policy_input(
+    status_payload: dict[str, Any],
+    current_command: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the same complete Atlas evidence packet for manual and timed runs."""
+    identity = account_identity(status_payload)
+    if not identity["ready"]:
+        raise ValueError(
+            "Nyao has not exported MT5 account identity yet. Refresh the updated EA "
+            "before running Gemini so performance cannot cross account boundaries."
+        )
+    with scoped_account_performance(status_payload):
+        return _build_scoped_llm_policy_input(status_payload, current_command, identity)
+
+
+def _build_gemini_scalp_zone_context(
+    zone_map: dict[str, Any],
+    zone_plan: dict[str, Any],
+    status_payload: dict[str, Any],
+) -> dict[str, Any]:
+    active_plan = dict(zone_plan.get("zone_plan") or {})
+    source_zone = dict(active_plan.get("source_zone") or {})
+    zone_aware = bool(zone_plan.get("zone_aware_scalping_active"))
+    ordinary_allowed = bool(zone_plan.get("ordinary_scalping_allowed", True))
+    live_zone_campaign = bool(status_payload.get("zone_mode_active"))
+
+    if zone_aware:
+        execution_lane = "ZONE_AWARE_SCALP"
+    elif live_zone_campaign or (zone_plan.get("mode") == "ZONE_MODE" and not ordinary_allowed):
+        execution_lane = "ZONE_CAMPAIGN"
+    else:
+        execution_lane = "NORMAL_SCALP"
+
+    side = str(active_plan.get("side") or zone_plan.get("zone_aware_scalping_side") or "NONE")
+    broker = dict(active_plan.get("broker_feasibility") or {})
+    return {
+        "version": "atlas-gemini-scalp-zone-context-v1",
+        "execution_lane": execution_lane,
+        "zone_context_active": bool(source_zone),
+        "zone_aware_scalping_active": zone_aware,
+        "ordinary_scalping_allowed": ordinary_allowed,
+        "zone_side": side,
+        "aligned_scalp_direction": side if zone_aware else "BOTH_OR_NORMAL_POLICY",
+        "counter_direction_rule": (
+            "BLOCKED_DETERMINISTICALLY_BY_NYAO" if zone_aware else "NORMAL_SCALP_RULES"
+        ),
+        "active_zone": {
+            key: source_zone.get(key)
+            for key in ("zone_id", "side", "timeframe", "kind", "low", "high", "score", "status", "confluence")
+        } if source_zone else None,
+        "zone_plan_state": zone_plan.get("state"),
+        "selected_zone_structure": active_plan.get("selected_structure") or broker.get("selected_structure"),
+        "broker_campaign_feasible": broker.get("campaign_feasible"),
+        "composite_bias": zone_map.get("composite_bias"),
+        "nearest_demand": zone_map.get("nearest_demand"),
+        "nearest_supply": zone_map.get("nearest_supply"),
+        "instruction": (
+            "Use deterministic zone analysis as contextual evidence for SCALP policy only. "
+            "Do not alter zone policy or turn a zone into a direct trade instruction. "
+            "When execution_lane is ZONE_AWARE_SCALP, the zone-aligned direction is a "
+            "deterministic constraint; optimize the Nyao scalp runtime around that context "
+            "without mutating the zone system itself."
+        ),
+    }
+
+
+def _build_scoped_llm_policy_input(
+    status_payload: dict[str, Any],
+    current_command: dict[str, Any],
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    intelligence = generate_advice(status_payload)
+    parameter_result = build_parameter_intelligence(
+        status_payload,
+        intelligence,
+        current_command=current_command,
+    )
+    shadow_policy = build_shadow_policy(status_payload, intelligence)
+    shadow_evaluation = evaluate_shadow_policies(recent_limit=50)
+    shadow_replay = run_shadow_replay(recent_limit=100)
+    policy_decision = build_policy_decision(
+        status_payload,
+        intelligence,
+        shadow_policy,
+        shadow_evaluation=shadow_evaluation,
+        shadow_replay=shadow_replay,
+    )
+    atlas_prior_analysis = build_atlas_prior_analysis(
+        shadow_policy=shadow_policy,
+        shadow_evaluation=shadow_evaluation,
+        shadow_replay=shadow_replay,
+        policy_decision=policy_decision,
+        decision_stability=get_policy_decision_stability(),
+        policy_epochs=get_policy_epoch_registry(limit=20),
+    )
+    trade_outcomes = get_trade_outcomes(closed_limit=2_000, include_active=False)
+    responsiveness = analyze_scalping_responsiveness(
+        status_payload,
+        current_command,
+        history=get_history(limit=720),
+        trade_outcomes=trade_outcomes,
+    )
+    policy_input = build_policy_input(
+        status_payload,
+        parameter_result,
+        performance_analytics=analyze_trade_outcomes(),
+        outcome_summary=get_outcome_summary(),
+        trade_outcomes=trade_outcomes,
+        atlas_prior_analysis=atlas_prior_analysis,
+        responsiveness_analysis=responsiveness,
+    )
+    policy_input["account_identity"] = {
+        "ready": identity["ready"],
+        "fingerprint": identity["fingerprint"],
+        "currency": identity["currency"],
+        "trade_mode": identity["trade_mode"],
+        "performance_scope": identity["performance_scope"],
+    }
+    policy_input["performance_context"]["account_fingerprint"] = identity[
+        "fingerprint"
+    ]
+    policy_input["performance_context"]["performance_scope"] = (
+        "CURRENT_MT5_ACCOUNT_ONLY"
+    )
+    policy_input["cross_account_learning"] = {
+        "scope": "GENERALIZED_KNOWLEDGE_ONLY",
+        "retained": [
+            "Nyao control meanings, constraints, and interaction rules",
+            "current applied runtime policy and policy epochs",
+            "symbol market history, regimes, candles, and zone methodology",
+            "non-account-specific execution and risk-management lessons",
+        ],
+        "quarantined_from_current_performance": [
+            "prior-account trades and P/L",
+            "prior-account win/loss streaks",
+            "prior-account balance, equity, and drawdown",
+        ],
+        "instruction": (
+            "Use retained knowledge as hypotheses and operating knowledge only. "
+            "Never describe prior-account trade statistics as this account's results."
+        ),
+    }
+    policy_input["application_mode"] = get_llm_cycle_schedule().get(
+        "execution_mode", "SUPERVISED"
+    )
+    candle_file = STATUS_FILE.parent / "candles.json"
+    candle_payload, candle_error = load_market_candle_export(candle_file)
+    candle_report = build_market_candle_report(
+        candle_payload,
+        source_path=candle_file,
+        expected_symbol=str(status_payload.get("symbol") or "") or None,
+        include_bars=True,
+        read_error=candle_error,
+    )
+    zone_map = build_zone_map(candle_report)
+    capital_sizing = build_capital_sizing_plan(
+        status_payload,
+        get_trade_outcomes(closed_limit=50, include_active=False),
+    )
+    zone_execution_plan = build_zone_execution_plan(
+        zone_map,
+        status_payload,
+        capital_sizing,
+    )
+    policy_input["zone_trading"] = {
+        "authority": "DETERMINISTIC_READ_ONLY",
+        "current_zone_policy": get_zone_policy(),
+        "current_zone_map": zone_map,
+        "current_zone_execution_plan": zone_execution_plan,
+        "capital_sizing": capital_sizing,
+        "instruction": (
+            "Zone analysis is read-only context for Gemini. Gemini may use zone side, "
+            "quality, timeframe, freshness, structure and feasibility to reason about "
+            "the full Nyao scalp lifecycle, including entry, management, exits, sizing "
+            "preferences and recovery. Gemini may not change zone policy, geometry, "
+            "confirmation, zone risk allocation, Atlas capital sizing, broker feasibility, "
+            "or the Atlas risk governor."
+        ),
+    }
+    policy_input["scalp_zone_context"] = _build_gemini_scalp_zone_context(
+        zone_map,
+        zone_execution_plan,
+        status_payload,
+    )
+    return policy_input
+
+
+def _persist_accepted_llm_policy(
+    result: dict[str, Any],
+    policy_input: dict[str, Any],
+    *,
+    status_payload: dict[str, Any],
+    current_command: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not result.get("eligible_for_rapid_supervised_review"):
+        return None
+    advisory = build_llm_policy_advisory_proposal(
+        result,
+        policy_input,
+        current_status=status_payload,
+        current_command=current_command,
+    )
+    persistence = persist_advisory_policy_proposal(advisory)
+    reconciliation = reconcile_advisory_review_state(advisory)
+    workflow = {
+        "proposal": advisory,
+        "persistence": persistence,
+        "review_reconciliation": reconciliation,
+        "next_action": "REQUEST_HUMAN_REVIEW",
+    }
+    result["advisory_workflow"] = workflow
+    return workflow
+
+
+@app.post("/api/v1/atlas/llm/review")
+async def run_atlas_llm_review(
+    request: LlmReviewRequest,
+) -> dict[str, Any]:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    intelligence = generate_advice(status_payload)
+    current_command = read_json(COMMANDS_FILE) or {}
+    parameter_result = build_parameter_intelligence(
+        status_payload,
+        intelligence,
+        current_command=current_command,
+    )
+
+    try:
+        provider = build_configured_provider()
+        return await asyncio.to_thread(
+            run_analyst_critic_review,
+            parameter_result["llm_evidence_packet"],
+            provider,
+            provider if request.run_critic else None,
+        )
+    except (
+        LlmProviderError,
+        ValidationError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/atlas/llm/policy-proposal")
+async def run_atlas_llm_policy_proposal() -> dict[str, Any]:
+    status_data = read_json(STATUS_FILE)
+    if not status_data:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+
+    status = Status.model_validate(status_data)
+    status_payload = status.model_dump(mode="json")
+    current_command = read_json(COMMANDS_FILE) or {}
+    policy_input = _build_full_llm_policy_input(status_payload, current_command)
+
+    try:
+        provider = build_configured_provider()
+        result = await asyncio.to_thread(
+            run_policy_proposal,
+            policy_input,
+            provider,
+            provider,
+        )
+        _persist_accepted_llm_policy(
+            result,
+            policy_input,
+            status_payload=status_payload,
+            current_command=current_command,
+        )
+        return result
+    except (
+        LlmProviderError,
+        ValidationError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+_LLM_CYCLE_TASKS: dict[str, asyncio.Task[Any]] = {}
+_LLM_SCHEDULE_LOOP_TASK: asyncio.Task[Any] | None = None
+_ZONE_DIRECTIVE_LOOP_TASK: asyncio.Task[Any] | None = None
+
+
+async def _execute_claimed_llm_cycle(symbol: str) -> None:
+    """Run Gemini outside the namespace lock, then atomically persist its result."""
+    command_file, status_file, _runtime_file = symbol_bridge_paths(
+        _ATLAS_BRIDGE_DIR,
+        symbol,
+    )
+    try:
+        async with _SYMBOL_REQUEST_LOCK:
+            with scoped_symbol_storage(symbol):
+                status_data = read_json(status_file)
+                if not status_data:
+                    raise ValueError(f"Nyao status is not available for {symbol}.")
+                status_payload = Status.model_validate(status_data).model_dump(
+                    mode="json"
+                )
+                current_command = read_json(command_file) or {}
+                policy_input = _build_full_llm_policy_input(
+                    status_payload,
+                    current_command,
+                )
+
+        provider = build_configured_provider()
+        result = await asyncio.to_thread(
+            run_policy_proposal,
+            policy_input,
+            provider,
+            provider,
+        )
+
+        advisory_id = None
+        cycle_status = str(result.get("state") or "COMPLETED")
+        critic = result.get("critic") or {}
+        critic_verdict = critic.get("verdict")
+        if result.get("eligible_for_rapid_supervised_review"):
+            advisory = build_llm_policy_advisory_proposal(
+                result,
+                policy_input,
+                current_status=status_payload,
+                current_command=current_command,
+            )
+            async with _SYMBOL_REQUEST_LOCK:
+                with scoped_symbol_storage(symbol):
+                    live_status_data = read_json(status_file) or {}
+                    live_command = read_json(command_file) or {}
+                    live_status = Status.model_validate(live_status_data).model_dump(
+                        mode="json"
+                    )
+                    live_capital = build_capital_sizing_plan(
+                        live_status,
+                        get_trade_outcomes(closed_limit=200, include_active=False),
+                    )
+                    live_status["_atlas_capital_protection"] = dict(
+                        live_capital.get("loss_protection") or {}
+                    )
+                    context = llm_advisory_context_status(
+                        advisory,
+                        current_status=live_status,
+                        current_command=live_command,
+                    )
+                    if context.get("phase") != "PRE_APPLY":
+                        cycle_status = "STALE_NOT_PERSISTED"
+                    else:
+                        persist_advisory_policy_proposal(advisory)
+                        reconcile_advisory_review_state(advisory)
+                        advisory_id = advisory.get("proposal_id")
+                        autonomous = apply_autonomous_llm_policy(
+                            llm_result=result,
+                            advisory=advisory,
+                            current_status=live_status,
+                            current_command=live_command,
+                            command_file=command_file,
+                        )
+                        if autonomous.get("active_proposal_id"):
+                            advisory_id = str(autonomous["active_proposal_id"])
+                        result["autonomous_application"] = autonomous
+                        cycle_status = (
+                            "AUTONOMOUS_POLICY_APPLIED"
+                            if autonomous.get("applied")
+                            else str(autonomous.get("status") or "READY_FOR_HUMAN_REVIEW")
+                        )
+
+        async with _SYMBOL_REQUEST_LOCK:
+            with scoped_symbol_storage(symbol):
+                complete_llm_cycle(
+                    status=cycle_status,
+                    llm_proposal_id=result.get("proposal_id"),
+                    advisory_proposal_id=advisory_id,
+                    critic_verdict=critic_verdict,
+                )
+    except asyncio.CancelledError:
+        async with _SYMBOL_REQUEST_LOCK:
+            with scoped_symbol_storage(symbol):
+                complete_llm_cycle(
+                    status="CANCELLED",
+                    error="Atlas stopped while the policy cycle was running.",
+                )
+        raise
+    except Exception as exc:
+        async with _SYMBOL_REQUEST_LOCK:
+            with scoped_symbol_storage(symbol):
+                complete_llm_cycle(
+                    status="FAILED",
+                    error=str(exc)[:2000],
+                )
+
+
+def _start_claimed_llm_cycle(symbol: str) -> None:
+    task = asyncio.create_task(
+        _execute_claimed_llm_cycle(symbol),
+        name=f"atlas-llm-cycle-{safe_symbol(symbol)}",
+    )
+    _LLM_CYCLE_TASKS[symbol] = task
+
+    def _remove(completed: asyncio.Task[Any]) -> None:
+        if _LLM_CYCLE_TASKS.get(symbol) is completed:
+            _LLM_CYCLE_TASKS.pop(symbol, None)
+
+    task.add_done_callback(_remove)
+
+
+@app.get("/api/v1/atlas/llm/cycle-schedule")
+def get_atlas_llm_cycle_schedule() -> dict[str, Any]:
+    return get_llm_cycle_schedule()
+
+
+@app.put("/api/v1/atlas/llm/cycle-schedule")
+def update_atlas_llm_cycle_schedule(
+    request: LlmCycleScheduleRequest,
+) -> dict[str, Any]:
+    return update_llm_cycle_schedule(
+        enabled=request.enabled,
+        interval_minutes=request.interval_minutes,
+        execution_mode=request.execution_mode,
+        minimum_dwell_minutes=request.minimum_dwell_minutes,
+        minimum_confidence=request.minimum_confidence,
+    )
+
+
+@app.get("/api/v1/atlas/autonomous-policy-events")
+def get_atlas_autonomous_policy_events(limit: int = 100) -> dict[str, Any]:
+    return get_autonomous_policy_events(limit=limit)
+
+
+@app.get("/api/v1/atlas/autonomous-policy-consensus")
+def get_atlas_autonomous_policy_consensus() -> dict[str, Any]:
+    return get_autonomous_policy_consensus(read_json(COMMANDS_FILE) or {})
+
+
+@app.get("/api/v1/atlas/autonomous-policy-applications")
+def get_atlas_autonomous_policy_applications(limit: int = 50) -> dict[str, Any]:
+    """Reconcile autonomous intent with registered and live Nyao runtime state."""
+    limit = max(1, min(int(limit), 200))
+    event_store = get_autonomous_policy_events(limit=1000)
+    events = [
+        row for row in list(event_store.get("events") or [])
+        if isinstance(row, dict) and row.get("action") == "AUTO_POLICY_APPLIED"
+    ]
+    registry = get_policy_epoch_registry(limit=1000)
+    epochs = list(registry.get("epochs") or registry.get("policy_epochs") or [])
+    by_epoch = {
+        int(row.get("policy_epoch") or row.get("epoch") or 0): row
+        for row in epochs if isinstance(row, dict)
+    }
+    command = read_json(COMMANDS_FILE) or {}
+    status = read_json(STATUS_FILE) or {}
+    current_command_epoch = int(command.get("policy_epoch") or 0)
+    current_status_epoch = int(status.get("policy_epoch") or 0)
+
+    rows: list[dict[str, Any]] = []
+    for event in events[:limit]:
+        epoch = int(event.get("policy_epoch") or 0)
+        patch = dict(event.get("consensus_patch") or {})
+        epoch_row = by_epoch.get(epoch) or {}
+        runtime = dict(epoch_row.get("runtime") or {})
+        previous_runtime = dict((by_epoch.get(epoch - 1) or {}).get("runtime") or {})
+        registered_values = {name: runtime.get(name) for name in patch}
+        before_values = {name: previous_runtime.get(name) for name in patch}
+        registry_available = bool(runtime)
+        registry_matches = bool(patch) and registry_available and all(
+            runtime.get(name) == value for name, value in patch.items()
+        )
+
+        live_values = {
+            name: status.get(f"runtime_{name}")
+            for name in patch
+        }
+        live_comparable = epoch == current_status_epoch and bool(patch)
+        live_matches = live_comparable and all(
+            live_values.get(name) == value for name, value in patch.items()
+        )
+
+        if live_comparable:
+            reconciliation = "RUNTIME_CONFIRMED" if live_matches else "RUNTIME_MISMATCH"
+        elif registry_available:
+            reconciliation = "SUPERSEDED_CONFIRMED" if registry_matches else "REGISTRY_MISMATCH"
+        else:
+            reconciliation = "COMMAND_WRITTEN_AWAITING_REGISTRY"
+
+        changes = {
+            name: {
+                "before": before_values.get(name),
+                "intended": value,
+                "registered": registered_values.get(name),
+                "live": live_values.get(name) if live_comparable else None,
+                "confirmed": (live_matches if live_comparable else registry_matches),
+            }
+            for name, value in patch.items()
+        }
+        rows.append({
+            **event,
+            "reconciliation": reconciliation,
+            "registry_available": registry_available,
+            "registry_matches_intent": registry_matches,
+            "live_comparable": live_comparable,
+            "live_matches_intent": live_matches if live_comparable else None,
+            "current_command_epoch": current_command_epoch,
+            "current_status_epoch": current_status_epoch,
+            "changes": changes,
+        })
+
+    current_active = next(
+        (row for row in rows if int(row.get("policy_epoch") or 0) == current_command_epoch),
+        rows[0] if rows else None,
+    )
+    return {
+        "version": "atlas-autonomous-application-history-v1",
+        "application_count": len(rows),
+        "current_command_epoch": current_command_epoch,
+        "current_status_epoch": current_status_epoch,
+        "current_active": current_active,
+        "applications": rows,
+    }
+
+
+@app.post("/api/v1/atlas/llm/cycle-schedule/run-now")
+async def run_atlas_llm_cycle_now() -> dict[str, Any]:
+    status_data = read_json(STATUS_FILE) or {}
+    symbol = str(status_data.get("symbol") or "").strip()
+    if not symbol:
+        raise HTTPException(status_code=503, detail="Nyao symbol is not available.")
+    claim = claim_llm_cycle(trigger="HUMAN_RUN_NOW", force=True)
+    if claim.get("claimed"):
+        _start_claimed_llm_cycle(symbol)
+    return claim
+
+
+async def _llm_schedule_loop() -> None:
+    while True:
+        try:
+            for item in discover_bridge_symbols(_ATLAS_BRIDGE_DIR):
+                symbol = str(item.get("symbol") or "").strip()
+                if not symbol or symbol in _LLM_CYCLE_TASKS:
+                    continue
+                async with _SYMBOL_REQUEST_LOCK:
+                    with scoped_symbol_storage(symbol):
+                        claim = claim_llm_cycle(
+                            trigger="SCHEDULED_INTERVAL",
+                            force=False,
+                        )
+                if claim.get("claimed"):
+                    _start_claimed_llm_cycle(symbol)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # One malformed/offline symbol must not stop schedules for all symbols.
+            pass
+        await asyncio.sleep(15)
+
+
+def _refresh_zone_directive_for_symbol(symbol: str) -> None:
+    command_file, status_file, _runtime_file = symbol_bridge_paths(
+        _ATLAS_BRIDGE_DIR,
+        symbol,
+    )
+    status_data = read_json(status_file) or {}
+    candle_file = status_file.parent / "candles.json"
+    payload, read_error = load_market_candle_export(candle_file)
+    candle_report = build_market_candle_report(
+        payload,
+        source_path=candle_file,
+        expected_symbol=symbol,
+        include_bars=True,
+        read_error=read_error,
+    )
+    zone_map = build_zone_map(candle_report)
+    # Background directive publication does not pass through FastAPI middleware.
+    # Scope outcome evidence explicitly to the live MT5 account so loss streaks
+    # and capital budgets cannot oscillate between CURRENT_ACCOUNT and
+    # UNIDENTIFIED_ACCOUNT data every two seconds.
+    with scoped_account_performance(status_data):
+        capital_sizing = build_capital_sizing_plan(
+            status_data,
+            get_trade_outcomes(closed_limit=200, include_active=False),
+        )
+
+    # Loss-protection windows actively inspect the already accumulated Gemini
+    # consensus. A qualified candidate may bypass normal dwell immediately
+    # without waiting for the next scheduled Gemini cycle.
+    protection_status = {
+        **status_data,
+        "_atlas_capital_protection": dict(capital_sizing.get("loss_protection") or {}),
+    }
+    protection_apply = apply_ready_loss_protection_consensus(
+        current_status=protection_status,
+        current_command=read_json(command_file) or {},
+        command_file=command_file,
+    )
+    if protection_apply.get("applied"):
+        # The policy changed, but capital authority remains deterministic and
+        # independent. Rebuilding the plan below uses the same capital snapshot.
+        pass
+
+    plan = build_zone_execution_plan(zone_map, status_data, capital_sizing)
+    campaign_exposure_active = bool(
+        int(status_data.get("strategy_open_positions") or 0) > 0
+        or int(status_data.get("working_limit_orders") or 0) > 0
+    )
+    if plan.get("mode") != "ZONE_MODE" and not campaign_exposure_active:
+        # The live market plan is the mode authority here. Nyao's status can
+        # briefly retain zone_mode_active after price has already left a zone.
+        # Broker exposure remains a stronger boundary: never activate a queued
+        # scalp policy while a locked zone position or limit is still live.
+        clean_boundary_status = {**status_data, "zone_mode_active": False}
+        pending_result = apply_pending_autonomous_policy(
+            current_status=clean_boundary_status,
+            current_command=read_json(command_file) or {},
+            command_file=command_file,
+        )
+        if pending_result.get("applied"):
+            plan = build_zone_execution_plan(zone_map, status_data, capital_sizing)
+
+    # Once Nyao has submitted a zone campaign, keep the complete directive
+    # immutable until all campaign positions and pending limits are gone.
+    _persist_zone_campaign(
+        plan,
+        status_data,
+        status_file.parent / "zone_directive.json",
+    )
+
+
+async def _zone_directive_loop() -> None:
+    while True:
+        try:
+            for item in discover_bridge_symbols(_ATLAS_BRIDGE_DIR):
+                symbol = str(item.get("symbol") or "").strip()
+                if not symbol:
+                    continue
+                async with _SYMBOL_REQUEST_LOCK:
+                    with scoped_symbol_storage(symbol):
+                        _status_for_account_scope = read_json(
+                            symbol_bridge_paths(_ATLAS_BRIDGE_DIR, symbol)[1]
+                        ) or {}
+                        with scoped_account_performance(_status_for_account_scope):
+                            await asyncio.to_thread(
+                                _refresh_zone_directive_for_symbol,
+                                symbol,
+                            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Invalid or mid-write market files must not stop future refreshes.
+            pass
+        await asyncio.sleep(2)
+
+
+@app.on_event("startup")
+async def start_llm_cycle_scheduler() -> None:
+    global _LLM_SCHEDULE_LOOP_TASK, _ZONE_DIRECTIVE_LOOP_TASK
+    for item in discover_bridge_symbols(_ATLAS_BRIDGE_DIR):
+        symbol = str(item.get("symbol") or "").strip()
+        if symbol:
+            with scoped_symbol_storage(symbol):
+                recover_interrupted_llm_cycle()
+    _LLM_SCHEDULE_LOOP_TASK = asyncio.create_task(
+        _llm_schedule_loop(),
+        name="atlas-llm-cycle-scheduler",
+    )
+    _ZONE_DIRECTIVE_LOOP_TASK = asyncio.create_task(
+        _zone_directive_loop(),
+        name="atlas-zone-directive-publisher",
+    )
+
+
+@app.on_event("shutdown")
+async def stop_llm_cycle_scheduler() -> None:
+    tasks = [task for task in _LLM_CYCLE_TASKS.values() if not task.done()]
+    if _LLM_SCHEDULE_LOOP_TASK and not _LLM_SCHEDULE_LOOP_TASK.done():
+        _LLM_SCHEDULE_LOOP_TASK.cancel()
+        tasks.append(_LLM_SCHEDULE_LOOP_TASK)
+    if _ZONE_DIRECTIVE_LOOP_TASK and not _ZONE_DIRECTIVE_LOOP_TASK.done():
+        _ZONE_DIRECTIVE_LOOP_TASK.cancel()
+        tasks.append(_ZONE_DIRECTIVE_LOOP_TASK)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @app.get("/api/v1/nyao/control-schema")
 def get_nyao_control_schema() -> list[dict]:
     return RUNTIME_CONTROL_GROUPS
+
 
 
 DASHBOARD_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Atlas Control Center</title>
-
-    <style>
-        :root {
-            color-scheme: dark;
-            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            --bg: #06080d;
-            --panel: rgba(20, 27, 43, 0.92);
-            --panel-2: rgba(13, 19, 31, 0.95);
-            --panel-3: rgba(255,255,255,0.035);
-            --border: rgba(255,255,255,0.08);
-            --text: #f5f7fb;
-            --muted: #8f9bb0;
-            --green: #4dd889;
-            --red: #ff6b73;
-            --blue: #6aa7ff;
-            --amber: #f1c66d;
-            --purple: #b995ff;
-        }
-
-        * { box-sizing: border-box; }
-
-        body {
-            margin: 0;
-            min-height: 100vh;
-            background:
-                radial-gradient(circle at top, #172033 0%, #0a0e17 44%, #06080d 100%);
-            color: var(--text);
-        }
-
-        button, input, select { font: inherit; }
-
-        .container {
-            width: min(1480px, calc(100% - 28px));
-            margin: 0 auto;
-            padding: 28px 0 60px;
-        }
-
-        .header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 18px;
-            margin-bottom: 20px;
-        }
-
-        .brand h1 {
-            margin: 0;
-            font-size: 31px;
-            letter-spacing: 0.09em;
-        }
-
-        .brand p {
-            margin: 7px 0 0;
-            color: var(--muted);
-        }
-
-        .header-right {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: flex-end;
-            gap: 10px;
-        }
-
-        .pill {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 9px 13px;
-            border: 1px solid var(--border);
-            background: rgba(255,255,255,0.05);
-            border-radius: 999px;
-            color: #ccd5e3;
-            font-size: 12px;
-        }
-
-        .dot {
-            width: 9px;
-            height: 9px;
-            border-radius: 50%;
-            background: var(--red);
-        }
-
-        .dot.connected { background: var(--green); }
-
-        .sync-ok { color: var(--green); font-weight: 700; }
-        .sync-waiting { color: var(--amber); font-weight: 700; }
-
-        .top-grid {
-            display: grid;
-            grid-template-columns: repeat(5, minmax(0,1fr));
-            gap: 13px;
-        }
-
-        .card {
-            background: var(--panel);
-            border: 1px solid var(--border);
-            border-radius: 17px;
-            padding: 18px;
-        }
-
-        .card-label {
-            color: var(--muted);
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: .08em;
-        }
-
-        .card-value {
-            margin-top: 8px;
-            font-size: 26px;
-            font-weight: 750;
-        }
-
-        .positive { color: var(--green); }
-        .negative { color: var(--red); }
-        .warning { color: var(--amber); }
-
-        .section { margin-top: 15px; }
-
-        .section-heading {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            gap: 15px;
-            margin-bottom: 14px;
-        }
-
-        .section-title {
-            margin: 0;
-            font-size: 17px;
-        }
-
-        .section-note {
-            color: var(--muted);
-            font-size: 12px;
-            margin-top: 5px;
-            max-width: 850px;
-            line-height: 1.45;
-        }
-
-        .score-grid, .decision-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 13px;
-        }
-
-        .score {
-            font-size: 37px;
-            font-weight: 780;
-            margin: 7px 0 7px;
-        }
-
-        .score-meta {
-            font-size: 12px;
-            color: var(--muted);
-            margin-bottom: 12px;
-        }
-
-        .bar {
-            height: 9px;
-            border-radius: 999px;
-            background: rgba(255,255,255,.07);
-            overflow: hidden;
-        }
-
-        .bar-fill {
-            width: 0;
-            height: 100%;
-            border-radius: inherit;
-            transition: width .25s ease;
-        }
-
-        .buy-fill { background: linear-gradient(90deg,#278f63,#55e89a); }
-        .sell-fill { background: linear-gradient(90deg,#b33f52,#ff6d78); }
-
-        .decision-card {
-            background: var(--panel-2);
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            padding: 16px;
-        }
-
-        .decision-card.buy { border-top: 2px solid rgba(77,216,137,.8); }
-        .decision-card.sell { border-top: 2px solid rgba(255,107,115,.8); }
-
-        .decision-top {
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-            align-items: center;
-        }
-
-        .decision-side {
-            font-size: 18px;
-            font-weight: 800;
-            letter-spacing: .07em;
-        }
-
-        .badge {
-            border-radius: 999px;
-            padding: 6px 9px;
-            font-size: 10px;
-            font-weight: 800;
-            letter-spacing: .06em;
-            text-transform: uppercase;
-            background: rgba(255,255,255,.07);
-        }
-
-        .badge.ready { color: #a1f4c0; background: rgba(77,216,137,.13); }
-        .badge.blocked { color: #f5d78c; background: rgba(241,198,109,.12); }
-        .badge.danger { color: #ffc0c4; background: rgba(255,107,115,.12); }
-
-        .decision-stats {
-            display: grid;
-            grid-template-columns: repeat(3,minmax(0,1fr));
-            gap: 9px;
-            margin-top: 14px;
-        }
-
-        .mini {
-            border: 1px solid rgba(255,255,255,.055);
-            background: var(--panel-3);
-            border-radius: 11px;
-            padding: 11px;
-        }
-
-        .mini .label {
-            color: var(--muted);
-            font-size: 10px;
-            text-transform: uppercase;
-            letter-spacing: .06em;
-        }
-
-        .mini .value {
-            margin-top: 6px;
-            font-size: 17px;
-            font-weight: 750;
-        }
-
-        .reason {
-            margin-top: 11px;
-            border: 1px solid rgba(255,255,255,.055);
-            background: var(--panel-3);
-            border-radius: 11px;
-            padding: 11px;
-        }
-
-        .reason code {
-            display: block;
-            margin-top: 6px;
-            color: #dce4f0;
-            overflow-wrap: anywhere;
-            font-size: 12px;
-        }
-
-        .gates {
-            display: grid;
-            grid-template-columns: repeat(4,minmax(0,1fr));
-            gap: 10px;
-            margin-top: 11px;
-        }
-
-        .master-grid {
-            display: grid;
-            grid-template-columns: repeat(4,minmax(0,1fr));
-            gap: 11px;
-        }
-
-        .master-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            border: 1px solid rgba(255,255,255,.055);
-            background: var(--panel-3);
-            border-radius: 12px;
-            padding: 12px;
-        }
-
-        button {
-            border: 0;
-            border-radius: 10px;
-            padding: 9px 13px;
-            cursor: pointer;
-            font-weight: 700;
-            transition: transform .13s ease, opacity .13s ease;
-        }
-
-        button:hover { transform: translateY(-1px); }
-        button:disabled { opacity:.45; cursor:not-allowed; transform:none; }
-
-        .enabled-button { background:#245f44; color:#baffd4; }
-        .disabled-button { background:#642d38; color:#ffd1d5; }
-        .neutral-button { background:#27354f; color:#dce8ff; }
-        .primary-button { background:#315f9d; color:white; }
-        .danger-button { background:#71323e; color:#ffd7da; }
-
-        .control-toolbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            flex-wrap: wrap;
-            margin-bottom: 12px;
-        }
-
-        .search {
-            min-width: min(420px,100%);
-            flex: 1;
-            max-width: 520px;
-            border: 1px solid rgba(255,255,255,.12);
-            background: rgba(255,255,255,.045);
-            color: white;
-            border-radius: 10px;
-            padding: 10px 12px;
-            outline: none;
-        }
-
-        .search:focus {
-            border-color: rgba(106,167,255,.7);
-            box-shadow: 0 0 0 3px rgba(106,167,255,.08);
-        }
-
-        .dirty {
-            color: var(--amber);
-            font-size: 12px;
-        }
-
-        .clean {
-            color: var(--muted);
-            font-size: 12px;
-        }
-
-        .groups {
-            display: grid;
-            gap: 11px;
-        }
-
-        details.group {
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            background: var(--panel-2);
-            overflow: hidden;
-        }
-
-        details.group[open] {
-            border-color: rgba(106,167,255,.18);
-        }
-
-        details.group > summary {
-            list-style: none;
-            cursor: pointer;
-            padding: 14px 16px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            user-select: none;
-        }
-
-        details.group > summary::-webkit-details-marker { display:none; }
-
-        .group-title {
-            display: flex;
-            align-items: center;
-            gap: 9px;
-            font-weight: 750;
-        }
-
-        .count {
-            padding: 3px 7px;
-            border-radius: 999px;
-            background: rgba(255,255,255,.06);
-            color: var(--muted);
-            font-size: 10px;
-        }
-
-        .group-description {
-            padding: 0 16px 13px;
-            color: var(--muted);
-            font-size: 12px;
-            line-height: 1.45;
-        }
-
-        .control-grid {
-            display: grid;
-            grid-template-columns: repeat(3,minmax(0,1fr));
-            gap: 10px;
-            padding: 0 13px 14px;
-        }
-
-        .runtime-control {
-            border: 1px solid rgba(255,255,255,.055);
-            background: rgba(255,255,255,.028);
-            border-radius: 11px;
-            padding: 11px;
-            min-width: 0;
-        }
-
-        .runtime-control.changed {
-            border-color: rgba(241,198,109,.45);
-            background: rgba(241,198,109,.045);
-        }
-
-        .control-head {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            gap: 9px;
-            margin-bottom: 9px;
-        }
-
-        .control-label {
-            font-size: 12px;
-            color: #d4dce8;
-            line-height: 1.35;
-        }
-
-        .applied {
-            font-size: 10px;
-            color: var(--muted);
-            white-space: nowrap;
-        }
-
-        .runtime-control input[type="number"],
-        .runtime-control input[type="text"],
-        .runtime-control input[type="time"],
-        .runtime-control select {
-            width: 100%;
-            border: 1px solid rgba(255,255,255,.11);
-            background: rgba(255,255,255,.045);
-            color: white;
-            border-radius: 8px;
-            padding: 8px 9px;
-            outline: none;
-        }
-
-        .runtime-control input:focus,
-        .runtime-control select:focus {
-            border-color: rgba(106,167,255,.7);
-        }
-
-        .switch {
-            position: relative;
-            display: inline-block;
-            width: 46px;
-            height: 26px;
-        }
-
-        .switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-
-        .slider {
-            position:absolute;
-            inset:0;
-            border-radius:999px;
-            background:#5f2f39;
-            cursor:pointer;
-            transition:.2s;
-        }
-
-        .slider:before {
-            content:"";
-            position:absolute;
-            width:20px;
-            height:20px;
-            left:3px;
-            top:3px;
-            border-radius:50%;
-            background:#fff;
-            transition:.2s;
-        }
-
-        .switch input:checked + .slider { background:#2c7c56; }
-        .switch input:checked + .slider:before { transform:translateX(20px); }
-
-        .control-actions {
-            position: sticky;
-            bottom: 12px;
-            z-index: 8;
-            margin-top: 13px;
-            padding: 11px 12px;
-            display:flex;
-            align-items:center;
-            justify-content:space-between;
-            gap:12px;
-            flex-wrap:wrap;
-            border:1px solid rgba(255,255,255,.1);
-            border-radius:13px;
-            background:rgba(10,14,23,.94);
-            backdrop-filter: blur(12px);
-        }
-
-        .action-buttons {
-            display:flex;
-            gap:9px;
-            flex-wrap:wrap;
-        }
-
-        .order-grid {
-            display:grid;
-            grid-template-columns:repeat(7,minmax(0,1fr));
-            gap:9px;
-        }
-
-        .intelligence-hero {
-            display: grid;
-            grid-template-columns: 1.15fr .85fr;
-            gap: 12px;
-        }
-
-        .intelligence-summary {
-            border: 1px solid rgba(185,149,255,.22);
-            background: linear-gradient(145deg, rgba(185,149,255,.08), rgba(106,167,255,.035));
-            border-radius: 15px;
-            padding: 16px;
-        }
-
-        .intelligence-side {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-        }
-
-        .intel-list {
-            margin: 11px 0 0;
-            padding-left: 18px;
-            color: #d4dce8;
-            font-size: 12px;
-            line-height: 1.55;
-        }
-
-        .intel-list li + li {
-            margin-top: 5px;
-        }
-
-        .proposal-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0,1fr));
-            gap: 8px;
-            margin-top: 11px;
-        }
-
-        .proposal-item {
-            border: 1px solid rgba(255,255,255,.06);
-            background: rgba(255,255,255,.025);
-            border-radius: 10px;
-            padding: 10px;
-        }
-
-        .proposal-item .key {
-            color: var(--muted);
-            font-size: 9px;
-            text-transform: uppercase;
-            letter-spacing: .06em;
-        }
-
-        .proposal-item .val {
-            margin-top: 5px;
-            font-size: 14px;
-            font-weight: 750;
-        }
-
-        .observability-grid {
-            display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 10px;
-        }
-
-        .observability-card {
-            border: 1px solid rgba(255,255,255,.055);
-            background: var(--panel-2);
-            border-radius: 13px;
-            padding: 13px;
-            min-width: 0;
-        }
-
-        .observability-card .label {
-            color: var(--muted);
-            font-size: 10px;
-            text-transform: uppercase;
-            letter-spacing: .07em;
-        }
-
-        .observability-card .value {
-            margin-top: 7px;
-            font-size: 18px;
-            font-weight: 750;
-            overflow-wrap: anywhere;
-        }
-
-        .signal-anatomy-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-        }
-
-        .signal-anatomy {
-            border: 1px solid rgba(255,255,255,.06);
-            background: var(--panel-2);
-            border-radius: 14px;
-            padding: 14px;
-        }
-
-        .signal-component-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0,1fr));
-            gap: 8px;
-            margin-top: 11px;
-        }
-
-        .signal-reasoning {
-            margin-top: 10px;
-            padding: 10px;
-            border: 1px solid rgba(255,255,255,.055);
-            border-radius: 10px;
-            background: rgba(255,255,255,.025);
-            color: #cbd5e4;
-            font-size: 11px;
-            line-height: 1.45;
-            overflow-wrap: anywhere;
-        }
-
-        .positions-wrapper {
-            overflow-x: auto;
-        }
-
-        .positions-table {
-            width: 100%;
-            border-collapse: collapse;
-            min-width: 1280px;
-            font-size: 11px;
-        }
-
-        .positions-table th,
-        .positions-table td {
-            padding: 9px 10px;
-            text-align: left;
-            border-bottom: 1px solid rgba(255,255,255,.055);
-            white-space: nowrap;
-        }
-
-        .positions-table th {
-            color: var(--muted);
-            text-transform: uppercase;
-            letter-spacing: .06em;
-            font-size: 9px;
-        }
-
-        .positions-table tr:last-child td {
-            border-bottom: 0;
-        }
-
-        .risk-meter {
-            height: 8px;
-            margin-top: 8px;
-            background: rgba(255,255,255,.07);
-            border-radius: 999px;
-            overflow: hidden;
-        }
-
-        .risk-meter-fill {
-            height: 100%;
-            width: 0;
-            border-radius: inherit;
-            background: linear-gradient(90deg, var(--green), var(--amber), var(--red));
-            transition: width .25s ease;
-        }
-
-        .verification-wrapper {
-            overflow-x: auto;
-        }
-
-        .verification-table {
-            width: 100%;
-            min-width: 760px;
-            border-collapse: collapse;
-            font-size: 12px;
-        }
-
-        .verification-table th,
-        .verification-table td {
-            padding: 10px 11px;
-            text-align: left;
-            border-bottom: 1px solid rgba(255,255,255,.06);
-        }
-
-        .verification-table th {
-            color: var(--muted);
-            font-size: 10px;
-            text-transform: uppercase;
-            letter-spacing: .07em;
-        }
-
-        .verification-table tr:last-child td {
-            border-bottom: 0;
-        }
-
-        .match {
-            color: var(--green);
-            font-weight: 700;
-        }
-
-        .mismatch {
-            color: var(--amber);
-            font-weight: 700;
-        }
-
-        .inherited {
-            color: var(--blue);
-            font-weight: 700;
-        }
-
-        .footer {
-            margin-top: 17px;
-            color:#758196;
-            text-align:right;
-            font-size:12px;
-        }
-
-        .hidden { display:none !important; }
-
-        @media(max-width:1150px) {
-            .top-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
-            .control-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
-            .order-grid { grid-template-columns:repeat(4,minmax(0,1fr)); }
-            .observability-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
-        }
-
-        @media(max-width:800px) {
-            .header { flex-direction:column; align-items:flex-start; }
-            .header-right { justify-content:flex-start; }
-            .top-grid,.score-grid,.decision-grid,.master-grid,.control-grid,.order-grid,.gates,
-            .observability-grid,.signal-anatomy-grid,.signal-component-grid,
-            .intelligence-hero,.intelligence-side,.proposal-grid {
-                grid-template-columns:1fr;
-            }
-            .decision-stats { grid-template-columns:1fr; }
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Atlas Operator Control Center</title>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#080b11; --panel:#10151f; --panel2:#151c28; --panel3:#0c1119;
+  --border:#252e3d; --text:#eef2f7; --muted:#8e9aad; --soft:#b9c2cf;
+  --green:#48d597; --red:#ff6f7d; --amber:#f2c66d; --blue:#73a9ff;
+  --purple:#b99aff; --shadow:0 18px 60px rgba(0,0,0,.28);
+  --radius:18px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer}
+.shell{display:grid;grid-template-columns:238px 1fr;min-height:100vh}
+.sidebar{position:sticky;top:0;height:100vh;border-right:1px solid var(--border);padding:24px 18px;background:#0b0f16}
+.brand{display:flex;gap:12px;align-items:center;margin-bottom:28px;padding:0 8px}
+.logo{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(145deg,#263652,#121a28);font-weight:800;letter-spacing:.05em}
+.brand h1{font-size:16px;margin:0}.brand small{display:block;color:var(--muted);margin-top:2px}
+.nav{display:grid;gap:6px}
+.nav button{border:0;background:transparent;color:var(--muted);padding:11px 12px;border-radius:11px;text-align:left;font-weight:650}
+.nav button:hover,.nav button.active{background:#151d29;color:var(--text)}
+.sidebar-bottom{position:absolute;bottom:22px;left:18px;right:18px}
+.connection{padding:12px;border:1px solid var(--border);background:var(--panel3);border-radius:12px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}.dot.ok{background:var(--green)}.dot.bad{background:var(--red)}
+.main{min-width:0}
+.topbar{height:74px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);padding:0 30px;position:sticky;top:0;background:rgba(8,11,17,.93);backdrop-filter:blur(15px);z-index:20}
+.title{font-size:18px;font-weight:750}.subtitle{color:var(--muted);font-size:12px;margin-top:2px}
+.top-meta{display:flex;gap:10px;align-items:center}
+.pill{border:1px solid var(--border);background:var(--panel);padding:7px 10px;border-radius:999px;color:var(--soft);font-size:12px}
+.symbol-select{border:1px solid rgba(115,169,255,.35);background:var(--panel);color:var(--blue);padding:7px 30px 7px 10px;border-radius:999px;font-size:12px;font-weight:750;outline:none}
+.pill.ok{color:var(--green);border-color:rgba(72,213,151,.25)}.pill.warn{color:var(--amber)}.pill.bad{color:var(--red)}
+.content{padding:28px 30px 60px;max-width:1540px;margin:0 auto}
+.view{display:none}.view.active{display:block}
+.page-head{margin-bottom:22px}.page-head h2{margin:0;font-size:25px}.page-head p{margin:6px 0 0;color:var(--muted)}
+.grid{display:grid;gap:16px}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px}
+.card h3{margin:0 0 14px;font-size:14px}.label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.value{font-size:25px;font-weight:760;margin-top:5px}.value.small{font-size:16px}.muted{color:var(--muted)}
+.hero{padding:22px;display:grid;grid-template-columns:1.5fr 1fr;gap:18px}
+.hero-status{font-size:30px;font-weight:800;margin:9px 0}.hero-copy{max-width:700px;color:var(--muted)}
+.kpis{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.kpi{padding:13px;background:var(--panel3);border:1px solid var(--border);border-radius:12px}
+.section{margin-top:18px}.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.section-head h3{margin:0;font-size:16px}.section-head p{margin:4px 0 0;color:var(--muted);font-size:12px}
+.badge{display:inline-flex;align-items:center;padding:5px 8px;border-radius:999px;border:1px solid var(--border);font-size:11px;font-weight:750}.badge.ok{color:var(--green)}.badge.warn{color:var(--amber)}.badge.bad{color:var(--red)}.badge.info{color:var(--blue)}
+.signal-grid{display:grid;grid-template-columns:1.05fr 1fr 1fr;gap:14px}
+.signal-score{font-size:34px;font-weight:800;letter-spacing:-.03em;margin:8px 0 2px}
+.signal-meta{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.signal-meta .kpi{padding:10px}
+.signal-track{height:7px;background:rgba(255,255,255,.06);border-radius:999px;overflow:hidden;margin-top:12px}
+.signal-fill{height:100%;width:0;border-radius:999px;background:currentColor;transition:width .2s ease}
+.signal-buy{color:var(--green)} .signal-sell{color:var(--red)}
+.bias-value{font-size:28px;font-weight:850;margin:7px 0 3px}
+.bias-bull{color:var(--green)} .bias-bear{color:var(--red)} .bias-neutral{color:var(--amber)}
+.signal-reason{margin-top:10px;min-height:34px;font-size:12px;color:var(--soft);line-height:1.45}
+.analysis-thesis{font-size:18px;font-weight:720;line-height:1.45;margin:8px 0;color:var(--text)}
+.zone-empty{min-height:220px;display:grid;place-items:center;text-align:center;padding:28px;border:1px dashed rgba(115,169,255,.35);border-radius:14px;background:linear-gradient(145deg,rgba(115,169,255,.05),rgba(185,154,255,.025))}
+.zone-empty strong{display:block;font-size:17px;margin-bottom:7px}.zone-empty p{max-width:650px;margin:0;color:var(--muted)}
+.zone-chart-shell{border:1px solid rgba(115,169,255,.28);border-radius:14px;overflow:hidden;background:linear-gradient(145deg,rgba(115,169,255,.045),rgba(5,9,16,.25))}.zone-chart-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;padding:15px 17px;border-bottom:1px solid var(--border)}.zone-chart-head strong{display:block;font-size:17px}.zone-chart-head p{margin:5px 0 0;color:var(--muted);max-width:850px}.zone-chart-frame{display:block;width:100%;height:auto;min-height:330px}.zone-chart-legend{display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted)}.zone-chart-key{display:inline-flex;gap:5px;align-items:center}.zone-chart-swatch{width:12px;height:8px;border-radius:2px}.zone-chart-swatch.demand{background:rgba(74,222,128,.35);border:1px solid var(--green)}.zone-chart-swatch.supply{background:rgba(251,113,133,.30);border:1px solid var(--red)}@media(max-width:760px){.zone-chart-head{display:block}.zone-chart-legend{margin-top:10px}.zone-chart-frame{min-height:270px}}
+.zone-map-list{display:grid;gap:9px;margin-top:12px}.zone-card{display:grid;grid-template-columns:115px minmax(160px,1fr) 110px 90px;gap:14px;align-items:center;padding:13px;border:1px solid var(--border);background:var(--panel3);border-radius:12px}.zone-card.demand{border-left:4px solid var(--green)}.zone-card.supply{border-left:4px solid var(--red)}.zone-price{font-size:17px;font-weight:760}.zone-evidence{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.zone-score{text-align:right}.zone-score strong{font-size:17px}.zone-plan{margin-top:12px;padding:15px;border:1px solid rgba(115,169,255,.3);border-radius:13px;background:rgba(37,99,235,.055)}.zone-plan-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}.zone-plan-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:12px}.zone-plan-leg{padding:11px;border:1px solid var(--border);border-radius:10px;background:var(--panel3)}@media(max-width:760px){.zone-card{grid-template-columns:1fr auto}.zone-evidence{grid-column:1/-1}.zone-score{text-align:left}.zone-plan-head{display:block}.zone-plan-head .badge{margin-top:8px}.zone-plan-grid{grid-template-columns:1fr}}
+.analysis-list{display:grid;gap:8px}.analysis-item{padding:11px 12px;border-left:3px solid var(--border);background:var(--panel3);border-radius:0 11px 11px 0}.analysis-item.buy{border-left-color:var(--green)}.analysis-item.sell{border-left-color:var(--red)}.analysis-item.info{border-left-color:var(--blue)}
+@media(max-width:900px){.signal-grid{grid-template-columns:1fr}}
+
+
+.strategy-authority-grid{display:grid;grid-template-columns:1.15fr 1fr 1fr 1.15fr;gap:14px;margin-top:18px}
+.authority-card{position:relative;overflow:hidden}
+.authority-card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--border)}
+.authority-card.active:before{background:var(--blue)}
+.authority-card.context:before{background:var(--purple)}
+.authority-card.capital:before{background:var(--green)}
+.authority-card.brain:before{background:var(--amber)}
+.authority-main{font-size:18px;font-weight:800;margin-top:6px}
+.authority-sub{color:var(--muted);font-size:12px;margin-top:6px;min-height:34px}
+.authority-mini{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:12px}
+.authority-mini>div{padding:8px 9px;border:1px solid var(--border);border-radius:9px;background:var(--panel3)}
+.authority-mini strong{display:block;font-size:13px;margin-top:2px}
+.lane-normal{color:var(--green)}.lane-zone-aware{color:var(--purple)}.lane-zone{color:var(--blue)}
+@media(max-width:1180px){.strategy-authority-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.strategy-authority-grid{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse}th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:650;padding:10px 10px;border-bottom:1px solid var(--border)}td{padding:12px 10px;border-bottom:1px solid rgba(37,46,61,.7);white-space:nowrap}tr:last-child td{border-bottom:0}.table-wrap{overflow:auto}
+.pos{color:var(--green)}.neg{color:var(--red)}
+.btn{border:1px solid var(--border);background:#161f2c;color:var(--text);padding:9px 12px;border-radius:10px;font-weight:700}.btn:hover{filter:brightness(1.12)}.btn.primary{background:#edf3ff;color:#0b111a;border-color:#edf3ff}.btn.danger{color:#ffd6da;border-color:rgba(255,111,125,.35);background:rgba(255,111,125,.08)}.btn:disabled{opacity:.42;cursor:not-allowed}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.changes{display:grid;gap:8px}.change{display:grid;grid-template-columns:1fr auto auto;gap:16px;align-items:center;padding:11px 12px;border:1px solid var(--border);background:var(--panel3);border-radius:11px}.arrow{color:var(--muted)}
+.consensus-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}
+.consensus-table{display:grid;gap:8px;margin-top:12px;max-height:520px;overflow:auto;padding-right:2px}
+.consensus-row{display:grid;grid-template-columns:minmax(190px,1.3fr) minmax(155px,.8fr) minmax(150px,.9fr) minmax(190px,1.2fr) auto;gap:12px;align-items:center;padding:12px 13px;border:1px solid var(--border);background:var(--panel3);border-radius:11px}
+.consensus-row.ready{border-color:rgba(72,221,164,.34);background:linear-gradient(90deg,rgba(72,221,164,.055),var(--panel3) 34%)}
+.consensus-name strong{display:block}.consensus-name .muted{margin-top:3px;font-size:11px}
+.consensus-values{font-size:12px}.consensus-values strong{font-size:13px;color:var(--text)}
+.consensus-support{display:grid;gap:5px}.consensus-support-line{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--soft)}
+.consensus-meter{height:7px;background:#091018;border:1px solid rgba(255,255,255,.045);border-radius:999px;overflow:hidden}.consensus-meter>span{display:block;height:100%;background:var(--blue);border-radius:999px}.consensus-row.ready .consensus-meter>span{background:var(--green)}
+.consensus-gate{font-size:11px;color:var(--muted);line-height:1.4}
+.consensus-empty{padding:16px;border:1px dashed var(--border);border-radius:11px;color:var(--muted)}
+@media(max-width:1180px){.consensus-row{grid-template-columns:1fr 1fr}.consensus-row>*:nth-child(3),.consensus-row>*:nth-child(4){grid-column:auto}.consensus-summary{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:760px){.consensus-summary{grid-template-columns:1fr}.consensus-row{grid-template-columns:1fr}}
+
+.callout{padding:13px;border:1px solid var(--border);background:var(--panel3);border-radius:12px;color:var(--soft)}
+.workflow{display:grid;gap:10px}.step{display:grid;grid-template-columns:28px 1fr auto;gap:10px;align-items:center;padding:11px;border:1px solid var(--border);border-radius:11px}.step-num{width:28px;height:28px;border-radius:9px;background:#1c2635;display:grid;place-items:center;font-weight:800}.step.done .step-num{color:var(--green)}.step.active{border-color:rgba(115,169,255,.4)}
+.search{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:#0b111a;color:var(--text);outline:none}
+.controls{display:grid;gap:10px}.control-group{border:1px solid var(--border);border-radius:13px;overflow:hidden}.control-group summary{list-style:none;padding:13px 14px;background:var(--panel3);font-weight:750;cursor:pointer}.control-group summary::-webkit-details-marker{display:none}.control-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:12px}.control{padding:10px;border:1px solid var(--border);border-radius:10px}.control label{display:block;font-size:11px;color:var(--muted);margin-bottom:7px}.control input,.control select{width:100%;padding:8px 9px;border-radius:8px;border:1px solid var(--border);background:#090e15;color:var(--text)}.control.dirty{border-color:rgba(242,198,109,.5)}
+.sticky-actions{position:sticky;bottom:12px;margin-top:12px;padding:11px 12px;border:1px solid var(--border);background:rgba(15,21,31,.96);backdrop-filter:blur(10px);border-radius:13px;display:flex;justify-content:space-between;align-items:center}
+.timeline{display:grid;gap:8px}.event{display:grid;grid-template-columns:145px 1fr auto;gap:12px;padding:11px;border-bottom:1px solid var(--border)}.event:last-child{border-bottom:0}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+details.raw summary{cursor:pointer;color:var(--muted);font-weight:650}pre{white-space:pre-wrap;word-break:break-word;background:#090d13;border:1px solid var(--border);padding:12px;border-radius:11px;max-height:430px;overflow:auto}
+.toast{position:fixed;right:22px;bottom:22px;max-width:430px;padding:12px 14px;border-radius:12px;background:#151e2a;border:1px solid var(--border);box-shadow:var(--shadow);display:none;z-index:60}.toast.show{display:block}.toast.bad{border-color:rgba(255,111,125,.45)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.68);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}.modal.show{display:flex}.modal-card{width:min(640px,100%);max-height:88vh;overflow:auto;background:#101722;border:1px solid var(--border);border-radius:18px;padding:20px}.modal-card h3{margin-top:0}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+@media(max-width:1050px){.g4,.g3{grid-template-columns:repeat(2,1fr)}.control-grid{grid-template-columns:repeat(2,1fr)}.hero{grid-template-columns:1fr}}
+@media(max-width:760px){.shell{grid-template-columns:1fr}.sidebar{height:auto;position:static;border-right:0;border-bottom:1px solid var(--border)}.sidebar-bottom{position:static;margin-top:14px}.nav{grid-template-columns:repeat(3,1fr)}.nav button{text-align:center;font-size:11px;padding:9px 4px}.topbar{padding:0 16px}.content{padding:20px 14px 50px}.g4,.g3,.g2{grid-template-columns:1fr}.control-grid{grid-template-columns:1fr}.top-meta{display:none}.event{grid-template-columns:1fr}}
+
+/* Atlas operator experience v2 */
+:root{
+  --bg:#070a0f;--panel:#101721;--panel2:#151e2a;--panel3:#0b1119;
+  --border:#202c3a;--muted:#8290a3;--soft:#c0cad7;--text:#f4f7fb;
+  --green:#48dda4;--red:#ff7185;--amber:#f5c86b;--blue:#6ea8ff;
+  --radius:16px;--shadow:0 14px 45px rgba(0,0,0,.22)
+}
+body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transparent 32%),var(--bg)}
+.shell{grid-template-columns:214px 1fr}.sidebar{padding:22px 14px;background:#090d13}.brand{margin-bottom:34px}.logo{background:linear-gradient(145deg,#3f69a5,#172438);box-shadow:0 0 0 1px rgba(126,174,255,.18) inset}.brand small{font-size:10px;letter-spacing:.04em}
+.nav{gap:4px}.nav button{position:relative;padding:10px 12px 10px 38px;font-size:13px}.nav button:before{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:16px;text-align:center;color:#627188;font-size:11px}.nav button[data-view="overview"]:before{content:"●"}.nav button[data-view="market"]:before{content:"∿"}.nav button[data-view="analysis"]:before{content:"◇"}.nav button[data-view="positions"]:before{content:"▤"}.nav button[data-view="atlas"]:before{content:"✦"}.nav button[data-view="control"]:before{content:"⌁"}.nav button[data-view="history"]:before{content:"◷"}.nav button.active:after{content:"";position:absolute;left:0;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--blue)}
+.connection{background:linear-gradient(145deg,#0e1721,#0a1017)}.topbar{height:64px;padding:0 28px}.top-meta #epoch-pill,.top-meta #command-pill{display:none}.content{padding:24px 28px 60px;max-width:1480px}.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.page-head h2{font-size:22px;letter-spacing:-.02em}.page-head p{font-size:12px}.card{box-shadow:none;background:linear-gradient(145deg,rgba(17,24,35,.98),rgba(13,19,28,.98))}.section{margin-top:14px}
+.hero{display:block;padding:0;overflow:hidden;border-color:#2b4260;background:linear-gradient(120deg,rgba(31,63,99,.32),rgba(14,21,31,.98) 52%)}
+.command-hero{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(330px,.8fr);min-height:210px}.command-primary{padding:24px 26px;display:flex;flex-direction:column;justify-content:space-between}.command-side{padding:18px;border-left:1px solid rgba(110,168,255,.16);background:rgba(5,10,16,.28)}.mode-line{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.mode-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 5px rgba(72,221,164,.09)}.hero-status{font-size:31px;letter-spacing:-.035em;margin:13px 0 7px}.hero-copy{font-size:13px;max-width:760px}.hero-foot{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-top:20px;color:var(--soft);font-size:12px}.hero-foot strong{color:var(--text)}
+.command-side .kpis{grid-template-columns:1fr 1fr;height:100%}.command-side .kpi{display:flex;flex-direction:column;justify-content:center;background:rgba(7,12,18,.55);border-color:rgba(110,168,255,.13)}
+.account-strip{grid-template-columns:1.1fr 1.1fr 1.4fr .9fr}.account-strip .card{min-height:108px;padding:16px 18px}.account-strip .value{font-size:23px}.account-strip .value.small{font-size:18px}
+.operator-grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(310px,.75fr);gap:14px}.campaign-card{border-color:rgba(110,168,255,.28);background:linear-gradient(145deg,rgba(18,31,48,.98),rgba(12,19,28,.98))}.campaign-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.campaign-title{font-size:20px;font-weight:800;letter-spacing:-.025em;margin:5px 0}.campaign-ladder{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:14px}.campaign-leg{position:relative;padding:12px 12px 11px 15px;background:rgba(5,10,16,.48);border:1px solid var(--border);border-radius:11px}.campaign-leg:before{content:"";position:absolute;left:-1px;top:10px;bottom:10px;width:3px;border-radius:3px;background:var(--blue)}.campaign-leg.live:before{background:var(--green)}.campaign-price{font-size:17px;font-weight:780;margin:4px 0}.decision-card{display:flex;flex-direction:column;justify-content:space-between}.decision-state{font-size:20px;font-weight:800;letter-spacing:-.02em;margin:7px 0}.decision-list{display:grid;gap:9px;margin-top:14px}.decision-item{display:grid;grid-template-columns:10px 1fr;gap:9px;color:var(--soft);font-size:12px}.decision-item:before{content:"";width:6px;height:6px;border-radius:50%;background:var(--green);margin-top:5px}.quiet-card{background:#0c121a}.overview-support .card{min-height:180px}.overview-support .changes{max-height:180px;overflow:auto}
+.workspace-intro{padding:14px 16px;border:1px solid rgba(110,168,255,.18);border-radius:13px;background:rgba(110,168,255,.045);margin-bottom:14px;color:var(--soft);font-size:12px}.workspace-intro strong{color:var(--text)}
+.signal-grid .card{min-height:210px}
+.table-wrap table th:nth-child(n+6),.table-wrap table td:nth-child(n+6){font-size:11px;color:var(--muted)}
+@media(max-width:1100px){.command-hero,.operator-grid{grid-template-columns:1fr}.command-side{border-left:0;border-top:1px solid rgba(110,168,255,.16)}.account-strip{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:760px){.shell{grid-template-columns:1fr}.sidebar{padding:14px}.brand{margin-bottom:14px}.nav{grid-template-columns:repeat(3,1fr)}.nav button{padding:9px 4px}.nav button:before,.nav button.active:after{display:none}.content{padding:18px 12px 45px}.page-head{display:block}.command-primary{padding:20px}.command-hero{min-height:0}.command-side .kpis,.account-strip,.campaign-ladder{grid-template-columns:1fr}.operator-grid{grid-template-columns:1fr}.hero-status{font-size:26px}.topbar{height:58px}}
+</style>
 </head>
-
 <body>
-<div class="container">
-    <div class="header">
-        <div class="brand">
-            <h1>ATLAS</h1>
-            <p>Adaptive Trading Learning and Analysis System · Nyao Strategy Control Center</p>
-        </div>
-
-        <div class="header-right">
-            <div class="pill">
-                <span id="connection-dot" class="dot"></span>
-                <span id="connection-text">Connecting...</span>
-            </div>
-            <div class="pill">
-                <span>Command</span>
-                <strong id="command-version">—</strong>
-                <span>→ Applied</span>
-                <strong id="applied-version">—</strong>
-                <span id="sync-state" class="sync-waiting">Waiting</span>
-            </div>
-            <div class="pill">
-                <span>Runtime</span>
-                <strong id="runtime-sync-count">—</strong>
-                <span id="runtime-sync-state" class="sync-waiting">Checking</span>
-            </div>
-            <div class="pill">
-                <span>Structural</span>
-                <strong id="structural-state">—</strong>
-            </div>
-        </div>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="logo">A</div><div><h1>Atlas</h1><small>Adaptive Trading Intelligence</small></div></div>
+    <nav class="nav">
+      <button class="active" data-view="overview">Command Center</button>
+      <button data-view="market">Market Analysis</button>
+      <button data-view="analysis">Zone Analysis</button>
+      <button data-view="positions">Portfolio</button>
+      <button data-view="atlas">Atlas Brain</button>
+      <button data-view="control">Settings</button>
+      <button data-view="history">Audit Log</button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="connection">
+        <div class="row"><span><span id="side-dot" class="dot"></span>&nbsp; Nyao</span><strong id="side-connection">Checking</strong></div>
+        <div class="row" style="margin-top:7px"><span class="muted">Instrument</span><strong id="side-symbol">—</strong></div>
+        <div class="muted" style="margin-top:6px;font-size:11px">Account type is reported by MT5. Atlas uses the same safety pipeline either way.</div>
+      </div>
     </div>
+  </aside>
 
-    <div class="top-grid">
+  <main class="main">
+    <header class="topbar">
+      <div><div class="title" id="top-title">Command Center</div><div class="subtitle" id="top-subtitle">Live intent, exposure and operator attention</div></div>
+      <div class="top-meta">
+        <select id="symbol-select" class="symbol-select" onchange="switchSymbol(this.value)"><option value="">Symbol —</option></select>
+        <span class="pill" id="account-pill">MT5 ACCOUNT</span>
+        <span class="pill" id="epoch-pill">Epoch —</span>
+        <span class="pill" id="command-pill">Command —</span>
+      </div>
+    </header>
+
+    <div class="content">
+      <section id="view-overview" class="view active">
+        <div class="page-head"><div><h2>Command Center</h2><p>Live trading intent, capital exposure, and anything that needs your attention.</p></div><span id="overview-live-badge" class="badge ok">LIVE</span></div>
+
+        <div class="card hero">
+          <div class="command-hero">
+          <div class="command-primary">
+            <div>
+              <div class="mode-line"><span class="mode-dot"></span><span class="label" id="hero-mode-label">Atlas operating mode</span><span id="hero-mode-badge" class="badge info">CONNECTING</span></div>
+              <div class="hero-status" id="hero-state">Connecting…</div>
+              <div class="hero-copy" id="hero-copy">Reading Nyao status and Atlas policy state.</div>
+            </div>
+            <div class="hero-foot"><span>Instrument <strong id="hero-symbol">—</strong></span><span>Market <strong id="hero-market-state">—</strong></span><span>Last bridge check <strong id="hero-bridge">—</strong></span></div>
+          </div>
+          <div class="command-side"><div class="kpis">
+            <div class="kpi"><div class="label">Trading mode</div><div class="value small" id="hero-risk">—</div></div>
+            <div class="kpi"><div class="label">Campaign risk</div><div class="value small" id="hero-policy">—</div></div>
+            <div class="kpi"><div class="label">Live / staged</div><div class="value small" id="hero-open">—</div></div>
+            <div class="kpi"><div class="label">Next brain review</div><div class="value small" id="hero-chains">—</div></div>
+          </div></div>
+          </div>
+        </div>
+
+        <div class="grid account-strip section">
+          <div class="card"><div class="label">Balance</div><div class="value" id="balance">—</div><div class="muted" id="equity">Equity —</div></div>
+          <div class="card"><div class="label">Open P/L</div><div class="value" id="floating">—</div><div class="muted" id="drawdown">Drawdown —</div></div>
+          <div class="card"><div class="label" id="market-label">Live market · —</div><div class="value small" id="market-price">—</div><div class="muted" id="market-spread">Spread —</div></div>
+          <div class="card"><div class="label">System health</div><div class="value small" id="ack-state">—</div><div class="muted" id="ack-detail">Checking execution bridge</div></div>
+        </div>
+
+        <div class="strategy-authority-grid">
+          <div class="card authority-card active">
+            <div class="row"><div class="label">Execution authority</div><span id="authority-lane-badge" class="badge info">—</span></div>
+            <div id="authority-lane" class="authority-main">Connecting…</div>
+            <div id="authority-lane-copy" class="authority-sub">Resolving which strategy owns fresh entries.</div>
+            <div class="authority-mini"><div><span class="label">Scalping</span><strong id="authority-scalp">—</strong></div><div><span class="label">Zone campaign</span><strong id="authority-zone">—</strong></div></div>
+          </div>
+          <div class="card authority-card context">
+            <div class="row"><div class="label">Market context</div><span id="context-zone-badge" class="badge">—</span></div>
+            <div id="context-zone" class="authority-main">No priority zone</div>
+            <div id="context-zone-copy" class="authority-sub">Atlas deterministic structure is loading.</div>
+            <div class="authority-mini"><div><span class="label">HTF structure</span><strong id="context-bias">—</strong></div><div><span class="label">Relation to live thesis</span><strong id="context-alignment">—</strong></div></div>
+          </div>
+          <div class="card authority-card capital">
+            <div class="row"><div class="label">Capital & risk</div><span id="capital-regime-badge" class="badge">—</span></div>
+            <div id="capital-risk-base" class="authority-main">—</div>
+            <div id="capital-risk-copy" class="authority-sub">Atlas hard risk envelope.</div>
+            <div class="authority-mini"><div><span class="label">Scalp budget</span><strong id="capital-scalp-budget">—</strong></div><div><span class="label">Zone budget</span><strong id="capital-zone-budget">—</strong></div></div>
+          </div>
+          <div class="card authority-card brain">
+            <div class="row"><div class="label">Gemini scalp policy</div><span id="brain-mode-badge" class="badge">—</span></div>
+            <div id="brain-policy-state" class="authority-main">Waiting for policy cycle</div>
+            <div id="brain-policy-copy" class="authority-sub">Gemini may tune Nyao; zones and hard risk remain Atlas-owned.</div>
+            <div class="authority-mini"><div><span class="label">Policy epoch</span><strong id="brain-epoch">—</strong></div><div><span class="label">Next review</span><strong id="brain-next">—</strong></div></div>
+          </div>
+        </div>
+
+        <div class="operator-grid section">
+          <div class="card campaign-card">
+            <div class="campaign-head"><div><div class="label">Active trade plan</div><div id="overview-campaign-title" class="campaign-title">Waiting for Atlas</div><div id="overview-campaign-copy" class="muted">No active campaign has been loaded.</div></div><span id="overview-campaign-badge" class="badge">—</span></div>
+            <div id="overview-campaign" class="campaign-ladder"></div>
+          </div>
+          <div class="card decision-card">
+            <div><div class="label">Operator attention</div><div id="overview-attention-title" class="decision-state">Checking…</div><div id="overview-attention-copy" class="muted">Atlas is reconciling the live state.</div><div id="overview-decision-list" class="decision-list"></div></div>
+            <div class="actions" style="margin-top:14px"><button class="btn primary" onclick="go('analysis')">Open zone analysis</button></div>
+          </div>
+        </div>
+
+        <div id="live-execution-panel" class="section">
+          <div class="section-head">
+            <div><h3>Live Market & Entry Analysis</h3><p>Atlas bias and Nyao's live BUY / SELL state for the selected instrument.</p></div>
+            <span id="signal-global-status" class="badge">—</span>
+          </div>
+
+          <div class="signal-grid">
+            <div class="card">
+              <div class="label">Atlas market view</div>
+              <div id="signal-bias" class="bias-value bias-neutral">—</div>
+              <div class="muted"><span id="signal-regime">Waiting for regime</span> · <span id="signal-volatility">—</span></div>
+              <div class="signal-meta">
+                <div class="kpi"><div class="label">Confidence</div><div class="value small" id="signal-confidence">—</div></div>
+                <div class="kpi"><div class="label">Risk</div><div class="value small" id="signal-risk">—</div></div>
+              </div>
+              <div class="signal-reason" id="signal-summary">Waiting for Atlas intelligence.</div>
+            </div>
+
+            <div class="card">
+              <div class="section-head"><div><div class="label">BUY signal</div><div id="signal-buy-score" class="signal-score signal-buy">0.00</div></div><span id="signal-buy-state" class="badge">—</span></div>
+              <div class="muted">Live score / effective threshold</div>
+              <div class="signal-track"><div id="signal-buy-bar" class="signal-fill signal-buy"></div></div>
+              <div class="signal-meta">
+                <div class="kpi"><div class="label">Evaluated</div><div class="value small" id="signal-buy-adjusted">0.00</div></div>
+                <div class="kpi"><div class="label">Threshold</div><div class="value small" id="signal-buy-threshold">0.00</div></div>
+              </div>
+              <div class="signal-reason" id="signal-buy-reason">Not evaluated.</div>
+            </div>
+
+            <div class="card">
+              <div class="section-head"><div><div class="label">SELL signal</div><div id="signal-sell-score" class="signal-score signal-sell">0.00</div></div><span id="signal-sell-state" class="badge">—</span></div>
+              <div class="muted">Live score / effective threshold</div>
+              <div class="signal-track"><div id="signal-sell-bar" class="signal-fill signal-sell"></div></div>
+              <div class="signal-meta">
+                <div class="kpi"><div class="label">Evaluated</div><div class="value small" id="signal-sell-adjusted">0.00</div></div>
+                <div class="kpi"><div class="label">Threshold</div><div class="value small" id="signal-sell-threshold">0.00</div></div>
+              </div>
+              <div class="signal-reason" id="signal-sell-reason">Not evaluated.</div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:14px">
+            <div class="grid g4">
+              <div class="kpi"><div class="label">Global blocker</div><div class="value small" id="signal-global-block">—</div></div>
+              <div class="kpi"><div class="label">New-bar gate</div><div class="value small" id="signal-newbar">—</div></div>
+              <div class="kpi"><div class="label">Cooldown</div><div class="value small" id="signal-cooldown">—</div></div>
+              <div class="kpi"><div class="label">Spread gate</div><div class="value small" id="signal-spread">—</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid g2 section overview-support">
+          <div class="card">
+            <div class="section-head"><div><h3>Current Atlas proposal</h3><p>Only the material change and decision state.</p></div><span id="proposal-badge" class="badge">—</span></div>
+            <div id="overview-changes" class="changes"></div>
+            <div class="callout" style="margin-top:12px" id="overview-proposal-note">No proposal loaded.</div>
+            <div class="actions" style="margin-top:12px"><button class="btn primary" onclick="go('atlas')">Open Atlas decision</button></div>
+          </div>
+          <div class="card">
+            <div class="section-head"><div><h3>Protection status</h3><p>Position policy lock and account-level safety.</p></div></div>
+            <div class="grid g2">
+              <div class="kpi"><div class="label">Existing positions</div><div class="value small" id="protect-positions">—</div></div>
+              <div class="kpi"><div class="label">Active recovery</div><div class="value small" id="protect-recovery">—</div></div>
+              <div class="kpi"><div class="label">Basket loss</div><div class="value small" id="protect-basket">—</div></div>
+              <div class="kpi"><div class="label">Duplicate guard</div><div class="value small" id="protect-duplicate">—</div></div>
+              <div class="kpi"><div class="label">Risk-unit streak</div><div class="value small" id="protect-risk-streak">—</div></div>
+              <div class="kpi"><div class="label">Recovery sizing</div><div class="value small" id="protect-recovery-sizing">—</div></div>
+              <div class="kpi"><div class="label">Original unit risk</div><div class="value small" id="protect-unit-risk">—</div></div>
+              <div class="kpi"><div class="label">Chain risk ceiling</div><div class="value small" id="protect-chain-ceiling">—</div></div>
+              <div class="kpi"><div class="label">Reserved portfolio risk</div><div class="value small" id="protect-portfolio-reserved">—</div></div>
+              <div class="kpi"><div class="label">Available operating risk</div><div class="value small" id="protect-portfolio-available">—</div></div>
+              <div class="kpi"><div class="label">Active composite</div><div class="value small" id="protect-composite-active">—</div></div>
+              <div class="kpi"><div class="label">Latest composite</div><div class="value small" id="protect-composite-latest">—</div></div>
+            </div>
+            <div class="callout" style="margin-top:12px" id="protect-recovery-copy">Recovery-chain members are scored as one composite outcome after the entire chain is flat.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-market" class="view">
+        <div class="page-head"><div><h2>Market Analysis</h2><p>Live regime, direction, signal eligibility, volatility, and trading costs.</p></div><span class="badge info">LIVE MARKET WORKSPACE</span></div>
+        <div class="workspace-intro"><strong>How to use this page:</strong> read Atlas’s live market view and Nyao’s signal state here. Trade-location planning and zone campaigns remain on the separate Zone Analysis page.</div>
+        <div id="market-live-slot"></div>
+
+        <div class="grid g4">
+          <div class="card"><div class="label">Market bias</div><div class="value small" id="an-bias">—</div><div class="muted" id="an-regime">Waiting for Atlas</div></div>
+          <div class="card"><div class="label">Volatility</div><div class="value small" id="an-volatility">—</div><div class="muted" id="an-vol-ratio">Ratio —</div></div>
+          <div class="card"><div class="label">Execution fit</div><div class="value small" id="an-fit">—</div><div class="muted" id="an-confidence">Confidence —</div></div>
+          <div class="card"><div class="label">Risk state</div><div class="value small" id="an-risk">—</div><div class="muted" id="an-responsiveness">Responsiveness —</div></div>
+        </div>
+
+        <div class="grid g2 section">
+          <div class="card">
+            <div class="section-head"><div><h3>Atlas market thesis</h3><p>The current internal interpretation—not an order or prediction.</p></div><span id="an-thesis-badge" class="badge">LIVE</span></div>
+            <div id="an-thesis" class="analysis-thesis">Waiting for Atlas intelligence.</div>
+            <div id="an-reasons" class="analysis-list"></div>
+          </div>
+          <div class="card">
+            <div class="section-head"><div><h3>Range and trading cost</h3><p>Whether current movement is large enough to support trading after spread.</p></div><span id="an-cost-badge" class="badge">—</span></div>
+            <div class="grid g2">
+              <div class="kpi"><div class="label">Bid / ask gap</div><div class="value small" id="an-spread-price">—</div></div>
+              <div class="kpi"><div class="label">Economic spread cap</div><div class="value small" id="an-atr">—</div></div>
+              <div class="kpi"><div class="label">Spread / cap</div><div class="value small" id="an-spread-atr">—</div></div>
+              <div class="kpi"><div class="label">Entry eligible</div><div class="value small" id="an-eligible">—</div></div>
+            </div>
+            <div class="callout" id="an-cost-note" style="margin-top:12px">Waiting for cost evidence.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-analysis" class="view">
+        <div class="page-head"><div><h2>Zone Analysis</h2><p>Daily trade locations, live zone relationships, and the active Nyao zone campaign.</p></div><span class="badge info">LIVE ZONE WORKSPACE</span></div>
+        <div class="workspace-intro"><strong>How to use this page:</strong> start with the daily zone map and active mode directive. Detailed evidence, live authority, entries, targets, and scalp handoff remain together below.</div>
+
+        <div class="card section">
+          <div class="section-head"><div><h3>Daily Zone Map</h3><p>Versioned M30/H1/H4 trade-location plan for the selected symbol.</p></div><span id="an-zone-status" class="badge warn">WAITING FOR CANDLES</span></div>
+          <div class="zone-chart-shell">
+            <div class="zone-chart-head">
+              <div><strong id="an-zone-title">No approved internal zone map yet</strong><p id="an-candle-detail">Atlas is waiting for Nyao's validated, closed-bar multi-timeframe export.</p></div>
+              <div class="zone-chart-legend"><span class="zone-chart-key"><span class="zone-chart-swatch demand"></span>Demand</span><span class="zone-chart-key"><span class="zone-chart-swatch supply"></span>Supply</span><span class="badge info">M30 PRICE · PRIORITY MTF ZONES</span></div>
+            </div>
+            <svg id="an-zone-chart" class="zone-chart-frame" viewBox="0 0 1200 520" role="img" aria-label="Atlas M30 candlestick chart with prioritized supply and demand zones"></svg>
+          </div>
+          <div id="an-zone-execution"></div>
+          <details class="raw" style="margin-top:12px"><summary>Zone evidence and engine diagnostics</summary>
+            <div id="an-zone-stats" class="grid g4" style="margin-top:12px"></div>
+            <div id="an-zone-list" class="zone-map-list"></div>
+            <div id="an-zone-scenario-list" class="analysis-list" style="margin-top:12px"></div>
+            <div id="an-mtf-grid" class="grid g3" style="margin-top:12px"></div>
+            <div class="grid g4" style="margin-top:12px">
+              <div class="kpi"><div class="label">1 · Analysis UI</div><div class="value small pos">READY</div></div>
+              <div class="kpi"><div class="label">2 · MTF candles</div><div id="an-stage-candles" class="value small" style="color:var(--amber)">WAITING</div></div>
+              <div class="kpi"><div class="label">3 · Zone engine</div><div id="an-stage-zone-engine" class="value small muted">PENDING</div></div>
+              <div class="kpi"><div class="label">4 · Nyao zone gate</div><div id="an-stage-zone-gate" class="value small muted">PENDING</div></div>
+            </div>
+          </details>
+        </div>
+
+        <div class="grid g2 section">
+          <div class="card">
+            <div class="section-head"><div><h3>Zone authority and scalp handoff</h3><p>Shows whether the zone campaign owns execution or ordinary scalping may resume.</p></div></div>
+            <div id="an-scenarios" class="analysis-list"></div>
+          </div>
+          <div class="card">
+            <div class="section-head"><div><h3>Related Atlas policy context</h3><p>The latest model thesis and critic evidence relevant to zone execution and the eventual scalp handoff.</p></div><span id="an-gemini-badge" class="badge">—</span></div>
+            <div id="an-gemini-thesis" class="analysis-thesis">No Gemini policy analysis loaded.</div>
+            <div id="an-gemini-evidence" class="analysis-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-positions" class="view">
+        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><span class="badge info">NYAO EXECUTION</span></div>
+        <div class="grid g4">
+          <div class="card"><div class="label">Strategy positions</div><div class="value" id="p-count">0</div></div>
+          <div class="card"><div class="label">Total lots</div><div class="value" id="p-lots">0.00</div></div>
+          <div class="card"><div class="label">Floating P/L</div><div class="value" id="p-pl">—</div></div>
+          <div class="card"><div class="label">Recovery chains</div><div class="value" id="p-chains">0</div></div>
+        </div>
+        <div class="card section">
+          <div class="section-head"><div><h3>Open positions</h3><p>The trading facts first. Policy lineage remains available in the audit log.</p></div></div>
+          <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Side</th><th>Lots</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th><th>Origin</th><th>Age</th></tr></thead><tbody id="positions-body"></tbody></table></div>
+        </div>
+        <div class="card section">
+          <div class="section-head"><div><h3>Recent closed trades</h3><p>Authoritative ticket-level executions for the selected MT5 account. Recovery/zone members may appear as separate rows here, but strategic win/loss streaks and policy learning score the completed composite risk unit only.</p></div><span id="closed-trades-badge" class="badge">CURRENT ACCOUNT</span></div>
+          <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Side</th><th>Lots</th><th>Entry</th><th>Exit</th><th>Realized P/L</th><th>Origin</th><th>Policy epoch</th><th>Mode</th><th>Closed</th><th>Quality</th></tr></thead><tbody id="closed-trades-body"></tbody></table></div>
+        </div>
+        <div class="card section">
+          <div class="section-head"><div><h3>Learning scorecard</h3><p>Closed-trade evidence attributed to the policy epoch and mode active at entry.</p></div><span id="perf-quality" class="badge">COLLECTING</span></div>
+          <div class="grid g4">
+            <div class="kpi"><div class="label">Closed trades</div><div class="value small" id="perf-count">0</div></div>
+            <div class="kpi"><div class="label">Net P/L</div><div class="value small" id="perf-net">—</div></div>
+            <div class="kpi"><div class="label">Expectancy / trade</div><div class="value small" id="perf-expectancy">—</div></div>
+            <div class="kpi"><div class="label">Profit factor</div><div class="value small" id="perf-factor">—</div></div>
+          </div>
+          <div class="grid g2" style="margin-top:12px">
+            <div><div class="label" style="margin-bottom:8px">By policy epoch</div><div class="table-wrap"><table><thead><tr><th>Epoch</th><th>Risk units</th><th>Net P/L</th><th>Expectancy</th><th>Win rate</th><th>Evidence</th></tr></thead><tbody id="perf-epochs"></tbody></table></div></div>
+            <div><div class="label" style="margin-bottom:8px">By trading mode</div><div class="table-wrap"><table><thead><tr><th>Mode</th><th>Risk units</th><th>Net P/L</th><th>Expectancy</th><th>Profit factor</th></tr></thead><tbody id="perf-modes"></tbody></table></div></div>
+          </div>
+          <div id="perf-note" class="callout" style="margin-top:12px">Waiting for closed trades.</div>
+        </div>
+      </section>
+
+      <section id="view-atlas" class="view">
+        <div class="page-head"><div><h2>Atlas Brain</h2><p>Model review cadence, proposed adaptations, evidence, and decision authority.</p></div><span class="badge info">GEMINI + DETERMINISTIC LAYER</span></div>
         <div class="card">
-            <div class="card-label">Balance</div>
-            <div id="balance" class="card-value">$0.00</div>
+          <div class="section-head"><div><h3>Gemini policy cycle</h3><p>Optimizes the full Nyao scalp runtime policy using live state, performance, responsiveness and deterministic zone context. Zone policy remains read-only.</p></div><span id="cycle-badge" class="badge">—</span></div>
+          <div class="grid g4">
+            <div class="kpi"><div class="label">Last run</div><div class="value small" id="cycle-last">—</div></div>
+            <div class="kpi"><div class="label">Next run</div><div class="value small" id="cycle-next">—</div></div>
+            <div class="kpi"><div class="label">Run count</div><div class="value small" id="cycle-count">0</div></div>
+            <div class="kpi"><div class="label">Last critic</div><div class="value small" id="cycle-critic">—</div></div>
+          </div>
+          <div class="row" style="margin-top:14px;align-items:flex-end;flex-wrap:wrap">
+            <div style="min-width:170px"><div class="label" style="margin-bottom:6px">Interval (minutes)</div><input id="cycle-interval" class="search" type="number" min="15" max="1440" step="15" value="240"></div>
+            <div style="min-width:170px"><div class="label" style="margin-bottom:6px">Application mode</div><select id="cycle-mode" class="search"><option value="SUPERVISED">Supervised</option><option value="AUTONOMOUS">Autonomous</option></select></div>
+            <div style="min-width:170px"><div class="label" style="margin-bottom:6px">Minimum dwell (minutes)</div><input id="cycle-dwell" class="search" type="number" min="30" max="1440" step="30" value="240"></div>
+            <div style="min-width:160px"><div class="label" style="margin-bottom:6px">Minimum confidence</div><input id="cycle-confidence" class="search" type="number" min="0" max="100" step="1" value="70"></div>
+            <label class="callout" style="display:flex;align-items:center;gap:9px;margin:0"><input id="cycle-enabled" type="checkbox"> Enable scheduled policy cycles</label>
+            <div class="actions"><button id="btn-save-cycle" class="btn" onclick="saveLlmCycleSchedule()">Save schedule</button><button id="btn-run-cycle" class="btn primary" onclick="runLlmCycleNow()">Run analysis now</button></div>
+          </div>
+          <div id="cycle-detail" class="callout" style="margin-top:12px">Schedule is loading. Application authority remains manual.</div>
         </div>
-        <div class="card">
-            <div class="card-label">Equity</div>
-            <div id="equity" class="card-value">$0.00</div>
+        <div class="card section" id="consensus-card">
+          <div class="section-head"><div><h3>Autonomous policy consensus</h3><p>Accepted Gemini observations accumulated across the current policy dwell window. Controls qualify individually; the latest proposal never wins by itself.</p></div><span id="consensus-badge" class="badge">COLLECTING</span></div>
+          <div class="consensus-summary">
+            <div class="kpi"><div class="label">Current-window observations</div><div class="value small" id="consensus-observations">0</div><div class="muted" id="consensus-observation-rule">Need 3 minimum</div></div>
+            <div class="kpi"><div class="label">Controls qualifying</div><div class="value small" id="consensus-qualified">0</div><div class="muted">Eligible for next policy epoch</div></div>
+            <div class="kpi"><div class="label">Support threshold</div><div class="value small" id="consensus-threshold">60%</div><div class="muted">Of all accepted observations</div></div>
+            <div class="kpi"><div class="label">Baseline epoch</div><div class="value small" id="consensus-epoch">—</div><div class="muted" id="consensus-window-age">Window not started</div></div>
+            <div class="kpi"><div class="label">Lifetime observations</div><div class="value small" id="consensus-lifetime">0</div><div class="muted" id="consensus-history-note">No archived windows yet</div></div>
+          </div>
+          <div class="row" style="margin-top:14px"><div><strong id="consensus-headline">Waiting for Gemini observations.</strong><div class="muted" id="consensus-detail" style="margin-top:4px">Per-control support will appear here.</div></div></div>
+          <div id="consensus-controls" class="consensus-table"></div>
+          <div class="label" style="margin-top:16px;margin-bottom:8px">Recent policy windows</div><div id="consensus-history" class="analysis-list"></div>
         </div>
-        <div class="card">
-            <div class="card-label">Floating P/L</div>
-            <div id="profit" class="card-value">$0.00</div>
+        <div class="card section">
+          <div class="section-head"><div><h3>Scalping responsiveness</h3><p>Measures entry opportunity, blocking pressure, holding time and profit capture. Speed is judged by net outcomes, not trade count.</p></div><span id="resp-badge" class="badge">—</span></div>
+          <div class="grid g4">
+            <div class="kpi"><div class="label">Latency pressure</div><div class="value small" id="resp-pressure">—</div></div>
+            <div class="kpi"><div class="label">Entry eligible</div><div class="value small" id="resp-eligible">—</div></div>
+            <div class="kpi"><div class="label">Median hold</div><div class="value small" id="resp-hold">—</div></div>
+            <div class="kpi"><div class="label">MFE captured</div><div class="value small" id="resp-capture">—</div></div>
+          </div>
+          <div class="grid g2" style="margin-top:12px">
+            <div><div class="label">Dominant entry blockers</div><div id="resp-blockers" class="changes" style="margin-top:8px"></div></div>
+            <div><div class="label">Candidate responsiveness levers</div><div id="resp-levers" class="changes" style="margin-top:8px"></div></div>
+          </div>
+          <div id="resp-detail" class="callout" style="margin-top:12px">Responsiveness evidence is loading.</div>
         </div>
-        <div class="card">
-            <div class="card-label">Realized P/L Baseline</div>
-            <div id="realized-profit" class="card-value">$0.00</div>
+        <div class="grid g3 section">
+          <div class="card"><div class="label">Selected candidate</div><div class="value small" id="a-candidate">—</div></div>
+          <div class="card"><div class="label">Recommendation</div><div class="value small" id="a-readiness">—</div></div>
+          <div class="card"><div class="label">Policy epoch</div><div class="value small" id="a-epoch">—</div></div>
         </div>
-        <div class="card">
-            <div class="card-label">Open Positions</div>
-            <div id="positions" class="card-value">0</div>
+        <div class="grid g2 section">
+          <div class="card">
+            <div class="section-head"><div><h3 id="atlas-policy-title">Current active policy</h3><p id="atlas-policy-subtitle">Consensus application is reconciled against Nyao's registered/live runtime.</p></div><span id="a-review-state" class="badge">—</span></div>
+            <div id="atlas-changes" class="changes"></div>
+            <div style="margin-top:14px" class="callout" id="atlas-rationale">—</div>
+            <div style="margin-top:12px" class="callout" id="atlas-llm-evidence">No Gemini evidence attached to this proposal.</div>
+            <div class="label" style="margin-top:16px;margin-bottom:8px">Applied policy history</div>
+            <div id="applied-policy-history" class="analysis-list"></div>
+          </div>
+          <div class="card">
+            <div class="section-head"><div><h3>Readiness</h3><p>Natural evidence gates remain visible even when test overrides are active.</p></div></div>
+            <div class="grid g2">
+              <div class="kpi"><div class="label">Risk</div><div class="value small" id="a-risk">—</div></div>
+              <div class="kpi"><div class="label">Confidence</div><div class="value small" id="a-confidence">—</div></div>
+              <div class="kpi"><div class="label">Evidence</div><div class="value small" id="a-evidence">—</div></div>
+              <div class="kpi"><div class="label">Stability</div><div class="value small" id="a-stability">—</div></div>
+            </div>
+            <div class="callout" style="margin-top:12px" id="a-blockers">—</div>
+          </div>
         </div>
+        <div class="card section">
+          <div class="section-head"><div><h3>Parameter Intelligence</h3><p>P2.2 ranks all 157 controls using parameter-specific evidence, observed runtime variation and descriptive outcome associations.</p></div><span id="pi-mode" class="badge info">P2.2</span></div>
+          <div class="grid g4">
+            <div class="kpi"><div class="label">Registry</div><div class="value small" id="pi-count">157</div></div>
+            <div class="kpi"><div class="label">Position-sensitive</div><div class="value small" id="pi-locked">53</div></div>
+            <div class="kpi"><div class="label">Change budget</div><div class="value small" id="pi-budget">3</div></div>
+            <div class="kpi"><div class="label">Validated auto apply</div><div class="value small" id="pi-exec">SUPERVISED</div></div>
+          </div>
+          <div class="grid g2" style="margin-top:14px">
+            <div class="kpi"><div class="label">Validated numeric changes</div><div class="value small" id="pi-real-changes">0</div></div>
+            <div class="kpi"><div class="label">No-op advisor changes filtered</div><div class="value small" id="pi-noop">0</div></div>
+          </div>
+          <div style="margin-top:14px"><div class="label">Evidence maturity by domain</div><div id="pi-domains" class="changes" style="margin-top:8px"></div></div>
+          <div style="margin-top:14px"><div class="label">Highest-priority parameter candidates</div><div id="pi-candidates" class="changes" style="margin-top:8px"></div></div>
+          <div class="callout" style="margin-top:12px" id="pi-authority-note">Historical value/outcome differences are descriptive associations, not causal proof.</div>
+        </div>
+
+        <div class="card section">
+          <div class="section-head"><div><h3>Human review workflow</h3><p>The backend still validates exact fingerprint, epoch and review snapshot. The UI carries them automatically.</p></div></div>
+          <div id="review-workflow" class="workflow"></div>
+          <div class="actions" style="margin-top:14px">
+            <button id="btn-request-review" class="btn" onclick="requestReview()">Request review</button>
+            <button id="btn-approve" class="btn primary" onclick="approveCurrent()">Approve</button>
+            <button id="btn-reject" class="btn danger" onclick="rejectCurrent()">Reject</button>
+            <button id="btn-build-command" class="btn" onclick="buildSupervisedCommand()">Build command package</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-control" class="view">
+        <div class="page-head"><div><h2>Settings</h2><p>Execution authority and advanced runtime controls. Most trading sessions should not require this page.</p></div><span class="badge warn">ADVANCED</span></div>
+
+        <div class="grid g2">
+          <div class="card">
+            <div class="section-head"><div><h3>Supervised execution</h3><p>Same safety pipeline regardless of whether MT5 is connected to demo or live.</p></div><span id="exec-badge" class="badge">NO PACKAGE</span></div>
+            <div class="callout" style="margin-bottom:12px">
+              <div class="row">
+                <div><strong>Operator execution arm</strong><div class="muted" id="arm-detail">Disarmed</div></div>
+                <div class="actions">
+                  <span id="arm-badge" class="badge bad">DISARMED</span>
+                  <button id="btn-arm" class="btn" onclick="armExecution()">Arm 30 min</button>
+                  <button id="btn-disarm" class="btn danger" onclick="disarmExecution()">Disarm</button>
+                </div>
+              </div>
+            </div>
+            <div id="exec-summary" class="callout">Build an approved command package from the Atlas page first.</div>
+            <div id="exec-workflow" class="workflow" style="margin-top:12px"></div>
+            <div class="actions" style="margin-top:14px">
+              <button id="btn-preflight" class="btn" onclick="runPreflight()">Run preflight</button>
+              <button id="btn-execute" class="btn primary" onclick="executePackage()">Execute policy</button>
+              <button id="btn-ack" class="btn" onclick="refreshAck()">Refresh Nyao ACK</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="section-head"><div><h3>Current command</h3><p>Requested policy currently on the bridge.</p></div></div>
+            <div class="grid g2">
+              <div class="kpi"><div class="label">Command version</div><div class="value small" id="c-version">—</div></div>
+              <div class="kpi"><div class="label">Policy epoch</div><div class="value small" id="c-epoch">—</div></div>
+              <div class="kpi"><div class="label">Base lot</div><div class="value small" id="c-lot">—</div></div>
+              <div class="kpi"><div class="label">Global enabled</div><div class="value small" id="c-enabled">—</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card section">
+          <div class="section-head"><div><h3>Portfolio risk appetite</h3><p>Operator-owned aggregate Atlas risk ceiling. This is not per-trade risk; Atlas can reduce effective deployment but cannot raise this ceiling.</p></div><span id="risk-appetite-badge" class="badge info">1.00%</span></div>
+          <div class="grid g3">
+            <div class="kpi"><div class="label">Configured hard ceiling</div><div class="value small" id="risk-appetite-current">1.00%</div></div>
+            <div class="kpi"><div class="label">Current hard risk amount</div><div class="value small" id="risk-appetite-amount">—</div></div>
+            <div class="kpi"><div class="label">Atlas operating ceiling</div><div class="value small" id="risk-appetite-operating">—</div></div>
+          </div>
+          <div class="callout" style="margin-top:12px">
+            <div class="row" style="align-items:flex-end;gap:16px">
+              <div style="flex:1">
+                <label class="label" for="risk-appetite-input">Maximum aggregate portfolio risk (%)</label>
+                <input id="risk-appetite-input" class="search" type="number" min="1" max="20" step="0.25" value="1" style="margin-top:6px">
+                <div class="muted" style="margin-top:6px">Allowed: 1%–20%. Higher values increase Atlas' aggregate risk capacity; scalp, zone, recovery, broker, structure and protection gates still apply independently.</div>
+              </div>
+              <button id="btn-save-risk-appetite" class="btn primary" onclick="saveRiskAppetite()">Save risk ceiling</button>
+            </div>
+          </div>
+          <div id="risk-appetite-warning" class="callout" style="margin-top:12px">Only you can increase this ceiling. Gemini and autonomous policy are not permitted to raise it.</div>
+        </div>
+
+        <div class="card section">
+          <div class="section-head"><div><h3>Advanced runtime controls</h3><p>157 controls remain available, but they no longer dominate the dashboard.</p></div><span class="badge warn">ADVANCED</span></div>
+          <input id="control-search" class="search" placeholder="Search runtime controls…" oninput="renderControls()">
+          <div id="runtime-controls" class="controls" style="margin-top:12px"></div>
+          <div class="sticky-actions">
+            <span id="dirty-count" class="muted">No unsaved changes</span>
+            <div class="actions"><button class="btn" onclick="discardEdits()">Discard</button><button class="btn primary" onclick="applyEdits()">Apply changed controls</button></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-history" class="view">
+        <div class="page-head"><div><h2>Audit Log</h2><p>Policy decisions, execution lifecycle, tracked outcomes, and integrity checks.</p></div><span class="badge">READ ONLY</span></div>
+        <div class="grid g3">
+          <div class="card"><div class="label">Execution audit</div><div class="value small" id="h-audit">—</div><div class="muted" id="h-audit-count">—</div></div>
+          <div class="card"><div class="label">Policy epochs</div><div class="value small" id="h-epochs">—</div></div>
+          <div class="card"><div class="label">Tracked outcomes</div><div class="value small" id="h-outcomes">—</div></div>
+        </div>
+        <div class="grid g2 section">
+          <div class="card"><div class="section-head"><div><h3>Execution lifecycle</h3><p>Most recent execution events.</p></div></div><div id="execution-events" class="timeline"></div></div>
+          <div class="card"><div class="section-head"><div><h3>Policy epochs</h3><p>Most recent registered policies.</p></div></div><div id="policy-epochs" class="timeline"></div></div>
+        </div>
+        <details class="card raw section"><summary>Advanced raw diagnostics</summary><pre id="raw-diagnostics">Loading…</pre></details>
+      </section>
     </div>
-
-    <div class="section score-grid">
-        <div class="card">
-            <div class="card-label">Live Buy Score</div>
-            <div id="buy-score" class="score">0.00</div>
-            <div class="score-meta">Effective threshold: <strong id="buy-threshold">0.00</strong></div>
-            <div class="bar"><div id="buy-bar" class="bar-fill buy-fill"></div></div>
-        </div>
-        <div class="card">
-            <div class="card-label">Live Sell Score</div>
-            <div id="sell-score" class="score">0.00</div>
-            <div class="score-meta">Effective threshold: <strong id="sell-threshold">0.00</strong></div>
-            <div class="bar"><div id="sell-bar" class="bar-fill sell-fill"></div></div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Decision Engine</h2>
-                <div class="section-note">
-                    Live score is continuously updated. Evaluated score reflects the most recent actual entry evaluation.
-                </div>
-            </div>
-        </div>
-
-        <div class="decision-grid">
-            <div class="decision-card buy">
-                <div class="decision-top">
-                    <div class="decision-side">BUY</div>
-                    <span id="buy-state" class="badge blocked">Blocked</span>
-                </div>
-                <div class="decision-stats">
-                    <div class="mini"><div class="label">Live</div><div id="buy-live" class="value">0.00</div></div>
-                    <div class="mini"><div class="label">Evaluated</div><div id="buy-adjusted" class="value">0.00</div></div>
-                    <div class="mini"><div class="label">Threshold</div><div id="buy-effective" class="value">0.00</div></div>
-                </div>
-                <div class="reason">
-                    <div class="card-label">Current decision state</div>
-                    <code id="buy-reason">NOT_EVALUATED</code>
-                </div>
-            </div>
-
-            <div class="decision-card sell">
-                <div class="decision-top">
-                    <div class="decision-side">SELL</div>
-                    <span id="sell-state" class="badge blocked">Blocked</span>
-                </div>
-                <div class="decision-stats">
-                    <div class="mini"><div class="label">Live</div><div id="sell-live" class="value">0.00</div></div>
-                    <div class="mini"><div class="label">Evaluated</div><div id="sell-adjusted" class="value">0.00</div></div>
-                    <div class="mini"><div class="label">Threshold</div><div id="sell-effective" class="value">0.00</div></div>
-                </div>
-                <div class="reason">
-                    <div class="card-label">Current decision state</div>
-                    <code id="sell-reason">NOT_EVALUATED</code>
-                </div>
-            </div>
-        </div>
-
-        <div class="gates">
-            <div class="mini"><div class="label">New-bar mode</div><div id="new-bar-mode" class="value">—</div></div>
-            <div class="mini"><div class="label">New bar ready</div><div id="new-bar-ready" class="value">—</div></div>
-            <div class="mini"><div class="label">Cooldown</div><div id="cooldown" class="value">—</div></div>
-            <div class="mini"><div class="label">Global block</div><div id="global-block" class="value">—</div></div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Atlas Intelligence</h2>
-                <div class="section-note">
-                    Deterministic v0.1 intelligence using Nyao telemetry only. Advisory mode: Atlas does not auto-write these recommendations to Nyao.
-                </div>
-            </div>
-            <span id="intel-mode" class="badge ready">ADVISORY</span>
-        </div>
-
-        <div class="intelligence-hero">
-            <div class="intelligence-summary">
-                <div class="card-label">Assessment</div>
-                <div id="intel-summary" class="card-value" style="font-size:20px;">Waiting for intelligence...</div>
-
-                <div class="observability-grid" style="margin-top:14px;">
-                    <div class="observability-card">
-                        <div class="label">Market Regime</div>
-                        <div id="intel-regime" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Direction</div>
-                        <div id="intel-direction" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Volatility</div>
-                        <div id="intel-volatility" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Nyao Fit</div>
-                        <div id="intel-fit" class="value">—</div>
-                    </div>
-                </div>
-
-                <div class="subsection-title">History Recorder</div>
-                <div class="observability-grid">
-                    <div class="observability-card">
-                        <div class="label">Stored Snapshots</div>
-                        <div id="history-count" class="value">0</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Latest Save Reason</div>
-                        <div id="history-reason" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Heartbeat</div>
-                        <div id="history-heartbeat" class="value">60s</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Storage</div>
-                        <div class="value">JSON</div>
-                    </div>
-                </div>
-
-                <div class="subsection-title">Recommendations</div>
-                <ul id="intel-recommendations" class="intel-list">
-                    <li>Waiting for Nyao telemetry.</li>
-                </ul>
-
-                <div class="subsection-title">Proposed runtime changes</div>
-                <div id="intel-proposals" class="proposal-grid">
-                    <div class="proposal-item"><div class="key">State</div><div class="val">Observation only</div></div>
-                </div>
-            </div>
-
-            <div>
-                <div class="intelligence-side">
-                    <div class="observability-card">
-                        <div class="label">Confidence</div>
-                        <div id="intel-confidence" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Risk State</div>
-                        <div id="intel-risk-state" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Risk Score</div>
-                        <div id="intel-risk-score" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Exposure Bias</div>
-                        <div id="intel-exposure-bias" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Risk Governor</div>
-                        <div id="intel-veto" class="value">—</div>
-                    </div>
-                    <div class="observability-card">
-                        <div class="label">Execution Environment</div>
-                        <div id="intel-execution" class="value">—</div>
-                    </div>
-                </div>
-
-                <div class="subsection-title">Cautions</div>
-                <ul id="intel-cautions" class="intel-list">
-                    <li>None reported.</li>
-                </ul>
-
-                <div class="subsection-title">Why Atlas classified this regime</div>
-                <ul id="intel-reasons" class="intel-list">
-                    <li>Waiting for telemetry.</li>
-                </ul>
-            </div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Exposure & Risk</h2>
-                <div class="section-note">Strategy-owned exposure, account drawdown and basket-risk state reported directly by Nyao.</div>
-            </div>
-        </div>
-        <div class="observability-grid">
-            <div class="observability-card"><div class="label">Strategy Positions</div><div id="obs-strategy-positions" class="value">0</div></div>
-            <div class="observability-card"><div class="label">Total Lots</div><div id="obs-total-lots" class="value">0.00</div></div>
-            <div class="observability-card"><div class="label">Strategy Floating P/L</div><div id="obs-strategy-pl" class="value">$0.00</div></div>
-            <div class="observability-card"><div class="label">Gross Notional Exposure</div><div id="obs-notional" class="value">$0.00</div></div>
-            <div class="observability-card"><div class="label">BUY / SELL Positions</div><div id="obs-side-counts" class="value">0 / 0</div></div>
-            <div class="observability-card"><div class="label">BUY / SELL Lots</div><div id="obs-side-lots" class="value">0.00 / 0.00</div></div>
-            <div class="observability-card"><div class="label">Winning / Losing</div><div id="obs-win-loss-count" class="value">0 / 0</div></div>
-            <div class="observability-card"><div class="label">Working Limit Orders</div><div id="obs-working-limits" class="value">0</div></div>
-            <div class="observability-card"><div class="label">Equity Drawdown</div><div id="obs-drawdown" class="value">0.00%</div></div>
-            <div class="observability-card"><div class="label">Basket Loss</div><div id="obs-basket-loss" class="value">0.00%</div><div class="risk-meter"><div id="obs-basket-meter" class="risk-meter-fill"></div></div></div>
-            <div class="observability-card"><div class="label">Margin / Free Margin</div><div id="obs-margin" class="value">$0 / $0</div></div>
-            <div class="observability-card"><div class="label">Margin Level / Leverage</div><div id="obs-margin-level" class="value">—</div></div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Hedge & Recovery State</h2>
-                <div class="section-note">Live recovery-chain state, including actual chain exposure and active hedge depth.</div>
-            </div>
-        </div>
-        <div class="observability-grid">
-            <div class="observability-card"><div class="label">Active Hedge Chains</div><div id="obs-hedge-chains" class="value">0</div></div>
-            <div class="observability-card"><div class="label">Chain Positions</div><div id="obs-hedge-positions" class="value">0</div></div>
-            <div class="observability-card"><div class="label">Chain Lots</div><div id="obs-hedge-lots" class="value">0.00</div></div>
-            <div class="observability-card"><div class="label">Chain P/L</div><div id="obs-hedge-pl" class="value">$0.00</div></div>
-            <div class="observability-card"><div class="label">Chain Loss %</div><div id="obs-hedge-loss" class="value">0.00%</div></div>
-            <div class="observability-card"><div class="label">Max Hedge Level</div><div id="obs-hedge-level" class="value">0</div></div>
-            <div class="observability-card"><div class="label">Max Hedge Cycle</div><div id="obs-hedge-cycle" class="value">0</div></div>
-            <div class="observability-card"><div class="label">Basket Risk Remaining</div><div id="obs-risk-remaining" class="value">0.00%</div></div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Market State & Filters</h2>
-                <div class="section-note">Live execution environment used by Nyao to decide whether fresh exposure is acceptable.</div>
-            </div>
-        </div>
-        <div class="observability-grid">
-            <div class="observability-card"><div class="label">Bid / Ask</div><div id="obs-bid-ask" class="value">—</div></div>
-            <div class="observability-card"><div class="label">Spread / Cap</div><div id="obs-spread" class="value">—</div></div>
-            <div class="observability-card"><div class="label">ATR / Average ATR</div><div id="obs-atr" class="value">—</div></div>
-            <div class="observability-card"><div class="label">Volatility Ratio</div><div id="obs-volatility-ratio" class="value">0.00</div></div>
-            <div class="observability-card"><div class="label">Spread Filter</div><div id="obs-spread-filter" class="value">—</div></div>
-            <div class="observability-card"><div class="label">Trading Pause</div><div id="obs-pause" class="value">—</div></div>
-            <div class="observability-card"><div class="label">Trading Hours</div><div id="obs-hours" class="value">—</div></div>
-            <div class="observability-card"><div class="label">Market Close / Leverage</div><div id="obs-market-filters" class="value">—</div></div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Signal Anatomy</h2>
-                <div class="section-note">BUY and SELL component telemetry that Atlas can later interpret by market regime.</div>
-            </div>
-            <span id="signal-telemetry-state" class="badge blocked">Waiting</span>
-        </div>
-        <div class="signal-anatomy-grid">
-            <div class="signal-anatomy">
-                <div class="decision-top"><div class="decision-side">BUY</div><div id="signal-buy-final" class="badge ready">0.00</div></div>
-                <div id="signal-buy-components" class="signal-component-grid"></div>
-                <div id="signal-buy-reasoning" class="signal-reasoning">No reasoning reported.</div>
-            </div>
-            <div class="signal-anatomy">
-                <div class="decision-top"><div class="decision-side">SELL</div><div id="signal-sell-final" class="badge blocked">0.00</div></div>
-                <div id="signal-sell-components" class="signal-component-grid"></div>
-                <div id="signal-sell-reasoning" class="signal-reasoning">No reasoning reported.</div>
-            </div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Live Nyao Positions</h2>
-                <div class="section-note">Strategy-owned positions with management and hedge-chain metadata.</div>
-            </div>
-        </div>
-        <div class="positions-wrapper">
-            <table class="positions-table">
-                <thead><tr>
-                    <th>Ticket</th><th>Side</th><th>Lot</th><th>Entry</th><th>Current</th><th>P/L</th>
-                    <th>Distance</th><th>Age</th><th>Entry Score</th><th>SL</th><th>TP</th>
-                    <th>BE Lock</th><th>Partial</th><th>Chain</th><th>Level</th><th>Cycle</th>
-                </tr></thead>
-                <tbody id="positions-body"><tr><td colspan="16">No strategy positions.</td></tr></tbody>
-            </table>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Master Controls</h2>
-                <div class="section-note">Atlas can stop fresh exposure while Nyao continues managing existing positions.</div>
-            </div>
-        </div>
-
-        <div class="master-grid">
-            <div class="master-item">
-                <span>New Trading</span>
-                <button id="trading-button" onclick="toggleMaster('enabled')">Loading</button>
-            </div>
-            <div class="master-item">
-                <span>Buy Entries</span>
-                <button id="buy-button" onclick="toggleMaster('enable_buy_orders')">Loading</button>
-            </div>
-            <div class="master-item">
-                <span>Sell Entries</span>
-                <button id="sell-button" onclick="toggleMaster('enable_sell_orders')">Loading</button>
-            </div>
-            <div class="master-item">
-                <span>Realized P/L Baseline</span>
-                <button class="neutral-button" onclick="resetRealizedProfit()">Reset</button>
-            </div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Full Nyao Runtime Control</h2>
-                <div class="section-note">
-                    156 runtime controls. Values shown in each control are the requested Atlas value when set;
-                    otherwise the current effective Nyao value. Risk/recovery changes can affect active trade management.
-                </div>
-            </div>
-            <span class="badge danger">Demo / Validation</span>
-        </div>
-
-        <div class="control-toolbar">
-            <input
-                id="control-search"
-                class="search"
-                placeholder="Search controls, e.g. new bar, hedge, RSI, trailing..."
-                oninput="filterControls()"
-            >
-            <div>
-                <button class="neutral-button" onclick="openAllGroups()">Expand all</button>
-                <button class="neutral-button" onclick="closeAllGroups()">Collapse all</button>
-            </div>
-        </div>
-
-        <div id="runtime-groups" class="groups"></div>
-
-        <div class="control-actions">
-            <div id="dirty-state" class="clean">No unsaved runtime changes.</div>
-            <div class="action-buttons">
-                <button class="neutral-button" onclick="discardRuntimeChanges()">Discard edits</button>
-                <button id="apply-button" class="primary-button" onclick="applyRuntimeChanges()">Apply changed controls</button>
-            </div>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Core Runtime Verification</h2>
-                <div class="section-note">
-                    Preserves the previous dashboard's requested-vs-applied check for the most important controls.
-                    "Inherited" means Atlas has not explicitly overridden that value and Nyao is using its effective runtime value.
-                </div>
-            </div>
-        </div>
-
-        <div class="verification-wrapper">
-            <table class="verification-table">
-                <thead>
-                    <tr>
-                        <th>Parameter</th>
-                        <th>Requested by Atlas</th>
-                        <th>Applied by Nyao</th>
-                        <th>State</th>
-                    </tr>
-                </thead>
-                <tbody id="core-verification-body"></tbody>
-            </table>
-        </div>
-    </div>
-
-    <div class="section card">
-        <div class="section-heading">
-            <div>
-                <h2 class="section-title">Last Order Attempt</h2>
-                <div class="section-note">Most recent order attempt reported by Nyao.</div>
-            </div>
-        </div>
-        <div class="order-grid">
-            <div class="mini"><div class="label">Attempted</div><div id="order-attempted" class="value">—</div></div>
-            <div class="mini"><div class="label">Result</div><div id="order-result" class="value">—</div></div>
-            <div class="mini"><div class="label">Direction</div><div id="order-direction" class="value">—</div></div>
-            <div class="mini"><div class="label">Mode</div><div id="order-mode" class="value">—</div></div>
-            <div class="mini"><div class="label">Ticket</div><div id="order-ticket" class="value">—</div></div>
-            <div class="mini"><div class="label">Retcode</div><div id="order-retcode" class="value">—</div></div>
-            <div class="mini"><div class="label">Time</div><div id="order-time" class="value">—</div></div>
-        </div>
-    </div>
-
-    <div id="footer" class="footer">Waiting for Nyao status...</div>
+  </main>
 </div>
 
+<div id="confirm-modal" class="modal"><div class="modal-card">
+  <h3>Execute approved policy</h3>
+  <p class="muted">Atlas will re-check the operator arm, approval, current context, command baseline, Risk Governor and runtime validation before writing the command.</p>
+  <div id="modal-exec-summary" class="callout"></div>
+  <p style="margin:14px 0 6px" class="label">Operator</p>
+  <input id="modal-actor" class="search" value="Nobel">
+  <p style="margin:14px 0 6px" class="label">Confirmation</p>
+  <div class="callout mono">EXECUTE_SUPERVISED_COMMAND</div>
+  <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="confirmExecute()">Execute policy</button></div>
+</div></div>
+<div id="toast" class="toast"></div>
+
 <script>
-    const CONTROL_GROUPS = __CONTROL_CONFIG__;
+const CONTROL_CONFIG = __CONTROL_CONFIG__;
+const state = {
+  status:null, command:null, intelligence:null, parameterIntel:null, proposal:null, review:null,
+  supervised:null, preflight:null, execution:null, ack:null, arm:null, llmCycle:null, llmStatus:null, autoConsensus:null, responsiveness:null, candles:null, zoneMap:null, zonePlan:null,
+  executionEvents:null, epochs:null, outcomes:null, performance:null, riskUnits:null, recoveryAttribution:null, recoveryRisk:null, riskAppetite:null, audit:null, autoApplications:null, dirty:{}, symbols:[], selectedSymbol:null
+};
 
-    const CORE_VERIFICATION_FIELDS = [
-        "enable_new_bar_entry_only",
-        "min_buy_signal_score",
-        "min_sell_signal_score",
-        "min_vol_ratio_to_trade",
-        "base_lot_size",
-        "max_open_orders",
-        "max_trades_per_candle",
-        "enable_hedge_chain",
-        "enable_dynamic_lots",
-        "enable_virtual_sl_reentry"
-    ];
+const viewMeta={
+  overview:["Command Center","Live intent, exposure and operator attention"],
+  market:["Market Analysis","Regime, signal eligibility and trading costs"],
+  analysis:["Zone Analysis","Daily trade locations and live zone execution"],
+  positions:["Portfolio","Exposure and position management"],
+  atlas:["Atlas Brain","Adaptation, evidence and model authority"],
+  control:["Settings","Execution authority and advanced controls"],
+  history:["Audit Log","Policy, execution and outcome history"]
+};
 
-    let currentCommand = {};
-    let latestStatus = {};
-    let latestIntelligence = {};
-    let dirtyFields = new Set();
-    let saveInProgress = false;
-    let startingBalance = null;
+function go(name){
+  document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
+  document.querySelectorAll(".nav button").forEach(x=>x.classList.toggle("active",x.dataset.view===name));
+  document.getElementById("view-"+name).classList.add("active");
+  document.getElementById("top-title").textContent=viewMeta[name][0];
+  document.getElementById("top-subtitle").textContent=viewMeta[name][1];
+}
+document.querySelectorAll(".nav button").forEach(b=>b.onclick=()=>go(b.dataset.view));
+const liveExecutionPanel=document.getElementById("live-execution-panel");
+const marketLiveSlot=document.getElementById("market-live-slot");
+if(liveExecutionPanel&&marketLiveSlot)marketLiveSlot.appendChild(liveExecutionPanel);
+const fmt=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):"—";
+const money=v=>Number.isFinite(Number(v))?new Intl.NumberFormat(undefined,{style:"currency",currency:"USD",maximumFractionDigits:2}).format(Number(v)):"—";
+const text=(v,f="—")=>(v===null||v===undefined||v==="")?f:String(v);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pretty=s=>String(s??"").replaceAll("_"," ").replace(/\b\w/g,m=>m.toUpperCase());
+const age=s=>{s=Number(s||0); if(s<60)return Math.round(s)+"s"; if(s<3600)return Math.floor(s/60)+"m"; return Math.floor(s/3600)+"h "+Math.floor((s%3600)/60)+"m";}
+const countdownAge=s=>{s=Math.max(0,Math.ceil(Number(s||0)));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h?`${h}h ${String(m).padStart(2,"0")}m ${String(sec).padStart(2,"0")}s`:`${m}m ${String(sec).padStart(2,"0")}s`;};
+function badgeClass(v){v=String(v||"").toUpperCase();if(v.includes("READY")||v.includes("PASS")||v.includes("CONFIRMED")||v.includes("APPLIED")||v.includes("EXECUTED")||v==="LOW"||v==="APPROVED")return"ok";if(v.includes("BLOCK")||v.includes("FAIL")||v.includes("HIGH")||v.includes("MISMATCH")||v.includes("TIMEOUT")||v.includes("REJECT"))return"bad";return"warn"}
+function toast(msg,bad=false){const t=document.getElementById("toast");t.textContent=msg;t.className="toast show"+(bad?" bad":"");setTimeout(()=>t.className="toast",4500)}
+function scopedUrl(url){
+  if(!state.selectedSymbol || !url.startsWith("/api/v1/") || url.startsWith("/api/v1/atlas/symbols"))return url;
+  const join=url.includes("?")?"&":"?";
+  return `${url}${join}symbol=${encodeURIComponent(state.selectedSymbol)}`;
+}
+async function api(url,opts={}){const r=await fetch(scopedUrl(url),{cache:"no-store",...opts});let data=null;try{data=await r.json()}catch{}if(!r.ok){const detail=data?.detail;throw new Error(typeof detail==="string"?detail:(detail?.code?detail.code+": "+detail.message:`HTTP ${r.status}`))}return data}
+function jsonPost(url,body){return api(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})}
 
-    const storedBalance = localStorage.getItem("atlasStartingBalance");
-    if (storedBalance !== null && Number.isFinite(Number(storedBalance))) {
-        startingBalance = Number(storedBalance);
+async function loadSymbols(){
+  try{
+    const data=await api("/api/v1/atlas/symbols");
+    state.symbols=data.symbols||[];
+
+    const stored=localStorage.getItem("atlasSelectedSymbol");
+    const available=state.symbols.map(x=>x.symbol);
+    if(!state.selectedSymbol){
+      if(stored && available.includes(stored))state.selectedSymbol=stored;
+      else state.selectedSymbol=data.default_symbol||available[0]||null;
     }
 
-    function money(value) {
-        return new Intl.NumberFormat("en-SG", {
-            style: "currency",
-            currency: "USD",
-            minimumFractionDigits: 2
-        }).format(Number(value || 0));
+    const select=document.getElementById("symbol-select");
+    select.innerHTML=state.symbols.length
+      ? state.symbols.map(item=>{
+          const status=item.connected?"●":"○";
+          return `<option value="${esc(item.symbol)}">${status} ${esc(item.symbol)}</option>`;
+        }).join("")
+      : '<option value="">No symbols</option>';
+
+    if(state.selectedSymbol)select.value=state.selectedSymbol;
+  }catch(e){
+    console.warn("Symbol discovery failed",e);
+  }
+}
+
+async function switchSymbol(symbol){
+  if(!symbol || symbol===state.selectedSymbol)return;
+  state.selectedSymbol=symbol;
+  localStorage.setItem("atlasSelectedSymbol",symbol);
+
+  state.status=null;
+  state.command=null;
+  state.intelligence=null;
+  state.proposal=null;
+  state.review=null;
+  state.supervised=null;
+  state.preflight=null;
+  state.execution=null;
+  state.ack=null;
+  state.executionEvents=null;
+  state.epochs=null;
+  state.outcomes=null;
+  state.audit=null;
+  state.llmCycle=null;
+  state.responsiveness=null;
+  state.candles=null;
+  state.zoneMap=null;
+  state.zonePlan=null;
+  state.dirty={};
+
+  const controls=document.getElementById("runtime-controls");
+  if(controls)controls.innerHTML="";
+
+  toast(`Switched Atlas context to ${symbol}.`);
+  await loadCore();
+  await loadRiskAppetite();
+  await loadIntelligence();
+  await loadParameterIntelligence();
+  await loadArm();
+  await loadLlmCycle();
+  await loadResponsiveness();
+  await loadMarketCandles();
+  await loadZoneMap();
+  await loadProposal();
+  await loadHistory();
+  renderAll();
+  renderControls();
+}
+
+function accountType(){
+  const s=state.status||{};
+  return text(s.account_type||s.account_trade_mode||s.trade_mode||s.account_mode,"ACCOUNT CONNECTED").toUpperCase();
+}
+function updateChrome(){
+  const s=state.status||{}, c=state.command||{};
+  const connected=s.connected!==false && !!state.status;
+  const symbol=text(s.symbol||state.selectedSymbol,"—");
+  const select=document.getElementById("symbol-select");
+  if(select && state.selectedSymbol)select.value=state.selectedSymbol;
+  document.getElementById("side-dot").className="dot "+(connected?"ok":"bad");
+  document.getElementById("side-connection").textContent=connected?"Connected":"Offline";
+  document.getElementById("side-symbol").textContent=symbol;
+  document.getElementById("account-pill").textContent=accountType();
+  document.getElementById("epoch-pill").textContent="Epoch "+text(c.policy_epoch??s.policy_epoch);
+  document.getElementById("command-pill").textContent="Command "+text(c.command_version??s.applied_command_version);
+}
+
+function currentRisk(){
+  const p=state.proposal||{};
+  const i=state.intelligence||{};
+  return p.risk?.state||p.review_summary?.risk_state||i.risk_governor?.state||i.risk?.state||"—";
+}
+function renderOverview(){
+  const s=state.status||{}, c=state.command||{}, p=state.proposal||{};
+  const zp=state.zonePlan||{}, activePlan=zp.zone_plan||null, capital=zp.capital_sizing||{};
+  const cycle=state.llmCycle||{};
+  const connected=!!state.status && s.connected!==false;
+  const applied=s.applied_command_version;
+  const synchronized=applied==null || c.command_version==null ? connected : Number(applied)===Number(c.command_version);
+  const zoneAware=Boolean(zp.zone_aware_scalping_active||((s.zone_directive_state==="ZONE_CAPITAL_INFEASIBLE")&&!s.zone_scalp_suspended));
+  const zoneMode=Boolean(s.zone_mode_active&&!zoneAware), side=text(activePlan?.side||s.zone_side,"ZONE");
+  const executionLane=zoneAware?"ZONE-AWARE SCALP":zoneMode?"ZONE CAMPAIGN":"NORMAL SCALP";
+  const liveCount=Number(s.strategy_open_positions??s.open_positions??0), stagedCount=Number(s.working_limit_orders||0);
+  const permissionsOk=s.terminal_algo_trading_allowed!==false&&s.ea_trading_allowed!==false&&s.account_trade_allowed!==false&&s.account_expert_trading_allowed!==false;
+  const confirmed=Boolean((zp.directive_preview||{}).zone_entry_allowed);
+  const campaignRisk=Number(activePlan?.risk?.account_risk_pct||capital.approved_zone_risk_pct||0);
+  const modeName=zoneAware?`${side} ZONE-AWARE SCALP`:zoneMode?`${side} ZONE CAMPAIGN`:"NORMAL SCALP";
+  document.getElementById("hero-state").textContent=!connected?"Nyao is offline":zoneAware?`${side} zone context guiding scalps`:zoneMode?`${side} zone campaign owns execution`:"Atlas is scanning for scalps";
+  document.getElementById("hero-copy").textContent=!connected
+    ?"Atlas cannot verify market state or execution authority."
+    :zoneAware
+      ?`A qualified ${side} zone is informing scalp direction, but the full zone campaign does not own execution. Nyao keeps normal scalp thresholds, costs and Atlas risk limits.`
+      :zoneMode
+        ?`${liveCount} live position${liveCount===1?"":"s"} and ${stagedCount} staged entr${stagedCount===1?"y":"ies"}. Ordinary scalping is paused while this campaign owns the risk budget.`
+        :"No priority zone currently owns execution. Nyao may scalp when Atlas direction, cost, signal and capital gates agree.";
+  const modeBadge=document.getElementById("hero-mode-badge");modeBadge.textContent=connected?modeName:"OFFLINE";modeBadge.className="badge "+(connected?(zoneMode?"info":"ok"):"bad");
+  document.getElementById("hero-symbol").textContent=text(s.symbol||state.selectedSymbol);
+  document.getElementById("hero-market-state").textContent=zoneAware?`${side} aligned scalps only`:zoneMode?(confirmed?"zone confirmed":"awaiting confirmation"):(s.spread_within_limit===false?"cost blocked":"scalp scan active");
+  document.getElementById("hero-bridge").textContent=s.zone_directive_fresh===false?"stale":"live";
+  document.getElementById("hero-risk").textContent=modeName;
+  document.getElementById("hero-policy").textContent=campaignRisk>0?`${fmt(campaignRisk,3)}% equity`:capital.approved_scalp_risk_pct>0?`${fmt(capital.approved_scalp_risk_pct,3)}% equity`:"No new risk";
+  document.getElementById("hero-open").textContent=`${liveCount} live · ${stagedCount} staged`;
+  document.getElementById("hero-chains").textContent=cycle.running?"Running now":cycle.enabled&&Number.isFinite(Number(cycle.seconds_until_next_run))?age(cycle.seconds_until_next_run):"Not scheduled";
+  const liveBadge=document.getElementById("overview-live-badge");liveBadge.textContent=connected&&permissionsOk?"SYSTEM LIVE":"ATTENTION";liveBadge.className="badge "+(connected&&permissionsOk?"ok":"bad");
+  document.getElementById("balance").textContent=money(s.balance);
+  document.getElementById("equity").textContent="Equity "+money(s.equity);
+  const pl=s.strategy_floating_pl??s.floating_profit;
+  const pel=document.getElementById("floating");pel.textContent=money(pl);pel.className="value "+(Number(pl)>0?"pos":Number(pl)<0?"neg":"");
+  document.getElementById("drawdown").textContent=`Drawdown ${fmt(s.equity_drawdown_pct)}%`;
+  document.getElementById("market-label").textContent=`Live market · ${text(s.symbol)}`;
+  document.getElementById("market-price").textContent=`${text(s.bid)} / ${text(s.ask)}`;
+  document.getElementById("market-spread").textContent=`Spread ${fmt(s.spread_points,1)} pts`;
+  document.getElementById("protect-positions").textContent=text(s.strategy_open_positions??s.open_positions,0);
+  document.getElementById("protect-recovery").textContent=text(s.active_hedge_chains,0);
+  document.getElementById("protect-basket").textContent=`${fmt(s.basket_loss_pct)}%`;
+  document.getElementById("protect-duplicate").textContent=s.runtime_enable_duplicate_distance_filter===false?"OFF":"ON";
+  const riskUnits=state.riskUnits||{};
+  document.getElementById("protect-risk-streak").textContent=`${text(riskUnits.consecutive_completed_loss_units,0)} completed unit${Number(riskUnits.consecutive_completed_loss_units||0)===1?"":"s"}`;
+  const recoveryLedger=state.recoveryRisk||{};
+  const lastRecoverySizing=recoveryLedger.last_recovery_sizing||{};
+  const recoveryReason=text(lastRecoverySizing.reason||s.recovery_sizing_reason,"NOT EVALUATED");
+  const recoveryFinalLot=Number(lastRecoverySizing.final_lot||s.recovery_final_lot||0);
+  document.getElementById("protect-recovery-sizing").textContent=recoveryFinalLot>0?`${fmt(recoveryFinalLot,2)} lot · ${pretty(recoveryReason)}`:pretty(recoveryReason);
+  document.getElementById("protect-unit-risk").textContent=Number(lastRecoverySizing.original_unit_risk_usd)>0?money(lastRecoverySizing.original_unit_risk_usd):"—";
+  document.getElementById("protect-chain-ceiling").textContent=Number(lastRecoverySizing.chain_budget_usd)>0?`${money(lastRecoverySizing.chain_budget_usd)} · ${fmt(lastRecoverySizing.unit_budget_multiplier||0,2)}×`:"—";
+  const portfolioAllocation=capital.portfolio_allocation||{};
+  document.getElementById("protect-portfolio-reserved").textContent=money(portfolioAllocation.reserved_active_risk_amount||0);
+  document.getElementById("protect-portfolio-available").textContent=money(portfolioAllocation.remaining_operating_risk_amount||0);
+  const activeComposite=(riskUnits.units||[]).filter(u=>u.state==="ACTIVE"&&u.unit_type!=="STANDALONE_TRADE");
+  const completedComposite=(riskUnits.units||[]).filter(u=>u.state==="COMPLETE"&&u.unit_type!=="STANDALONE_TRADE");
+  const latestComposite=completedComposite.length?completedComposite[completedComposite.length-1]:null;
+  document.getElementById("protect-composite-active").textContent=activeComposite.length?activeComposite.map(u=>pretty(u.unit_type)).join(" · "):"NONE";
+  document.getElementById("protect-composite-latest").textContent=latestComposite?`${pretty(latestComposite.unit_type)} · ${latestComposite.result_class} · ${money(latestComposite.realized_net_pl)}`:"NONE";
+  const chainBudget=Number(lastRecoverySizing.chain_budget_usd||s.recovery_chain_budget_usd||0);
+  const activeLedgerChain=(recoveryLedger.active_chains||[])[0]||{};
+  const budgetRemaining=Number(activeLedgerChain.hard_loss_budget_remaining_usd);
+  const recoveryBudgetBasis=text(activeLedgerChain.budget_basis||lastRecoverySizing.budget_basis,"UNOBSERVED");
+  document.getElementById("protect-recovery-copy").textContent=activeComposite.length
+    ?`${activeComposite.length} composite risk unit${activeComposite.length===1?" is":"s are"} in flight. Member closes remain provisional. Recovery ceiling ${chainBudget>0?money(chainBudget):"unavailable"}${Number(lastRecoverySizing.original_unit_risk_usd)>0?` from ${money(lastRecoverySizing.original_unit_risk_usd)} original unit risk × ${fmt(lastRecoverySizing.unit_budget_multiplier||0,2)}`:""}${Number.isFinite(budgetRemaining)?` · ${money(budgetRemaining)} remaining`:""}. Budget basis: ${pretty(recoveryBudgetBasis)}. Portfolio ceiling remains ${money(recoveryLedger.portfolio_hard_risk_budget_usd||0)}. Last limiter: ${pretty(recoveryReason)}.`
+    :`No composite risk unit is currently in flight. Completed loss streak is ${text(riskUnits.consecutive_completed_loss_units,0)} risk unit(s); recovery-chain and zone-campaign legs are scored only as their completed composite unit.`;
+  const ack=state.ack;
+  document.getElementById("ack-state").textContent=!connected?"OFFLINE":permissionsOk&&s.zone_directive_fresh!==false?"HEALTHY":"CHECK REQUIRED";
+  document.getElementById("ack-state").className="value small "+(!connected||!permissionsOk?"neg":"pos");
+  document.getElementById("ack-detail").textContent=permissionsOk?`Nyao connected · ${ack?.state||latestAckState()} acknowledgement`:"One or more MT5 trading permissions are disabled";
+
+  // P3.23 dashboard: make execution ownership, structural context, hard capital
+  // authority and Gemini's Nyao-policy authority visibly separate.
+  const laneEl=document.getElementById("authority-lane");
+  laneEl.textContent=executionLane;
+  laneEl.className="authority-main "+(zoneAware?"lane-zone-aware":zoneMode?"lane-zone":"lane-normal");
+  const laneBadge=document.getElementById("authority-lane-badge");
+  laneBadge.textContent=zoneMode?"ZONE OWNS ENTRIES":zoneAware?"SCALP + ZONE CONTEXT":"SCALP OWNS ENTRIES";
+  laneBadge.className="badge "+(zoneMode?"info":zoneAware?"warn":"ok");
+  document.getElementById("authority-lane-copy").textContent=zoneMode
+    ?"A broker-feasible zone campaign owns fresh-entry authority; ordinary scalp entries are suspended."
+    :zoneAware
+      ?`The ${side} zone remains read-only structural context. ${side} scalps may qualify; counter-direction scalps remain blocked by deterministic arbitration.`
+      :"Ordinary Nyao scalping owns fresh-entry authority. Zone analysis continues in the background.";
+  document.getElementById("authority-scalp").textContent=zoneMode?"SUSPENDED":zoneAware?`${side} ALIGNED ONLY`:"ACTIVE";
+  document.getElementById("authority-zone").textContent=zoneMode?"ACTIVE":activePlan?(Number(activePlan.entries?.length||0)>0?"ARMED / WAITING":"CONTEXT ONLY"):"MONITORING";
+
+  const sourceZone=activePlan?.source_zone||{};
+  const zoneScore=Number(sourceZone.score||0);
+  const zoneLabel=activePlan?`${side} · ${text(sourceZone.timeframe,"—")} ${pretty(sourceZone.kind||"ZONE")}`:"NO PRIORITY ZONE";
+  document.getElementById("context-zone").textContent=zoneLabel;
+  const contextBadge=document.getElementById("context-zone-badge");
+  contextBadge.textContent=activePlan?text(sourceZone.status||zp.state,"ZONE"):"SCANNING";
+  contextBadge.className="badge "+(activePlan?"info":"warn");
+  document.getElementById("context-zone-copy").textContent=activePlan
+    ?`${fmt(sourceZone.low,3)} – ${fmt(sourceZone.high,3)}${zoneScore>0?` · score ${fmt(zoneScore,1)}`:""}. Gemini receives this as read-only scalp context.`
+    :"No active priority-zone context is constraining the current scalp lane.";
+  const htfStructure=text(state.zoneMap?.composite_bias,"NEUTRAL");
+  const liveThesis=text(state.intelligence?.regime?.direction,"NEUTRAL");
+  const normalizeDirection=value=>{const v=String(value||"").toUpperCase();return v.includes("BEAR")||v==="SELL"?"BEARISH":v.includes("BULL")||v==="BUY"?"BULLISH":v.includes("NEUTRAL")||v==="MIXED"?"NEUTRAL":v};
+  const htfDir=normalizeDirection(htfStructure), liveDir=normalizeDirection(liveThesis);
+  const thesisRelation=zoneAware?`${side} ZONE CONSTRAINT`:zoneMode?`${side} CAMPAIGN`:htfDir!=="NEUTRAL"&&liveDir!=="NEUTRAL"?(htfDir===liveDir?"ALIGNED":"CONFLICTING"):"NO CONFLICT SIGNAL";
+  document.getElementById("context-bias").textContent=pretty(htfStructure);
+  document.getElementById("context-alignment").textContent=thesisRelation;
+  document.getElementById("context-zone-copy").textContent=activePlan
+    ?`${fmt(sourceZone.low,3)} – ${fmt(sourceZone.high,3)}${zoneScore>0?` · score ${fmt(zoneScore,1)}`:""}. HTF structure ${pretty(htfStructure)}; live Atlas thesis ${pretty(liveThesis)}. Gemini receives the zone as read-only scalp context.`
+    :`No priority-zone constraint. HTF structure is ${pretty(htfStructure)} while the live Atlas thesis is ${pretty(liveThesis)}${thesisRelation==="CONFLICTING"?" — directional layers currently disagree.":"."}`;
+
+  const simulated=capital.demo_capital_simulation||{};
+  const simActive=Boolean(simulated.active);
+  const capitalPresent=Boolean(capital&&Object.keys(capital).length&&capital.version);
+  const capitalExplicitVeto=capitalPresent&&capital.veto_new_risk===true;
+  const capitalExplicitAllow=capitalPresent&&capital.veto_new_risk===false;
+  const statusHasCapitalDecision=typeof s.capital_veto_new_risk==="boolean";
+  const capitalMismatch=capitalPresent&&statusHasCapitalDecision&&Boolean(s.capital_veto_new_risk)!==Boolean(capital.veto_new_risk);
+  const capitalSyncing=!capitalPresent||!capitalExplicitVeto&&!capitalExplicitAllow||capitalMismatch;
+  const riskCapital=Number(capital.risk_capital||capital.real_risk_capital||s.equity||0);
+  const regimeName=text(capital.capital_regime||capital.regime,"—");
+  const vetoReasons=Array.isArray(capital.veto_reasons)?capital.veto_reasons:[];
+  const allocation=capital.portfolio_allocation||{};
+  const allocationState=text(allocation.allocation_state,"AVAILABLE");
+  const preLossProtection=capital.loss_protection||{};
+  const recoveryProbeInFlight=text(preLossProtection.state)==="RECOVERY_PROBE"&&Number(s.strategy_open_positions||0)>0;
+  const fullyAllocated=allocationState==="FULLY_ALLOCATED";
+  const partiallyAllocated=allocationState==="PARTIALLY_ALLOCATED";
+  const capitalBadge=document.getElementById("capital-regime-badge");
+  capitalBadge.textContent=capitalSyncing?"SYNCING":recoveryProbeInFlight?"RECOVERY PROBE · IN FLIGHT":fullyAllocated?"FULLY ALLOCATED":partiallyAllocated?"PARTIALLY ALLOCATED":capitalExplicitVeto?"CAPITAL VETO":simActive?`DEMO ${pretty(regimeName)}`:pretty(regimeName);
+  capitalBadge.className="badge "+(capitalSyncing?"warn":recoveryProbeInFlight||partiallyAllocated?"info":fullyAllocated?"warn":capitalExplicitVeto?"bad":simActive?"warn":"ok");
+  document.getElementById("capital-risk-base").textContent=money(riskCapital);
+  const portfolioHard=Number(allocation.portfolio_hard_ceiling_amount||capital.maximum_total_strategy_risk_amount||0);
+  const operatingCap=Number(allocation.operating_risk_ceiling_amount||portfolioHard);
+  const reservedRisk=Number(allocation.reserved_active_risk_amount||0);
+  const availableRisk=Number(allocation.remaining_operating_risk_amount||0);
+  document.getElementById("capital-risk-copy").textContent=capitalSyncing
+    ?"Capital state is reconciling across Nyao telemetry and Atlas sizing. Last complete budget is not treated as a fresh veto."
+    :recoveryProbeInFlight
+      ?"A reduced-risk recovery probe is in flight. Independent fresh risk remains intentionally paused until the composite probe resolves so the probe remains valid evidence; only the final composite chain result can break or escalate the loss streak."
+      :capitalExplicitVeto
+        ?`New risk is explicitly vetoed${vetoReasons.length?`: ${vetoReasons.map(pretty).join(" · ")}`:" by the capital governor."}`
+        :partiallyAllocated
+          ?`Concurrent allocator: ${money(reservedRisk)} reserved across active risk units · ${money(availableRisk)} operating capacity remains (${money(operatingCap)} operating / ${money(portfolioHard)} hard ceiling). Existing trades do not automatically block independent opportunities.`
+          :simActive
+            ?`Demo simulated risk capital; MT5 equity remains ${money(s.equity)}. Hard Atlas limits still apply.`
+            :`Atlas risk capital · ${money(availableRisk||operatingCap)} operating capacity available · portfolio hard ceiling ${money(portfolioHard)}.`;
+  const scalpAmount=Number(capital.approved_scalp_risk_amount||0), zoneAmount=Number(capital.approved_zone_risk_amount||0);
+  const scalpPct=Number(capital.approved_scalp_risk_pct||0), zonePct=Number(capital.approved_zone_risk_pct||0);
+  const lossProtection=capital.loss_protection||{};
+  const protectionState=text(lossProtection.state,"INACTIVE");
+  if(!capitalSyncing&&protectionState==="HARD_VETO"){
+    const remaining=countdownAge(lossProtection.remaining_seconds||0);
+    capitalBadge.textContent=`LOSS VETO · ${remaining}`;
+    capitalBadge.className="badge bad";
+    document.getElementById("capital-risk-copy").textContent=`${text(lossProtection.consecutive_losses,0)} consecutive losses · stage ${text(lossProtection.escalation_level,1)} of 3 · ${text(lossProtection.timeout_minutes,15)}m protection · recovery probe in ${remaining}. Historical losses do not escalate stages; only failed recovery probes do. Qualified Gemini consensus may bypass policy dwell, but not consensus/confidence/safety gates.`;
+  }else if(!capitalSyncing&&protectionState==="RECOVERY_PROBE"){
+    const release=lossProtection.policy_release||{};
+    const adapted=lossProtection.release_reason==="MATERIAL_POLICY_RUNTIME_CONFIRMED";
+    capitalBadge.textContent=adapted?"POLICY-ADAPTED RECOVERY":"RECOVERY PROBE";
+    capitalBadge.className="badge warn";
+    document.getElementById("capital-risk-copy").textContent=adapted
+      ?`Epoch ${text(release.policy_epoch)} is runtime-confirmed after the latest loss and materially changed fresh-entry policy (${(release.material_controls||[]).map(pretty).join(", ")||"entry controls"}). The old loss timer was released; only a reduced ${fmt(lossProtection.recovery_probe_scalp_risk_pct||scalpPct,3)}% scalp probe is permitted. The ${text(lossProtection.consecutive_losses,0)} prior losses remain evidence; zone risk stays zero.`
+      :`Loss-protection timer completed. Only a reduced ${fmt(lossProtection.recovery_probe_scalp_risk_pct||scalpPct,3)}% scalp probe is permitted; zone risk remains zero until the streak breaks.`;
+  }
+  document.getElementById("capital-scalp-budget").textContent=capitalSyncing?"SYNCING":capitalExplicitVeto?"0.000% · VETOED":scalpAmount>0?`${money(scalpAmount)} · ${fmt(scalpPct,3)}%`:`${fmt(scalpPct,3)}%`;
+  document.getElementById("capital-zone-budget").textContent=capitalSyncing?"SYNCING":capitalExplicitVeto?"0.000% · VETOED":zoneAmount>0?`${money(zoneAmount)} · ${fmt(zonePct,3)}%`:`${fmt(zonePct,3)}%`;
+
+  const auto=cycle.execution_mode==="AUTONOMOUS";
+  const brainBadge=document.getElementById("brain-mode-badge");
+  brainBadge.textContent=auto?"AUTONOMOUS NYAO POLICY":"SUPERVISED";
+  brainBadge.className="badge "+(auto?"ok":"info");
+  const brainLifecycle=text(auto?(cycle.last_auto_apply_status||p.lifecycle?.state||p.review_state):(p.lifecycle?.state||p.review_state||cycle.last_auto_apply_status),"NO CHANGE");
+  const brainStateLabel=brainLifecycle==="MINIMUM_DWELL_ACTIVE"?"STABILITY HOLD":brainLifecycle==="CONSENSUS_NOT_READY"?"BUILDING CONSENSUS":brainLifecycle==="DEFERRED_ACTIVE_ZONE_PLAN"?"ACTIVATION DEFERRED":brainLifecycle==="APPLIED"?"POLICY ACTIVE":pretty(brainLifecycle);
+  document.getElementById("brain-policy-state").textContent=brainStateLabel;
+  document.getElementById("brain-policy-copy").textContent=zoneMode
+    ?"Gemini can continue reasoning about Nyao policy, but a new policy waits for the live zone campaign boundary before activation."
+    :zoneAware
+      ?`Gemini is allowed to use the ${side} zone as scalp context while Atlas keeps zone construction and hard risk deterministic.`
+      :"Gemini may optimize the full Nyao scalp lifecycle; Atlas retains zone, capital, broker-feasibility and hard-risk authority.";
+  document.getElementById("brain-epoch").textContent=text(c.policy_epoch??s.policy_epoch);
+  document.getElementById("brain-next").textContent=cycle.running?"RUNNING":cycle.enabled&&Number.isFinite(Number(cycle.seconds_until_next_run))?age(cycle.seconds_until_next_run):"NOT SCHEDULED";
+
+  const campaignBadge=document.getElementById("overview-campaign-badge");
+  if(activePlan&&zoneAware){
+    const ideal=Array.isArray(activePlan.ideal_entries)?activePlan.ideal_entries:[], admitted=Array.isArray(activePlan.entries)?activePlan.entries:[];
+    document.getElementById("overview-campaign-title").textContent=`${side} zone context → scalp fallback`;
+    document.getElementById("overview-campaign-copy").textContent=`The technical zone remains valid context, but its executable campaign structure is ${admitted.length} leg${admitted.length===1?"":"s"}. Atlas returned fresh-entry authority to aligned scalping.`;
+    campaignBadge.textContent="ZONE-AWARE SCALP";campaignBadge.className="badge warn";
+    const rows=(ideal.length?ideal:[{leg:1,entry_price:activePlan.source_zone?.low},{leg:2,entry_price:(Number(activePlan.source_zone?.low||0)+Number(activePlan.source_zone?.high||0))/2},{leg:3,entry_price:activePlan.source_zone?.high}]);
+    document.getElementById("overview-campaign").innerHTML=rows.map((entry,index)=>`<div class="campaign-leg"><div class="row"><span class="label">IDEAL ENTRY ${entry.leg||index+1}</span><span class="badge ${index<admitted.length?"info":"bad"}">${index<admitted.length?"ADMITTED":"NOT EXECUTABLE"}</span></div><div class="campaign-price">${fmt(entry.entry_price,3)}</div><div class="muted">Zone geometry preserved · scalp fallback does not convert this into a zone order</div></div>`).join("");
+  }else if(activePlan){
+    const entries=Array.isArray(activePlan.entries)?activePlan.entries:[],targets=Array.isArray(activePlan.take_profits)?activePlan.take_profits:[];
+    document.getElementById("overview-campaign-title").textContent=`${side} from ${text(activePlan.source_zone?.timeframe)} ${pretty(activePlan.source_zone?.kind||"ZONE")}`;
+    document.getElementById("overview-campaign-copy").textContent=`Shared stop ${fmt(activePlan.stop_loss,3)} · total risk ${fmt(campaignRisk,3)}% · confirmation ${fmt(activePlan.confirmation?.zone_confirmation?.combined_score,1)} / ${fmt(activePlan.confirmation?.zone_confirmation?.threshold,1)}.`;
+    campaignBadge.textContent=confirmed?"CONFIRMED":"WAITING";campaignBadge.className="badge "+(confirmed?"ok":"warn");
+    document.getElementById("overview-campaign").innerHTML=entries.map((entry,index)=>{const live=index<liveCount,staged=!live&&index<liveCount+stagedCount,target=targets[index];return `<div class="campaign-leg ${live?"live":""}"><div class="row"><span class="label">ENTRY ${entry.leg}</span><span class="badge ${live?"ok":staged?"info":"warn"}">${live?"LIVE":staged?"STAGED":"PLANNED"}</span></div><div class="campaign-price">${fmt(entry.entry_price,3)}</div><div class="muted">${fmt(entry.risk_allocation_pct,0)}% of campaign risk${target?` · TP ${fmt(target.price,3)}`:""}</div></div>`}).join("");
+  }else{
+    document.getElementById("overview-campaign-title").textContent="No zone campaign active";
+    document.getElementById("overview-campaign-copy").textContent="Atlas is monitoring the market and ordinary scalp gates remain authoritative.";
+    campaignBadge.textContent="SCANNING";campaignBadge.className="badge info";
+    document.getElementById("overview-campaign").innerHTML=[[`BUY signal`,fmt(s.buy_adjusted_score,2)],['SELL signal',fmt(s.sell_adjusted_score,2)],['Capital budget',capitalSyncing?'SYNCING':capitalExplicitVeto?'VETOED':`${fmt(capital.approved_scalp_risk_pct,3)}%`]].map(([label,value])=>`<div class="campaign-leg"><div class="label">${label}</div><div class="campaign-price">${value}</div><div class="muted">Live Atlas gate</div></div>`).join("");
+  }
+
+  let attentionTitle="No action needed",attentionCopy="Atlas is operating inside its current authority.";
+  if(!connected){attentionTitle="Reconnect Nyao";attentionCopy="Live state is unavailable, so Atlas cannot supervise execution."}
+  else if(!permissionsOk){attentionTitle="Enable MT5 trading";attentionCopy="At least one terminal, EA, or account trading permission is disabled."}
+  else if(p.lifecycle?.state==="READY_FOR_HUMAN_REVIEW"&&cycle.execution_mode!=="AUTONOMOUS"){attentionTitle="Policy review available";attentionCopy="Atlas has prepared a supervised policy change for your review."}
+  else if(zoneAware){attentionTitle="Zone-aware scalping active";attentionCopy=`The full ${side} zone campaign is not executable, so Atlas released the scalp lane while keeping ${side} zone context. Normal scalp thresholds and risk gates still apply.`}
+  else if(zoneMode&&!confirmed){attentionTitle="Atlas is waiting";attentionCopy="Price is in a feasible zone campaign, but confirmation has not qualified. Ordinary scalping remains suspended while the zone lane owns fresh-entry authority."}
+  document.getElementById("overview-attention-title").textContent=attentionTitle;
+  document.getElementById("overview-attention-copy").textContent=attentionCopy;
+  document.getElementById("overview-decision-list").innerHTML=[
+    permissionsOk?"MT5 execution permissions are available":"MT5 execution permissions need attention",
+    zoneMode?`${liveCount} live and ${stagedCount} staged zone entries`:capitalSyncing?"Scalp capital state is syncing":`Scalp capital gate ${capitalExplicitVeto?"is closed":"is available"}`,
+    cycle.enabled?`Atlas Brain reviews every ${text(cycle.interval_minutes)} minutes`:"Scheduled Brain reviews are disabled"
+  ].map(item=>`<div class="decision-item">${esc(item)}</div>`).join("");
+  renderProposalChanges("overview-changes",p.changed_controls);
+  const pb=document.getElementById("proposal-badge");pb.textContent=p.lifecycle?.state||p.review_state||"NO PROPOSAL";pb.className="badge "+badgeClass(pb.textContent);
+  const lifecycle=p.lifecycle?.state;
+  document.getElementById("overview-proposal-note").textContent=!p.proposal_id
+    ? "No proposal loaded."
+    : lifecycle==="APPLIED"
+      ? `Applied to command ${text(c.command_version)} / policy epoch ${text(c.policy_epoch)} and confirmed by Nyao.`
+      : lifecycle==="AUTO_APPLY_DEFERRED_ZONE"
+        ? `Queued for automatic activation after the active zone campaign reaches a clean mode boundary. Current policy remains epoch ${text(c.policy_epoch)}; proposed epoch ${text(p.proposed_policy_epoch)} is not applied yet.`
+      : lifecycle==="AWAITING_NYAO_ACK"
+        ? `Command written for policy epoch ${text(p.proposed_policy_epoch)}; awaiting Nyao acknowledgement.`
+        : `${p.selected_candidate||"Candidate"} · proposed epoch ${text(p.proposed_policy_epoch)} · ${Object.keys(p.changed_controls||{}).length} material change(s).`;
+}
+function renderLiveAnalysis(){
+  const s=state.status||{}, i=state.intelligence||{}, regime=i.regime||{}, risk=i.risk||i.risk_governor||{};
+  const direction=String(regime.direction||"").toUpperCase();
+  const bias=document.getElementById("signal-bias");
+  let bt="NEUTRAL / UNCLEAR", bc="bias-neutral";
+  if(direction.includes("BULL")){bt="BULLISH";bc="bias-bull"}else if(direction.includes("BEAR")){bt="BEARISH";bc="bias-bear"}else if(direction){bt=pretty(direction)}
+  bias.textContent=bt; bias.className="bias-value "+bc;
+  document.getElementById("signal-regime").textContent=pretty(regime.regime||"UNKNOWN");
+  document.getElementById("signal-volatility").textContent=pretty(regime.volatility||"UNKNOWN");
+  document.getElementById("signal-confidence").textContent=i.confidence==null?"—":fmt(i.confidence,1)+"%";
+  document.getElementById("signal-risk").textContent=pretty(risk.state||currentRisk());
+  document.getElementById("signal-summary").textContent=i.summary||((regime.reasons||[])[0])||"Atlas intelligence has not produced a current assessment yet.";
+
+  const buy=Number(s.buy_score||0), sell=Number(s.sell_score||0);
+  const buyAdj=Number(s.buy_adjusted_score||0), sellAdj=Number(s.sell_adjusted_score||0);
+  const buyTh=Number(s.buy_effective_threshold??s.runtime_min_buy_signal_score??0), sellTh=Number(s.sell_effective_threshold??s.runtime_min_sell_signal_score??0);
+  document.getElementById("signal-buy-score").textContent=buy.toFixed(2);
+  document.getElementById("signal-sell-score").textContent=sell.toFixed(2);
+  // Net signal penalties can mathematically push a score below zero. Zero is
+  // the executable floor, so display that floor and preserve the raw penalty
+  // value in the blocker explanation instead of showing contradictory scores.
+  document.getElementById("signal-buy-adjusted").textContent=Math.max(0,buyAdj).toFixed(2);
+  document.getElementById("signal-sell-adjusted").textContent=Math.max(0,sellAdj).toFixed(2);
+  document.getElementById("signal-buy-threshold").textContent=buyTh.toFixed(2);
+  document.getElementById("signal-sell-threshold").textContent=sellTh.toFixed(2);
+  document.getElementById("signal-buy-bar").style.width=(buyTh>0?Math.min(100,Math.max(0,buy/buyTh*100)):0)+"%";
+  document.getElementById("signal-sell-bar").style.width=(sellTh>0?Math.min(100,Math.max(0,sell/sellTh*100)):0)+"%";
+
+  const orderReason=(side,reason)=>{
+    const code=Number(s.last_order_retcode||0), direction=String(s.last_order_direction||"").toLowerCase();
+    if(direction!==side || !String(reason||"").includes("ORDER"))return pretty(text(reason,"NONE"));
+    const descriptions={10026:"Algo trading disabled by broker/server",10027:"Algo trading disabled in MT5 terminal",10018:"Market closed",10019:"Insufficient funds",10030:"Unsupported order filling mode",10016:"Invalid stops"};
+    return descriptions[code]?`${descriptions[code]} (MT5 ${code})`:`${pretty(text(reason,"NONE"))}${code?` (MT5 ${code})`:""}`;
+  };
+  [["buy",Boolean(s.buy_entry_eligible),s.buy_block_reason],["sell",Boolean(s.sell_entry_eligible),s.sell_block_reason]].forEach(([side,ready,reason])=>{
+    const el=document.getElementById(`signal-${side}-state`);
+    el.textContent=ready?"READY":"BLOCKED"; el.className="badge "+(ready?"ok":"bad");
+    const adjusted=side==="buy"?buyAdj:sellAdj;
+    const penaltyNote=adjusted<0?` · post-penalty score ${adjusted.toFixed(2)}, executable floor 0.00`:"";
+    document.getElementById(`signal-${side}-reason`).textContent=orderReason(side,reason)+penaltyNote;
+  });
+
+  let block=String(s.last_global_block_reason||"NONE").toUpperCase();
+  const capital=state.zonePlan?.capital_sizing||{};
+  const capitalHardVeto=capital.veto_new_risk===true || s.capital_veto_new_risk===true;
+  const recoveryProbe=String(capital.loss_protection?.state||"").toUpperCase()==="RECOVERY_PROBE";
+  if(s.terminal_algo_trading_allowed===false)block="MT5_ALGO_TRADING_DISABLED";
+  else if(s.ea_trading_allowed===false)block="EA_LIVE_TRADING_DISABLED";
+  else if(s.account_trade_allowed===false||s.account_expert_trading_allowed===false)block="ACCOUNT_ALGO_TRADING_DISABLED";
+  else if(capitalHardVeto)block="ATLAS_CAPITAL_RISK_VETO";
+  const clear=block==="NONE"||block==="CLEAR";
+  const g=document.getElementById("signal-global-status");
+  g.textContent=capitalHardVeto?"CAPITAL PROTECTION ACTIVE":recoveryProbe?"RECOVERY PROBE ARMED":clear?"ENTRY SYSTEM CLEAR":"ENTRY SYSTEM BLOCKED";
+  g.className="badge "+(capitalHardVeto?"bad":recoveryProbe?"warn":clear?"ok":"bad");
+  document.getElementById("signal-global-block").textContent=pretty(block);
+  document.getElementById("signal-newbar").textContent=s.new_bar_entry_only?(s.new_bar_ready?"READY":"WAITING"):"INTRABAR";
+  document.getElementById("signal-cooldown").textContent=s.cooldown_active?"ACTIVE":"INACTIVE";
+  document.getElementById("signal-spread").textContent=s.spread_within_limit===false?"BLOCKED":s.spread_within_limit===true?"CLEAR":"—";
+}
+
+function renderZoneChart(zoneMap,livePrice=null){
+  const svg=document.getElementById("an-zone-chart");if(!svg)return;
+  const bars=Array.isArray(zoneMap?.chart?.bars)?zoneMap.chart.bars:[];
+  if(!bars.length){
+    svg.innerHTML=`<rect width="1200" height="520" fill="rgba(5,9,16,.25)"/><text x="600" y="250" text-anchor="middle" fill="#94a3b8" font-size="18">Waiting for validated M30 candles and a detected zone map</text><text x="600" y="280" text-anchor="middle" fill="#64748b" font-size="13">Atlas will render closed candles and prioritized multi-timeframe zones here.</text>`;
+    return;
+  }
+
+  const width=1200,height=520,margin={left:20,right:150,top:20,bottom:44};
+  const plotWidth=width-margin.left-margin.right,plotHeight=height-margin.top-margin.bottom;
+  const barLow=Math.min(...bars.map(bar=>Number(bar.low)));
+  const barHigh=Math.max(...bars.map(bar=>Number(bar.high)));
+  const baseRange=Math.max(barHigh-barLow,Math.abs(barHigh)*0.001,1);
+  const allZones=Array.isArray(zoneMap.zones)?zoneMap.zones:[];
+  const current=Number(livePrice||zoneMap.current_price||bars[bars.length-1].close);
+  const distance=zone=>current<Number(zone.low)?Number(zone.low)-current:current>Number(zone.high)?current-Number(zone.high):0;
+  const nearby=allZones.filter(zone=>Number(zone.high)>=barLow-baseRange*.35&&Number(zone.low)<=barHigh+baseRange*.35);
+  let visibleZones=["DEMAND","SUPPLY"].flatMap(side=>nearby.filter(zone=>zone.side===side).sort((a,b)=>distance(a)-distance(b)||Number(b.score)-Number(a.score)).slice(0,2));
+  [zoneMap.nearest_demand,zoneMap.nearest_supply].filter(Boolean).forEach(zone=>{if(!visibleZones.some(item=>item.zone_id===zone.zone_id))visibleZones.push(zone)});
+  visibleZones=visibleZones.sort((a,b)=>distance(a)-distance(b)||Number(b.score)-Number(a.score)).slice(0,4);
+  const rawMin=Math.min(barLow,...visibleZones.map(zone=>Number(zone.low)));
+  const rawMax=Math.max(barHigh,...visibleZones.map(zone=>Number(zone.high)));
+  const scaleRange=Math.max(rawMax-rawMin,1),priceMin=rawMin-scaleRange*.055,priceMax=rawMax+scaleRange*.055;
+  const y=price=>margin.top+(priceMax-Number(price))/(priceMax-priceMin)*plotHeight;
+  const step=plotWidth/bars.length,candleWidth=Math.max(2,Math.min(9,step*.62));
+  const parts=[`<rect x="0" y="0" width="${width}" height="${height}" fill="rgba(5,9,16,.22)"/>`];
+
+  for(let index=0;index<=6;index++){
+    const price=priceMax-(priceMax-priceMin)*index/6,py=y(price);
+    parts.push(`<line x1="${margin.left}" y1="${py}" x2="${margin.left+plotWidth}" y2="${py}" stroke="rgba(148,163,184,.13)" stroke-width="1"/>`);
+    parts.push(`<text x="${margin.left+plotWidth+10}" y="${py+4}" fill="#7f8da3" font-size="11">${fmt(price,2)}</text>`);
+  }
+
+  const zoneVisuals=[];
+  visibleZones.forEach(zone=>{
+    const highY=y(zone.high),lowY=y(zone.low),zoneHeight=Math.max(3,lowY-highY);
+    const demand=zone.side==="DEMAND",fill=demand?"rgba(74,222,128,.14)":"rgba(251,113,133,.13)",stroke=demand?"rgba(74,222,128,.62)":"rgba(251,113,133,.62)";
+    const label=`${zone.side} · ${zone.timeframe} ${pretty(zone.kind)} · ${fmt(zone.low,2)}–${fmt(zone.high,2)}`;
+    zoneVisuals.push({zone,highY,lowY,demand,stroke,label,desiredY:(highY+lowY)/2});
+    parts.push(`<g><title>${esc(label)} · score ${fmt(zone.score,1)}</title><rect x="${margin.left}" y="${highY}" width="${plotWidth}" height="${zoneHeight}" fill="${fill}" stroke="${stroke}" stroke-width="1" stroke-dasharray="5 4"/></g>`);
+  });
+
+  bars.forEach((bar,index)=>{
+    const x=margin.left+step*(index+.5),openY=y(bar.open),closeY=y(bar.close),highY=y(bar.high),lowY=y(bar.low);
+    const bullish=Number(bar.close)>=Number(bar.open),color=bullish?"#4ade80":"#fb7185";
+    parts.push(`<line x1="${x}" y1="${highY}" x2="${x}" y2="${lowY}" stroke="${color}" stroke-width="1" opacity=".88"/>`);
+    parts.push(`<rect x="${x-candleWidth/2}" y="${Math.min(openY,closeY)}" width="${candleWidth}" height="${Math.max(1.5,Math.abs(closeY-openY))}" fill="${color}" opacity=".94"/>`);
+  });
+
+  let lastLabelY=margin.top+5;
+  zoneVisuals.sort((a,b)=>a.desiredY-b.desiredY).forEach(item=>{
+    const labelY=Math.min(margin.top+plotHeight-4,Math.max(item.desiredY,lastLabelY+18));
+    lastLabelY=labelY;
+    const shortKind=item.zone.kind==="ORDER_BLOCK"?"OB":item.zone.kind==="SUPPORT_RESISTANCE"?"S/R":"FVG";
+    const shortLabel=`${item.zone.timeframe} ${shortKind} · ${item.zone.side}`;
+    parts.push(`<line x1="${margin.left+205}" y1="${labelY-4}" x2="${margin.left+222}" y2="${item.desiredY}" stroke="${item.stroke}" stroke-width="1" opacity=".7"/>`);
+    parts.push(`<rect x="${margin.left+4}" y="${labelY-15}" width="202" height="17" rx="4" fill="rgba(5,9,16,.78)" stroke="${item.stroke}" stroke-width=".6"/>`);
+    parts.push(`<text x="${margin.left+10}" y="${labelY-4}" fill="${item.demand?"#86efac":"#fda4af"}" font-size="9" font-weight="700">${esc(shortLabel)}</text>`);
+  });
+
+  const currentY=y(current);
+  parts.push(`<line x1="${margin.left}" y1="${currentY}" x2="${margin.left+plotWidth}" y2="${currentY}" stroke="#60a5fa" stroke-width="1.4" stroke-dasharray="7 5"/>`);
+  parts.push(`<rect x="${margin.left+plotWidth+5}" y="${currentY-11}" width="106" height="22" rx="5" fill="#2563eb"/><text x="${margin.left+plotWidth+12}" y="${currentY+4}" fill="white" font-size="11" font-weight="700">${fmt(current,3)}</text>`);
+  parts.push(`<text x="${margin.left+8}" y="${margin.top+17}" fill="#dbeafe" font-size="13" font-weight="700">${esc(text(zoneMap.symbol))} · M30 · ${esc(pretty(zoneMap.composite_bias))} STRUCTURE</text>`);
+
+  [0,Math.floor((bars.length-1)/4),Math.floor((bars.length-1)/2),Math.floor((bars.length-1)*3/4),bars.length-1].forEach((index,labelIndex)=>{
+    const x=margin.left+step*(index+.5),date=new Date(Number(bars[index].time_epoch)*1000);
+    const label=date.toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+    const anchor=labelIndex===0?"start":labelIndex===4?"end":"middle";
+    parts.push(`<text x="${x}" y="${height-14}" text-anchor="${anchor}" fill="#7f8da3" font-size="10">${esc(label)}</text>`);
+  });
+  const hidden=Math.max(0,allZones.length-visibleZones.length);
+  if(hidden)parts.push(`<text x="${margin.left+plotWidth-4}" y="${margin.top+17}" text-anchor="end" fill="#94a3b8" font-size="10">${hidden} farther zone${hidden===1?"":"s"} listed below</text>`);
+  svg.innerHTML=parts.join("");
+}
+
+function renderAnalysis(){
+  const s=state.status||{}, i=state.intelligence||{}, p=state.proposal||{}, r=state.responsiveness||{};
+  const regime=i.regime||{}, risk=i.risk||i.risk_governor||{};
+  const direction=String(regime.direction||"NEUTRAL").toUpperCase();
+  const bias=direction.includes("BULL")?"BULLISH":direction.includes("BEAR")?"BEARISH":"NEUTRAL";
+  document.getElementById("an-bias").textContent=bias;
+  document.getElementById("an-bias").className="value small "+(bias==="BULLISH"?"pos":bias==="BEARISH"?"neg":"");
+  document.getElementById("an-regime").textContent=pretty(regime.regime||"UNKNOWN");
+  document.getElementById("an-volatility").textContent=pretty(regime.volatility||"UNKNOWN");
+  document.getElementById("an-vol-ratio").textContent=`Ratio ${fmt(s.volatility_ratio,2)} · ATR ${fmt(s.current_atr,3)}`;
+  document.getElementById("an-fit").textContent=pretty(i.fit||"UNKNOWN");
+  document.getElementById("an-confidence").textContent=i.confidence==null?"Confidence —":`Confidence ${fmt(i.confidence,1)}%`;
+  document.getElementById("an-risk").textContent=pretty(risk.state||currentRisk());
+  document.getElementById("an-responsiveness").textContent=`Responsiveness ${text(r.profile)}`;
+  document.getElementById("an-thesis").textContent=i.summary||"Atlas has not produced a current market thesis.";
+  const reasons=[...(regime.reasons||[]),...(i.recommendations||[]),...(i.cautions||[])].slice(0,8);
+  document.getElementById("an-reasons").innerHTML=reasons.map((x,index)=>`<div class="analysis-item ${index<2?"info":""}">${esc(text(typeof x==="string"?x:x?.message||x?.reason||JSON.stringify(x)))}</div>`).join("")||`<div class="analysis-item">No supporting reasons returned yet.</div>`;
+
+  const spreadPrice=Math.abs(Number(s.ask||0)-Number(s.bid||0));
+  const spreadPoints=Number(s.spread_points||0);
+  const point=Number(s.symbol_point||((spreadPrice>0&&spreadPoints>0)?spreadPrice/spreadPoints:0));
+  const spreadCapPoints=Number(s.effective_spread_cap_points||0);
+  const spreadCapPrice=spreadCapPoints>0&&point>0?spreadCapPoints*point:0;
+  const costRatio=spreadCapPrice>0?spreadPrice/spreadCapPrice:null;
+  const gateBasis=text(s.scalp_cost_gate_basis,"UNKNOWN");
+  const costLimiter=text(s.scalp_cost_limiting_factor,"NONE");
+  const costAdjusted=Boolean(s.scalp_cost_adjusted);
+  const costFeasible=s.scalp_cost_feasible!==false;
+  const baseStopPoints=Number(s.scalp_base_stop_points||0);
+  const baseTargetPoints=Number(s.scalp_base_target_points||0);
+  const plannedStopPoints=Number(s.scalp_planned_stop_points||0);
+  const plannedTargetPoints=Number(s.scalp_planned_target_points||0);
+  const baseStop=baseStopPoints>0&&point>0?baseStopPoints*point:null;
+  const baseTarget=baseTargetPoints>0&&point>0?baseTargetPoints*point:null;
+  const plannedStop=plannedStopPoints>0&&point>0?plannedStopPoints*point:null;
+  const plannedTarget=plannedTargetPoints>0&&point>0?plannedTargetPoints*point:null;
+  const spreadToStop=Number(s.scalp_spread_to_stop_ratio||0);
+  const spreadToTarget=Number(s.scalp_spread_to_target_ratio||0);
+  const maxStopRatio=Number(s.scalp_max_spread_stop_ratio||0.20);
+  const maxTargetRatio=Number(s.scalp_max_spread_target_ratio||0.15);
+  const costRatioFeasible=s.scalp_cost_ratio_feasible!==false;
+  const structureFeasible=s.scalp_structure_feasible!==false;
+  const structureReason=text(s.scalp_structure_reason,"UNKNOWN");
+  const stopExpansion=Number(s.scalp_stop_expansion_ratio||1);
+  const targetExpansion=Number(s.scalp_target_expansion_ratio||1);
+  const stopAtrRatio=Number(s.scalp_planned_stop_atr_ratio||0);
+  const spreadAtrRatio=Number(s.scalp_spread_atr_ratio||0);
+  const maxExpansion=Number(s.scalp_max_stop_expansion_ratio||0);
+  const maxStopAtr=Number(s.scalp_max_stop_atr_ratio||0);
+  const maxSpreadAtr=Number(s.scalp_max_spread_atr_ratio||0);
+  let costState="INSUFFICIENT DATA", costClass="warn", costNote="Nyao needs a valid economic spread cap before judging scalp transaction cost.";
+  if(costRatio!==null){
+    if(costRatioFeasible && !structureFeasible){
+      costState="STRUCTURE MISMATCH";costClass="bad";
+      costNote=`Transaction-cost ratios can be made viable, but doing so would distort the scalp beyond its market-structure envelope (${pretty(structureReason)}). Stop expansion ${fmt(stopExpansion,1)}× / max ${fmt(maxExpansion,1)}× · planned stop ${fmt(stopAtrRatio,1)} ATR / max ${fmt(maxStopAtr,1)} · spread ${fmt(spreadAtrRatio,1)} ATR / max ${fmt(maxSpreadAtr,1)}. Atlas waits for a larger genuine market opportunity rather than manufacturing a huge stop around the spread.`;
+    }else if(!costFeasible || !costRatioFeasible || costRatio>1){
+      costState="COST BLOCKED";costClass="bad";
+      costNote=`Spread ${fmt(spreadPrice,3)} cannot be supported by the current scalp economics. ${plannedStop!=null?`Planned stop ${fmt(plannedStop,3)} (${fmt(spreadToStop*100,1)}% spread/stop; max ${fmt(maxStopRatio*100,0)}%) and target ${fmt(plannedTarget,3)} (${fmt(spreadToTarget*100,1)}% spread/target; max ${fmt(maxTargetRatio*100,0)}%). `:""}Basis ${pretty(gateBasis)} · limiter ${pretty(costLimiter)}.`;
+    }else if(costRatio>=0.8){
+      costState="COST NEAR LIMIT";costClass="warn";
+      costNote=`Spread is ${fmt(costRatio*100,1)}% of the allowed economic cap. The trade can pass cost preflight, but there is little cost headroom.`;
+    }else{
+      costState=costAdjusted?"COST-ADAPTED VIABLE":"COST VIABLE";costClass="ok";
+      costNote=`Spread uses ${fmt(costRatio*100,1)}% of the economic cap. ${costAdjusted&&baseStop!=null?`Nyao adapted stop ${fmt(baseStop,3)} → ${fmt(plannedStop,3)} and target ${fmt(baseTarget,3)} → ${fmt(plannedTarget,3)} before capital sizing. `:""}${plannedStop!=null?`Spread/stop ${fmt(spreadToStop*100,1)}% and spread/target ${fmt(spreadToTarget*100,1)}%. `:""}Structure ${fmt(stopExpansion,1)}× base stop · ${fmt(stopAtrRatio,1)} ATR stop · ${fmt(spreadAtrRatio,1)} ATR spread. Limiter ${pretty(costLimiter)}. Final preflight rechecks market structure, executable geometry and Atlas risk budget immediately before OrderSend.`;
     }
-
-    function formatEpoch(epoch) {
-        const n = Number(epoch || 0);
-        return n > 0 ? new Date(n * 1000).toLocaleString() : "—";
-    }
-
-    function formatDuration(seconds) {
-        let s = Math.max(0, Number(seconds || 0));
-        if (s < 60) return `${Math.floor(s)}s`;
-        const minutes = Math.floor(s / 60);
-        if (minutes < 60) return `${minutes}m`;
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) return `${hours}h ${minutes % 60}m`;
-        const days = Math.floor(hours / 24);
-        return `${days}d ${hours % 24}h`;
-    }
-
-    function setSignedMoney(id, value) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        const n = Number(value || 0);
-        el.textContent = money(n);
-        el.className = `value ${n > 0 ? "positive" : n < 0 ? "negative" : ""}`;
-    }
-
-    function humanReason(value) {
-        if (!value) return "UNKNOWN";
-        return String(value)
-            .replaceAll("_", " ")
-            .toLowerCase()
-            .replace(/\b\w/g, c => c.toUpperCase());
-    }
-
-    function getControlDefinition(name) {
-        for (const group of CONTROL_GROUPS) {
-            const found = group.controls.find(c => c.name === name);
-            if (found) return found;
-        }
-        return null;
-    }
-
-    function valuesEqual(a, b) {
-        if (typeof a === "boolean" || typeof b === "boolean") {
-            return Boolean(a) === Boolean(b);
-        }
-
-        const aNumber = Number(a);
-        const bNumber = Number(b);
-
-        if (Number.isFinite(aNumber) && Number.isFinite(bNumber)) {
-            return Math.abs(aNumber - bNumber) <= 0.0001;
-        }
-
-        return String(a) === String(b);
-    }
-
-    function formatControlValue(control, value) {
-        if (value === undefined || value === null) return "—";
-        if (control?.kind === "bool") return value ? "On" : "Off";
-
-        if (control?.kind === "select") {
-            const option = control.options?.find(o => Number(o.value) === Number(value));
-            return option ? `${option.label} (${value})` : String(value);
-        }
-
-        return String(value);
-    }
-
-    function effectiveValue(control) {
-        if (
-            Object.prototype.hasOwnProperty.call(currentCommand, control.name) &&
-            currentCommand[control.name] !== null &&
-            currentCommand[control.name] !== undefined
-        ) {
-            return currentCommand[control.name];
-        }
-
-        if (
-            Object.prototype.hasOwnProperty.call(latestStatus, control.status_key) &&
-            latestStatus[control.status_key] !== null &&
-            latestStatus[control.status_key] !== undefined
-        ) {
-            return latestStatus[control.status_key];
-        }
-
-        return null;
-    }
-
-    function renderRuntimeGroups() {
-        const root = document.getElementById("runtime-groups");
-        root.innerHTML = "";
-
-        CONTROL_GROUPS.forEach((group, groupIndex) => {
-            const details = document.createElement("details");
-            details.className = "group";
-            details.dataset.groupName = group.name.toLowerCase();
-            if (groupIndex === 0) details.open = true;
-
-            const summary = document.createElement("summary");
-            const left = document.createElement("div");
-            left.className = "group-title";
-            left.innerHTML = `
-                <span>${group.name}</span>
-                <span class="count">${group.controls.length}</span>
-                ${group.danger ? '<span class="badge danger">Risk-sensitive</span>' : ''}
-            `;
-
-            const arrow = document.createElement("span");
-            arrow.textContent = "▾";
-            arrow.style.color = "var(--muted)";
-
-            summary.appendChild(left);
-            summary.appendChild(arrow);
-            details.appendChild(summary);
-
-            const desc = document.createElement("div");
-            desc.className = "group-description";
-            desc.textContent = group.description || "";
-            details.appendChild(desc);
-
-            const grid = document.createElement("div");
-            grid.className = "control-grid";
-
-            group.controls.forEach(control => {
-                grid.appendChild(buildControl(control));
-            });
-
-            details.appendChild(grid);
-            root.appendChild(details);
-        });
-
-        refreshAllControlValues();
-    }
-
-    function buildControl(control) {
-        const box = document.createElement("div");
-        box.className = "runtime-control";
-        box.id = `control-box-${control.name}`;
-        box.dataset.search = `${control.label} ${control.name}`.toLowerCase();
-
-        const head = document.createElement("div");
-        head.className = "control-head";
-
-        const label = document.createElement("div");
-        label.className = "control-label";
-        label.textContent = control.label;
-
-        const applied = document.createElement("div");
-        applied.className = "applied";
-        applied.id = `applied-${control.name}`;
-        applied.textContent = "Applied: —";
-
-        head.appendChild(label);
-        head.appendChild(applied);
-        box.appendChild(head);
-
-        let input;
-
-        if (control.kind === "bool") {
-            const wrap = document.createElement("label");
-            wrap.className = "switch";
-
-            input = document.createElement("input");
-            input.type = "checkbox";
-            input.id = `field-${control.name}`;
-            input.addEventListener("change", () => markDirty(control.name));
-
-            const slider = document.createElement("span");
-            slider.className = "slider";
-
-            wrap.appendChild(input);
-            wrap.appendChild(slider);
-            box.appendChild(wrap);
-        } else if (control.kind === "select") {
-            input = document.createElement("select");
-            input.id = `field-${control.name}`;
-
-            control.options.forEach(option => {
-                const o = document.createElement("option");
-                o.value = option.value;
-                o.textContent = option.label;
-                input.appendChild(o);
-            });
-
-            input.addEventListener("change", () => markDirty(control.name));
-            box.appendChild(input);
-        } else {
-            input = document.createElement("input");
-            input.id = `field-${control.name}`;
-            input.type = control.kind === "time" ? "time" : control.kind === "text" ? "text" : "number";
-
-            if (control.min !== undefined) input.min = control.min;
-            if (control.max !== undefined) input.max = control.max;
-            if (control.step !== undefined) input.step = control.step;
-
-            input.addEventListener("input", () => markDirty(control.name));
-            box.appendChild(input);
-        }
-
-        return box;
-    }
-
-    function markDirty(name) {
-        dirtyFields.add(name);
-        document.getElementById(`control-box-${name}`)?.classList.add("changed");
-        refreshDirtyState();
-    }
-
-    function refreshDirtyState() {
-        const el = document.getElementById("dirty-state");
-        if (dirtyFields.size === 0) {
-            el.className = "clean";
-            el.textContent = "No unsaved runtime changes.";
-        } else {
-            el.className = "dirty";
-            el.textContent = `${dirtyFields.size} unsaved runtime change${dirtyFields.size === 1 ? "" : "s"}.`;
-        }
-    }
-
-    function setControlValue(control, value) {
-        const input = document.getElementById(`field-${control.name}`);
-        if (!input || dirtyFields.has(control.name) || value === null || value === undefined) return;
-
-        if (control.kind === "bool") {
-            input.checked = Boolean(value);
-        } else {
-            input.value = value;
-        }
-    }
-
-    function refreshAllControlValues() {
-        CONTROL_GROUPS.forEach(group => {
-            group.controls.forEach(control => {
-                setControlValue(control, effectiveValue(control));
-
-                const applied = latestStatus[control.status_key];
-                const appliedEl = document.getElementById(`applied-${control.name}`);
-
-                if (appliedEl) {
-                    const hasRequested =
-                        Object.prototype.hasOwnProperty.call(currentCommand, control.name) &&
-                        currentCommand[control.name] !== null &&
-                        currentCommand[control.name] !== undefined;
-
-                    if (applied === undefined || applied === null) {
-                        appliedEl.textContent = "Applied: —";
-                        appliedEl.className = "applied";
-                    } else if (!hasRequested) {
-                        appliedEl.textContent = `Applied: ${formatControlValue(control, applied)} · Inherited`;
-                        appliedEl.className = "applied inherited";
-                    } else {
-                        const synced = valuesEqual(currentCommand[control.name], applied);
-                        appliedEl.textContent =
-                            `Applied: ${formatControlValue(control, applied)} · ${synced ? "Synced" : "Pending"}`;
-                        appliedEl.className = `applied ${synced ? "match" : "mismatch"}`;
-                    }
-                }
-            });
-        });
-    }
-
-    function readControlValue(control) {
-        const input = document.getElementById(`field-${control.name}`);
-        if (!input) return null;
-
-        if (control.kind === "bool") return input.checked;
-        if (control.kind === "select") return Number(input.value);
-        if (control.kind === "number") {
-            const n = Number(input.value);
-            if (!Number.isFinite(n)) throw new Error(`${control.label}: invalid number.`);
-            if (control.min !== undefined && n < Number(control.min)) {
-                throw new Error(`${control.label}: minimum is ${control.min}.`);
-            }
-            if (control.max !== undefined && n > Number(control.max)) {
-                throw new Error(`${control.label}: maximum is ${control.max}.`);
-            }
-            return control.mql_type === "int" ? Math.trunc(n) : n;
-        }
-        return input.value;
-    }
-
-    async function sendCommandPatch(patch) {
-        if (saveInProgress) return;
-
-        saveInProgress = true;
-        document.querySelectorAll("button").forEach(b => b.disabled = true);
-
-        try {
-            const response = await fetch("/api/v1/nyao/command", {
-                method: "PUT",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(patch)
-            });
-
-            if (!response.ok) {
-                const body = await response.text();
-                throw new Error(`Command update failed: ${body}`);
-            }
-
-            currentCommand = await response.json();
-            updateMasterButtons();
-            updateSync();
-            refreshAllControlValues();
-        } finally {
-            saveInProgress = false;
-            document.querySelectorAll("button").forEach(b => b.disabled = false);
-        }
-    }
-
-    async function applyRuntimeChanges() {
-        if (dirtyFields.size === 0) return;
-
-        const patch = {};
-
-        try {
-            for (const name of dirtyFields) {
-                const control = getControlDefinition(name);
-                if (!control) continue;
-                patch[name] = readControlValue(control);
-            }
-
-            await sendCommandPatch(patch);
-
-            for (const name of dirtyFields) {
-                document.getElementById(`control-box-${name}`)?.classList.remove("changed");
-            }
-
-            dirtyFields.clear();
-            refreshDirtyState();
-        } catch (error) {
-            alert(error.message);
-            console.error(error);
-        }
-    }
-
-    function discardRuntimeChanges() {
-        for (const name of dirtyFields) {
-            document.getElementById(`control-box-${name}`)?.classList.remove("changed");
-        }
-        dirtyFields.clear();
-        refreshDirtyState();
-        refreshAllControlValues();
-    }
-
-    async function toggleMaster(field) {
-        if (currentCommand[field] === undefined) return;
-
-        try {
-            await sendCommandPatch({[field]: !Boolean(currentCommand[field])});
-        } catch (error) {
-            alert(error.message);
-            console.error(error);
-        }
-    }
-
-    function updateMasterButtons() {
-        const map = [
-            ["trading-button","enabled"],
-            ["buy-button","enable_buy_orders"],
-            ["sell-button","enable_sell_orders"],
-        ];
-
-        map.forEach(([id, field]) => {
-            const button = document.getElementById(id);
-            const enabled = Boolean(currentCommand[field]);
-            button.textContent = enabled ? "Enabled" : "Disabled";
-            button.className = enabled ? "enabled-button" : "disabled-button";
-        });
-    }
-
-    function updateRuntimeSyncSummary() {
-        let telemetryCount = 0;
-        let explicitCount = 0;
-        let syncedCount = 0;
-        let pendingCount = 0;
-
-        CONTROL_GROUPS.forEach(group => {
-            group.controls.forEach(control => {
-                const applied = latestStatus[control.status_key];
-
-                if (applied !== undefined && applied !== null) {
-                    telemetryCount++;
-                }
-
-                const hasRequested =
-                    Object.prototype.hasOwnProperty.call(currentCommand, control.name) &&
-                    currentCommand[control.name] !== null &&
-                    currentCommand[control.name] !== undefined;
-
-                if (hasRequested) {
-                    explicitCount++;
-                    if (applied !== undefined && applied !== null &&
-                        valuesEqual(currentCommand[control.name], applied)) {
-                        syncedCount++;
-                    } else {
-                        pendingCount++;
-                    }
-                }
-            });
-        });
-
-        const count = document.getElementById("runtime-sync-count");
-        const state = document.getElementById("runtime-sync-state");
-
-        count.textContent = `${telemetryCount}/156`;
-
-        if (telemetryCount < 156) {
-            state.textContent = "Telemetry incomplete";
-            state.className = "sync-waiting";
-        } else if (pendingCount > 0) {
-            state.textContent = `${pendingCount} pending`;
-            state.className = "sync-waiting";
-        } else {
-            state.textContent = explicitCount > 0 ? `${syncedCount} overrides synced` : "Telemetry complete";
-            state.className = "sync-ok";
-        }
-    }
-
-    function renderCoreVerification() {
-        const body = document.getElementById("core-verification-body");
-        if (!body) return;
-
-        body.innerHTML = "";
-
-        CORE_VERIFICATION_FIELDS.forEach(name => {
-            const control = getControlDefinition(name);
-            if (!control) return;
-
-            const applied = latestStatus[control.status_key];
-
-            const hasRequested =
-                Object.prototype.hasOwnProperty.call(currentCommand, name) &&
-                currentCommand[name] !== null &&
-                currentCommand[name] !== undefined;
-
-            const requested = hasRequested ? currentCommand[name] : undefined;
-            const row = document.createElement("tr");
-
-            let stateText = "Inherited";
-            let stateClass = "inherited";
-
-            if (hasRequested) {
-                const synced =
-                    applied !== undefined &&
-                    applied !== null &&
-                    valuesEqual(requested, applied);
-
-                stateText = synced ? "Synced" : "Pending";
-                stateClass = synced ? "match" : "mismatch";
-            }
-
-            row.innerHTML = `
-                <td>${control.label}</td>
-                <td>${hasRequested ? formatControlValue(control, requested) : "Profile / current runtime"}</td>
-                <td>${formatControlValue(control, applied)}</td>
-                <td class="${stateClass}">${stateText}</td>
-            `;
-
-            body.appendChild(row);
-        });
-    }
-
-    function updateSync() {
-        const commandVersion = Number(currentCommand.command_version ?? -1);
-        const appliedVersion = Number(latestStatus.applied_command_version ?? -2);
-
-        document.getElementById("command-version").textContent =
-            commandVersion >= 0 ? commandVersion : "—";
-        document.getElementById("applied-version").textContent =
-            appliedVersion >= 0 ? appliedVersion : "—";
-
-        const sync = document.getElementById("sync-state");
-        const ok = commandVersion >= 0 && commandVersion === appliedVersion;
-        sync.textContent = ok ? "Synced" : "Waiting";
-        sync.className = ok ? "sync-ok" : "sync-waiting";
-
-        const structural = document.getElementById("structural-state");
-        const dirty = Boolean(latestStatus.structural_config_dirty);
-        structural.textContent = dirty ? "Rebuilding" : "Stable";
-        structural.className = dirty ? "warning" : "positive";
-
-        updateRuntimeSyncSummary();
-        renderCoreVerification();
-    }
-
-    function updateDecision() {
-        const buy = Number(latestStatus.buy_score || 0);
-        const sell = Number(latestStatus.sell_score || 0);
-        const buyAdj = Number(latestStatus.buy_adjusted_score || 0);
-        const sellAdj = Number(latestStatus.sell_adjusted_score || 0);
-        const buyTh = Number(latestStatus.buy_effective_threshold || 0);
-        const sellTh = Number(latestStatus.sell_effective_threshold || 0);
-
-        document.getElementById("buy-score").textContent = buy.toFixed(2);
-        document.getElementById("sell-score").textContent = sell.toFixed(2);
-        document.getElementById("buy-threshold").textContent = buyTh.toFixed(2);
-        document.getElementById("sell-threshold").textContent = sellTh.toFixed(2);
-        document.getElementById("buy-bar").style.width = `${Math.max(0,Math.min(100,buy*10))}%`;
-        document.getElementById("sell-bar").style.width = `${Math.max(0,Math.min(100,sell*10))}%`;
-
-        document.getElementById("buy-live").textContent = buy.toFixed(2);
-        document.getElementById("sell-live").textContent = sell.toFixed(2);
-        document.getElementById("buy-adjusted").textContent = buyAdj.toFixed(2);
-        document.getElementById("sell-adjusted").textContent = sellAdj.toFixed(2);
-        document.getElementById("buy-effective").textContent = buyTh.toFixed(2);
-        document.getElementById("sell-effective").textContent = sellTh.toFixed(2);
-
-        [["buy","buy_entry_eligible","buy_block_reason"],["sell","sell_entry_eligible","sell_block_reason"]]
-            .forEach(([side, eligibleKey, reasonKey]) => {
-                const badge = document.getElementById(`${side}-state`);
-                const eligible = Boolean(latestStatus[eligibleKey]);
-                badge.textContent = eligible ? "Ready" : "Blocked";
-                badge.className = eligible ? "badge ready" : "badge blocked";
-                document.getElementById(`${side}-reason`).textContent =
-                    humanReason(latestStatus[reasonKey]);
-            });
-
-        document.getElementById("new-bar-mode").textContent =
-            latestStatus.new_bar_entry_only ? "ON · New bar only" : "OFF · Intrabar";
-        document.getElementById("new-bar-ready").textContent =
-            latestStatus.new_bar_ready ? "Ready" : "Waiting";
-        document.getElementById("cooldown").textContent =
-            latestStatus.cooldown_active
-                ? `Active until ${formatEpoch(latestStatus.cooldown_until_epoch)}`
-                : "Inactive";
-        document.getElementById("global-block").textContent =
-            humanReason(latestStatus.last_global_block_reason || "NONE");
-    }
-
-    function prettyKey(value) {
-        return String(value || "")
-            .replaceAll("_", " ")
-            .toLowerCase()
-            .replace(/\b\w/g, c => c.toUpperCase());
-    }
-
-    function renderList(id, items, emptyText) {
-        const root = document.getElementById(id);
-        const values = Array.isArray(items) ? items : [];
-        root.innerHTML = "";
-
-        if (values.length === 0) {
-            const li = document.createElement("li");
-            li.textContent = emptyText;
-            root.appendChild(li);
-            return;
-        }
-
-        values.forEach(item => {
-            const li = document.createElement("li");
-            li.textContent = item;
-            root.appendChild(li);
-        });
-    }
-
-    function updateIntelligencePanel() {
-        if (!latestIntelligence || !latestIntelligence.regime || !latestIntelligence.risk) {
-            return;
-        }
-
-        const regime = latestIntelligence.regime;
-        const risk = latestIntelligence.risk;
-
-        document.getElementById("intel-mode").textContent = latestIntelligence.mode || "ADVISORY";
-        document.getElementById("intel-summary").textContent = latestIntelligence.summary || "—";
-        document.getElementById("intel-regime").textContent = prettyKey(regime.regime);
-        document.getElementById("intel-direction").textContent = prettyKey(regime.direction);
-        document.getElementById("intel-volatility").textContent = prettyKey(regime.volatility);
-        document.getElementById("intel-fit").textContent = prettyKey(latestIntelligence.fit);
-        document.getElementById("intel-confidence").textContent = `${Number(latestIntelligence.confidence || 0).toFixed(1)}%`;
-        document.getElementById("intel-risk-state").textContent = prettyKey(risk.state);
-        document.getElementById("intel-risk-score").textContent = `${Number(risk.score || 0)}/100`;
-        document.getElementById("intel-exposure-bias").textContent = prettyKey(risk.exposure_bias);
-        document.getElementById("intel-execution").textContent = prettyKey(regime.execution_environment);
-
-        const vetoEl = document.getElementById("intel-veto");
-        const veto = Boolean(risk.veto_new_risk);
-        vetoEl.textContent = veto ? "VETO NEW RISK" : "CLEAR";
-        vetoEl.className = `value ${veto ? "negative" : "positive"}`;
-
-        renderList(
-            "intel-recommendations",
-            latestIntelligence.recommendations,
-            "No recommendation."
-        );
-        renderList(
-            "intel-cautions",
-            latestIntelligence.cautions,
-            "No cautions."
-        );
-        renderList(
-            "intel-reasons",
-            regime.reasons,
-            "No classification reasons."
-        );
-
-        const history = latestIntelligence.history || {};
-        document.getElementById("history-count").textContent =
-            history.record_count ?? 0;
-        document.getElementById("history-reason").textContent =
-            prettyKey(history.reason || "—");
-
-        const proposals = latestIntelligence.proposed_changes || {};
-        const proposalRoot = document.getElementById("intel-proposals");
-        proposalRoot.innerHTML = "";
-
-        const entries = Object.entries(proposals);
-        if (entries.length === 0) {
-            proposalRoot.innerHTML =
-                '<div class="proposal-item"><div class="key">State</div><div class="val">No runtime change proposed</div></div>';
-        } else {
-            entries.forEach(([key, value]) => {
-                const div = document.createElement("div");
-                div.className = "proposal-item";
-                div.innerHTML = `
-                    <div class="key">${prettyKey(key)}</div>
-                    <div class="val">${typeof value === "boolean" ? (value ? "On" : "Off") : value}</div>
-                `;
-                proposalRoot.appendChild(div);
-            });
-        }
-    }
-
-    async function loadIntelligence() {
-        try {
-            const response = await fetch("/api/v1/atlas/intelligence", {cache:"no-store"});
-            if (!response.ok) {
-                throw new Error(`Intelligence request failed: ${response.status}`);
-            }
-
-            latestIntelligence = await response.json();
-            updateIntelligencePanel();
-        } catch (error) {
-            console.error(error);
-        }
-    }
-
-    function updateExposureRisk() {
-        document.getElementById("obs-strategy-positions").textContent = latestStatus.strategy_open_positions ?? 0;
-        document.getElementById("obs-total-lots").textContent = Number(latestStatus.total_lots || 0).toFixed(2);
-        setSignedMoney("obs-strategy-pl", latestStatus.strategy_floating_pl);
-        document.getElementById("obs-notional").textContent = money(latestStatus.gross_notional_exposure);
-        document.getElementById("obs-side-counts").textContent = `${latestStatus.buy_positions ?? 0} / ${latestStatus.sell_positions ?? 0}`;
-        document.getElementById("obs-side-lots").textContent = `${Number(latestStatus.buy_lots || 0).toFixed(2)} / ${Number(latestStatus.sell_lots || 0).toFixed(2)}`;
-        document.getElementById("obs-win-loss-count").textContent = `${latestStatus.winning_positions ?? 0} / ${latestStatus.losing_positions ?? 0}`;
-        document.getElementById("obs-working-limits").textContent = latestStatus.working_limit_orders ?? 0;
-
-        const ddPct = Number(latestStatus.equity_drawdown_pct || 0);
-        document.getElementById("obs-drawdown").textContent = `${ddPct.toFixed(2)}% · ${money(latestStatus.equity_drawdown_usd)}`;
-
-        const basketLoss = Number(latestStatus.basket_loss_pct || 0);
-        const basketLimit = Number(latestStatus.runtime_max_basket_loss_pct || 0);
-        document.getElementById("obs-basket-loss").textContent =
-            basketLimit > 0 ? `${basketLoss.toFixed(2)}% / ${basketLimit.toFixed(2)}%` : `${basketLoss.toFixed(2)}% · Stop disabled`;
-        const meter = basketLimit > 0 ? Math.max(0, Math.min(100, basketLoss / basketLimit * 100)) : 0;
-        document.getElementById("obs-basket-meter").style.width = `${meter}%`;
-
-        document.getElementById("obs-margin").textContent =
-            `${money(latestStatus.account_margin)} / ${money(latestStatus.free_margin)}`;
-        const marginLevel = Number(latestStatus.margin_level_pct || 0);
-        const leverage = Number(latestStatus.account_leverage || 0);
-        document.getElementById("obs-margin-level").textContent =
-            `${marginLevel > 0 ? marginLevel.toFixed(1) + "%" : "—"} · 1:${leverage || "—"}`;
-    }
-
-    function updateHedgeRecovery() {
-        document.getElementById("obs-hedge-chains").textContent = latestStatus.active_hedge_chains ?? 0;
-        document.getElementById("obs-hedge-positions").textContent = latestStatus.hedge_chain_positions ?? 0;
-        document.getElementById("obs-hedge-lots").textContent = Number(latestStatus.hedge_chain_lots || 0).toFixed(2);
-        setSignedMoney("obs-hedge-pl", latestStatus.hedge_chain_floating_pl);
-        document.getElementById("obs-hedge-loss").textContent = `${Number(latestStatus.hedge_chain_loss_pct || 0).toFixed(2)}%`;
-        document.getElementById("obs-hedge-level").textContent = latestStatus.max_active_hedge_level ?? 0;
-        document.getElementById("obs-hedge-cycle").textContent = latestStatus.max_active_hedge_cycle ?? 0;
-        document.getElementById("obs-risk-remaining").textContent = `${Number(latestStatus.basket_risk_remaining_pct || 0).toFixed(2)}%`;
-    }
-
-    function updateMarketState() {
-        document.getElementById("obs-bid-ask").textContent = `${Number(latestStatus.bid || 0)} / ${Number(latestStatus.ask || 0)}`;
-        const spread = Number(latestStatus.spread_points || 0);
-        const cap = Number(latestStatus.effective_spread_cap_points || 0);
-        document.getElementById("obs-spread").textContent = `${spread.toFixed(1)} / ${cap > 0 ? cap.toFixed(1) : "No cap"} pts`;
-        document.getElementById("obs-atr").textContent = `${Number(latestStatus.current_atr || 0).toFixed(3)} / ${Number(latestStatus.average_atr || 0).toFixed(3)}`;
-        document.getElementById("obs-volatility-ratio").textContent = Number(latestStatus.volatility_ratio || 0).toFixed(3);
-
-        const spreadOk = Boolean(latestStatus.spread_within_limit);
-        const spreadEl = document.getElementById("obs-spread-filter");
-        spreadEl.textContent = spreadOk ? "Within limit" : "Blocked";
-        spreadEl.className = `value ${spreadOk ? "positive" : "negative"}`;
-
-        document.getElementById("obs-pause").textContent =
-            latestStatus.trading_paused ? `Paused · until ${formatEpoch(latestStatus.pause_until_epoch)}` : "Active";
-        document.getElementById("obs-hours").textContent =
-            latestStatus.outside_trading_hours ? "Outside hours" : "Allowed";
-        document.getElementById("obs-market-filters").textContent =
-            `${latestStatus.near_market_close ? "Near close" : "Market OK"} · ${latestStatus.leverage_changed ? "Leverage changed" : "Leverage OK"}`;
-    }
-
-    function signalComponentMarkup(prefix) {
-        const components = [
-            ["Trend", latestStatus[`${prefix}_trend_score`]],
-            ["Momentum", latestStatus[`${prefix}_momentum_score`]],
-            ["Chop", latestStatus[`${prefix}_chop_score`]],
-            ["Peak", latestStatus[`${prefix}_peak_score`]],
-            ["Volatility", latestStatus[`${prefix}_volatility_score`]],
-            ["Impulse", latestStatus[`${prefix}_impulse_strength`]],
-            ["Velocity", latestStatus[`${prefix}_velocity`]],
-            ["Norm Velocity", latestStatus[`${prefix}_normalized_velocity`]],
-            ["Body Ratio", latestStatus[`${prefix}_body_ratio`]],
-            ["Wick Reject", latestStatus[`${prefix}_wick_rejection`]],
-            ["Body Penalty", latestStatus[`${prefix}_body_penalty`]],
-            ["Wick Penalty", latestStatus[`${prefix}_wick_penalty`]]
-        ];
-
-        return components.map(([label, value]) => `
-            <div class="mini">
-                <div class="label">${label}</div>
-                <div class="value">${Number(value || 0).toFixed(3)}</div>
-            </div>
-        `).join("");
-    }
-
-    function updateSignalAnatomy() {
-        const ready = Boolean(latestStatus.signal_telemetry_ready);
-        const state = document.getElementById("signal-telemetry-state");
-        state.textContent = ready ? "Live" : "Waiting";
-        state.className = ready ? "badge ready" : "badge blocked";
-
-        document.getElementById("signal-buy-final").textContent = Number(latestStatus.buy_score || 0).toFixed(2);
-        document.getElementById("signal-sell-final").textContent = Number(latestStatus.sell_score || 0).toFixed(2);
-        document.getElementById("signal-buy-components").innerHTML = signalComponentMarkup("buy");
-        document.getElementById("signal-sell-components").innerHTML = signalComponentMarkup("sell");
-        document.getElementById("signal-buy-reasoning").textContent = latestStatus.buy_signal_reasoning || "No reasoning reported.";
-        document.getElementById("signal-sell-reasoning").textContent = latestStatus.sell_signal_reasoning || "No reasoning reported.";
-    }
-
-    function updatePositionsTable() {
-        const body = document.getElementById("positions-body");
-        const positions = Array.isArray(latestStatus.positions) ? latestStatus.positions : [];
-
-        if (positions.length === 0) {
-            body.innerHTML = '<tr><td colspan="16">No strategy positions.</td></tr>';
-            return;
-        }
-
-        body.innerHTML = positions.map(p => {
-            const pl = Number(p.net_pl || 0);
-            const chain = Number(p.chain_id || 0);
-            return `
-                <tr>
-                    <td>${p.ticket || "—"}</td>
-                    <td>${p.type || "—"}</td>
-                    <td>${Number(p.volume || 0).toFixed(2)}</td>
-                    <td>${Number(p.entry_price || 0)}</td>
-                    <td>${Number(p.current_price || 0)}</td>
-                    <td class="${pl > 0 ? "positive" : pl < 0 ? "negative" : ""}">${money(pl)}</td>
-                    <td>${Number(p.signed_distance_points || 0).toFixed(1)} pts</td>
-                    <td>${formatDuration(p.age_seconds)}</td>
-                    <td>${Number(p.entry_signal_score || 0).toFixed(2)}</td>
-                    <td>${Number(p.sl || 0)}</td>
-                    <td>${Number(p.tp || 0)}</td>
-                    <td>${p.break_even_locked ? "Yes" : "No"}</td>
-                    <td>${p.partial_close_level || 0}</td>
-                    <td>${chain > 0 ? chain : "—"}</td>
-                    <td>${p.hedge_level || 0}</td>
-                    <td>${p.cycle_num || 0}</td>
-                </tr>
-            `;
-        }).join("");
-    }
-
-    function updateObservability() {
-        updateExposureRisk();
-        updateHedgeRecovery();
-        updateMarketState();
-        updateSignalAnatomy();
-        updatePositionsTable();
-    }
-
-    function updateLastOrder() {
-        const attempted = Boolean(latestStatus.last_order_attempted);
-        const success = Boolean(latestStatus.last_order_success);
-
-        document.getElementById("order-attempted").textContent = attempted ? "Yes" : "No";
-
-        const result = document.getElementById("order-result");
-        result.textContent = !attempted ? "No attempt" : success ? "Success" : "Failed";
-        result.className = `value ${attempted ? (success ? "positive" : "negative") : ""}`;
-
-        document.getElementById("order-direction").textContent = latestStatus.last_order_direction || "—";
-        document.getElementById("order-mode").textContent = latestStatus.last_order_mode || "—";
-        document.getElementById("order-ticket").textContent =
-            Number(latestStatus.last_order_ticket || 0) > 0 ? latestStatus.last_order_ticket : "—";
-        document.getElementById("order-retcode").textContent =
-            Number(latestStatus.last_order_retcode || 0) > 0 ? latestStatus.last_order_retcode : "—";
-        document.getElementById("order-time").textContent = formatEpoch(latestStatus.last_order_time_epoch);
-    }
-
-    async function loadStatus() {
-        try {
-            const response = await fetch("/api/v1/nyao/status", {cache:"no-store"});
-            if (!response.ok) throw new Error(`Status request failed: ${response.status}`);
-
-            latestStatus = await response.json();
-
-            const balance = Number(latestStatus.balance || 0);
-            document.getElementById("balance").textContent = money(balance);
-            document.getElementById("equity").textContent = money(latestStatus.equity);
-            document.getElementById("positions").textContent = latestStatus.open_positions ?? 0;
-
-            const pnl = Number(latestStatus.floating_profit || 0);
-            const pnlEl = document.getElementById("profit");
-            pnlEl.textContent = money(pnl);
-            pnlEl.className = `card-value ${pnl > 0 ? "positive" : pnl < 0 ? "negative" : ""}`;
-
-            if (startingBalance === null && balance > 0) {
-                startingBalance = balance;
-                localStorage.setItem("atlasStartingBalance", String(balance));
-            }
-
-            const realized = startingBalance === null ? 0 : balance - startingBalance;
-            const realizedEl = document.getElementById("realized-profit");
-            realizedEl.textContent = money(realized);
-            realizedEl.className = `card-value ${realized > 0 ? "positive" : realized < 0 ? "negative" : ""}`;
-
-            const connected = Boolean(latestStatus.connected);
-            document.getElementById("connection-dot").className = connected ? "dot connected" : "dot";
-            document.getElementById("connection-text").textContent =
-                connected ? `Nyao connected · ${latestStatus.symbol}` : "Nyao disconnected";
-
-            document.getElementById("footer").textContent =
-                `Last Nyao status: ${latestStatus.timestamp}`;
-
-            updateSync();
-            updateDecision();
-            updateObservability();
-            updateLastOrder();
-            refreshAllControlValues();
-            renderCoreVerification();
-        } catch (error) {
-            document.getElementById("connection-dot").className = "dot";
-            document.getElementById("connection-text").textContent = "Unable to reach Nyao";
-            console.error(error);
-        }
-    }
-
-    async function loadCommand() {
-        try {
-            const response = await fetch("/api/v1/nyao/command", {cache:"no-store"});
-            if (!response.ok) throw new Error(`Command request failed: ${response.status}`);
-
-            currentCommand = await response.json();
-            updateMasterButtons();
-            updateSync();
-            refreshAllControlValues();
-        } catch (error) {
-            console.error(error);
-        }
-    }
-
-    async function resetRealizedProfit() {
-        try {
-            const response = await fetch("/api/v1/nyao/status", {cache:"no-store"});
-            if (!response.ok) {
-                throw new Error(`Unable to read current balance: ${response.status}`);
-            }
-
-            const status = await response.json();
-            const balance = Number(status.balance || 0);
-
-            if (!Number.isFinite(balance) || balance <= 0) {
-                throw new Error("Current balance is not available.");
-            }
-
-            startingBalance = balance;
-            localStorage.setItem("atlasStartingBalance", String(balance));
-            await loadStatus();
-        } catch (error) {
-            alert(error.message);
-            console.error(error);
-        }
-    }
-
-    function filterControls() {
-        const q = document.getElementById("control-search").value.trim().toLowerCase();
-
-        document.querySelectorAll("details.group").forEach(group => {
-            let visible = 0;
-            group.querySelectorAll(".runtime-control").forEach(box => {
-                const match = !q || box.dataset.search.includes(q);
-                box.classList.toggle("hidden", !match);
-                if (match) visible++;
-            });
-
-            group.classList.toggle("hidden", visible === 0);
-            if (q && visible > 0) group.open = true;
-        });
-    }
-
-    function openAllGroups() {
-        document.querySelectorAll("details.group:not(.hidden)").forEach(d => d.open = true);
-    }
-
-    function closeAllGroups() {
-        document.querySelectorAll("details.group").forEach(d => d.open = false);
-    }
-
-    renderRuntimeGroups();
-
-    Promise.all([loadCommand(), loadStatus(), loadIntelligence()]);
-
-    setInterval(loadStatus, 1000);
-    setInterval(loadIntelligence, 2000);
-    setInterval(loadCommand, 3000);
+  }
+  const costBadge=document.getElementById("an-cost-badge");costBadge.textContent=costState;costBadge.className="badge "+costClass;
+  document.getElementById("an-spread-price").textContent=spreadPrice?fmt(spreadPrice,3):"—";
+  document.getElementById("an-atr").textContent=spreadCapPrice?fmt(spreadCapPrice,3):"—";
+  document.getElementById("an-spread-atr").textContent=costRatio===null?"—":`${fmt(costRatio,2)}×`;
+  document.getElementById("an-eligible").textContent=r.entry_observations?.eligible_rate_pct==null?"—":`${fmt(r.entry_observations.eligible_rate_pct,1)}%`;
+  document.getElementById("an-cost-note").textContent=costNote;
+
+  const candles=state.candles||{}, candleReady=Boolean(candles.ready_for_zone_analysis);
+  const zoneMap=state.zoneMap||{}, zonesDetected=zoneMap.state==="DETECTED_NOT_ACTIVATED";
+  const zonePlan=state.zonePlan||{}, activePlan=zonePlan.zone_plan||null;
+  const capital=zonePlan.capital_sizing||{};
+  const liveBid=Number(s.bid),liveAsk=Number(s.ask);
+  const liveChartPrice=liveBid>0?liveBid:liveAsk>0?liveAsk:Number(zoneMap.current_price||0);
+  const zoneExecutorInstalled=Boolean(s.zone_execution_supported),zoneExecutorEnabled=Boolean(s.zone_execution_enabled);
+  const analysisZoneAware=Boolean(zonePlan?.zone_aware_scalping_active||((s.zone_directive_state==="ZONE_CAPITAL_INFEASIBLE")&&!s.zone_scalp_suspended));
+  const zoneModeLive=Boolean(s.zone_mode_active&&!analysisZoneAware);
+  const candleState=text(candles.state,"WAITING_FOR_NYAO_EXPORT");
+  const zoneBadge=document.getElementById("an-zone-status");
+  zoneBadge.textContent=zonesDetected?"ZONE MAP DETECTED":candleReady?"CANDLES VALIDATED":pretty(candleState);
+  zoneBadge.className="badge "+(zonesDetected||candleReady?"ok":candleState==="INVALID"?"bad":"warn");
+  const stageCandles=document.getElementById("an-stage-candles");
+  stageCandles.textContent=candleReady?"READY":candleState==="INVALID"?"INVALID":"WAITING";
+  stageCandles.className="value small "+(candleReady?"pos":candleState==="INVALID"?"neg":"");
+  const stageZone=document.getElementById("an-stage-zone-engine");
+  stageZone.textContent=zonesDetected?"READY":candleReady?"NEXT":"PENDING";
+  stageZone.className="value small "+(zonesDetected?"pos":candleReady?"":"muted");
+  document.getElementById("an-zone-title").textContent=zonesDetected
+    ? `${text(zoneMap.symbol)} deterministic daily zone map`
+    : candleReady
+      ? "Candle foundation ready; no approved zone map yet"
+    : "No approved internal zone map yet";
+  const candleMessages=[...(candles.blockers||[]),...(candles.warnings||[])];
+  document.getElementById("an-candle-detail").textContent=zonesDetected
+    ? `${text(zoneMap.zone_count,0)} ranked supply/demand zones · ${pretty(zoneMap.composite_bias)} composite structure · map ${text(zoneMap.map_id)}. ${zoneModeLive?`${pretty(s.zone_side||"ZONE")} zone execution is currently active in Nyao.`:"The map is available; execution authority activates only when a qualified zone campaign is live."}`
+    : candleReady
+      ? `Validated closed M30/H1/H4 history for ${text(candles.symbol)}. Export age ${age(candles.export_age_seconds)}. The deterministic zone engine is now the next authority layer.`
+    : candleMessages[0]||"Atlas is waiting for Nyao's validated, closed-bar multi-timeframe export. It will not invent price zones from live ticks alone.";
+  document.getElementById("an-zone-stats").innerHTML=zonesDetected?[
+    ["Map version",zoneMap.map_id],
+    ["Live MT5 bid",liveBid>0?fmt(liveBid,3):"—"],
+    ["Live MT5 ask",liveAsk>0?fmt(liveAsk,3):"—"],
+    ["Closed M30 reference",fmt(zoneMap.current_price,3)]
+  ].map(([label,value],index)=>`<div class="kpi"><div class="label">${esc(label)}</div><div class="value small ${index===3?"neg":""}">${esc(text(value))}</div></div>`).join(""):"";
+  const zoneRows=Array.isArray(zoneMap.zones)?zoneMap.zones:[];
+  const gateStage=document.getElementById("an-stage-zone-gate");
+  gateStage.textContent=zoneModeLive?"ZONE MODE LIVE":zoneExecutorInstalled&&zoneExecutorEnabled?"READY":zoneExecutorInstalled?"DISABLED":"INSTALL BUILD";
+  gateStage.className="value small "+(zoneModeLive||zoneExecutorInstalled&&zoneExecutorEnabled?"pos":zoneExecutorInstalled?"neg":"muted");
+  const zoneExecution=document.getElementById("an-zone-execution");
+  if(activePlan){
+    const entries=Array.isArray(activePlan.entries)?activePlan.entries:[], targets=Array.isArray(activePlan.take_profits)?activePlan.take_profits:[],zc=activePlan.confirmation?.zone_confirmation||{};
+    const quoteLabel=zonePlan.price_basis==="BID_SELL_EXECUTION"?"live bid":zonePlan.price_basis==="ASK_BUY_EXECUTION"?"live ask":pretty(zonePlan.price_basis||"execution quote");
+  const zoneSpread=activePlan.confirmation?.spread_assessment||{};
+  zoneExecution.innerHTML=`<div class="zone-plan"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE · ${esc(text(activePlan.plan_id))}</div><div class="zone-price" style="margin-top:5px">${esc(activePlan.side)} ${zonePlan.zone_aware_scalping_active?"ZONE-AWARE SCALP":"ZONE CAMPAIGN"} · ${zonePlan.zone_aware_scalping_active?"zone context retained; ordinary scalp engine released":"ordinary scalping suspended"}</div><div class="muted" style="margin-top:5px">${esc(quoteLabel)} ${fmt(zonePlan.live_price,3)} is inside ${esc(activePlan.source_zone?.timeframe||"")} ${esc(pretty(activePlan.source_zone?.kind||"ZONE"))}. MT5 bid ${fmt(zonePlan.live_bid,3)} · ask ${fmt(zonePlan.live_ask,3)} · closed M30 reference ${fmt(zonePlan.closed_m30_reference,3)}. Zone spread ${fmt(zoneSpread.spread_price,3)} / cap ${fmt(zoneSpread.effective_cap_price,3)}; scalp cost gate is separate. ${zoneExecutorInstalled?`Nyao executor: ${esc(pretty(s.zone_last_execution_reason||"READY"))}.`:"Install the newly compiled Nyao build to enforce this directive."}</div></div><span class="badge ${zoneModeLive?"ok":"warn"}">${esc(zoneModeLive?"LIVE IN NYAO":pretty(zonePlan.state))}</span></div><div class="zone-plan-grid">${entries.map((entry,index)=>`<div class="zone-plan-leg"><div class="label">ENTRY ${entry.leg} · ${fmt(entry.risk_allocation_pct,0)}% · ${esc(pretty(entry.order_type))}</div><strong>${entry.order_type==="MARKET_ON_CONFIRMATION"?`LIVE (ref ${fmt(entry.entry_price,3)})`:fmt(entry.entry_price,3)}</strong><div class="muted">${targets[index]?`TP${targets[index].target} ${fmt(targets[index].price,3)} · close ${fmt(targets[index].close_allocation_pct,0)}%`:"Target pending"}</div></div>`).join("")}</div><div class="grid g4" style="margin-top:9px"><div class="kpi"><div class="label">Shared stop</div><div class="value small neg">${fmt(activePlan.stop_loss,3)}</div></div><div class="kpi"><div class="label">Total account risk</div><div class="value small">${fmt(activePlan.risk?.account_risk_pct,2)}%</div></div><div class="kpi"><div class="label">Zone confirmation</div><div class="value small ${zc.eligible?"pos":""}">${fmt(zc.combined_score,1)} / ${fmt(zc.threshold,1)}</div><div class="muted">Directional ${fmt(zc.directional_score,2)} / ${fmt(zc.minimum_directional_score,2)} · policy ${text(zc.policy_epoch)}</div></div><div class="kpi"><div class="label">Execution authority</div><div class="value small ${zoneModeLive?"pos":"neg"}">${zoneModeLive?"ACTIVE":"NOT ACTIVE"}</div></div></div>${(zonePlan.blockers||[]).length?`<div class="callout" style="margin-top:9px">${esc(zonePlan.blockers.join(" "))}</div>`:""}</div>`;
+  }else{
+    const sizingNote=capital.version?` Atlas capital budget: ${fmt(capital.approved_scalp_risk_pct,3)}% equity per qualified scalp (${esc(pretty(capital.decision))}); current-account loss streak ${text(capital.consecutive_losses,0)}.`:"";
+    zoneExecution.innerHTML=`<div class="zone-plan"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE</div><div class="zone-price" style="margin-top:5px">${esc(pretty(zonePlan.mode||"WAITING"))}</div><div class="muted" style="margin-top:5px">${zonePlan.mode==="SCALP_MODE"?"Live price is outside the priority zones, so the ordinary scalp strategy remains the proposed mode.":esc((zonePlan.blockers||[])[0]||"Waiting for the live zone execution plan.")}${sizingNote}</div></div><span class="badge ${capital.veto_new_risk?"bad":zonePlan.mode==="SCALP_MODE"?"info":"warn"}">${esc(capital.veto_new_risk?"CAPITAL VETO":pretty(zonePlan.state||"PENDING"))}</span></div></div>`;
+  }
+  const liveZoneRelation=zone=>{
+    const decisionPrice=zone.side==="DEMAND"?(liveAsk>0?liveAsk:liveBid):(liveBid>0?liveBid:liveAsk);
+    const relation=decisionPrice<Number(zone.low)?"BELOW":decisionPrice>Number(zone.high)?"ABOVE":"INSIDE";
+    const basis=zone.side==="DEMAND"?"ASK":"BID";
+    return {decisionPrice,relation,basis};
+  };
+  document.getElementById("an-zone-list").innerHTML=zoneRows.map(zone=>{const live=liveZoneRelation(zone);return `<div class="zone-card ${zone.side==="DEMAND"?"demand":"supply"}"><div><span class="badge ${zone.side==="DEMAND"?"ok":"bad"}">${esc(zone.side)}</span><div class="muted" style="margin-top:5px">${esc(zone.timeframe)} · ${esc(pretty(zone.kind))}</div></div><div><div class="zone-price">${fmt(zone.low,3)} – ${fmt(zone.high,3)}</div><div class="muted zone-evidence">${esc((zone.evidence||[])[0]||"Closed-candle structure zone")}</div></div><div><span class="badge ${live.relation==="INSIDE"?"ok":zone.status==="FRESH"?"info":"warn"}">LIVE ${esc(live.relation)}</span><div class="muted" style="margin-top:5px">${live.basis} ${fmt(live.decisionPrice,3)} · ${esc(text((zone.confluence||[]).length,0))} confluence</div></div><div class="zone-score"><strong>${fmt(zone.score,1)}</strong><div class="muted">score</div></div></div>`}).join("");
+  const zoneScenarios=Array.isArray(zoneMap.scenarios)?zoneMap.scenarios:[];
+  document.getElementById("an-zone-scenario-list").innerHTML=zoneScenarios.map(item=>`<div class="analysis-item ${item.side==="BUY"?"buy":"sell"}"><div class="row"><strong>${esc(item.side)} CLOSED-CANDLE MAP SCENARIO</strong><span class="badge warn">${esc(pretty(item.state))}</span></div><div class="muted" style="margin-top:5px">Closed M30 reference ${fmt(item.reference_price,3)} · ${item.zone_id?`${fmt(item.zone_low,3)} – ${fmt(item.zone_high,3)} · `:""}${esc((item.conditions||[])[0]||"No qualified zone available.")} Live authority is shown in the mode directive above.</div></div>`).join("");
+  renderZoneChart(zoneMap,liveChartPrice);
+  document.getElementById("an-mtf-grid").innerHTML=["M30","H1","H4"].map(tf=>{
+    const item=candles.timeframes?.[tf]||{};
+    const ready=item.state==="READY";
+    return `<div class="kpi"><div class="row"><div class="label">${tf} closed bars</div><span class="badge ${ready?"ok":"warn"}">${esc(pretty(item.state||"WAITING"))}</span></div><div class="value small">${esc(text(item.bar_count,0))} / ${esc(text(item.minimum_bars,"—"))}</div><div class="muted">Latest ${item.latest_bar_age_seconds==null?"—":age(item.latest_bar_age_seconds)+" ago"}</div></div>`;
+  }).join("");
+
+  const scenarios=[
+    {side:"BUY",ready:Boolean(s.buy_entry_eligible),score:Number(s.buy_adjusted_score||0),threshold:Number(s.buy_effective_threshold||0),reason:String(s.buy_block_reason||"NONE"),kind:"buy"},
+    {side:"SELL",ready:Boolean(s.sell_entry_eligible),score:Number(s.sell_adjusted_score||0),threshold:Number(s.sell_effective_threshold||0),reason:String(s.sell_block_reason||"NONE"),kind:"sell"}
+  ];
+  const activeZoneSide=pretty(activePlan?.side||s.zone_side||"ZONE");
+  const qualified=scenarios.filter(x=>x.ready);
+  const strongestQualified=qualified.length?qualified.reduce((a,b)=>b.score>a.score?b:a):null;
+  const lastOrderDirection=String(s.last_order_direction||"NONE").toUpperCase();
+  const lastOrderRetcode=Number(s.last_order_retcode||0);
+  document.getElementById("an-scenarios").innerHTML=scenarios.map(x=>{
+    const counterDirection=analysisZoneAware&&activeZoneSide!=="ZONE"&&x.side!==activeZoneSide;
+    const executionError=/ORDER_(SEND_ERROR|REJECTED|PREFLIGHT_REJECTED)|LOCAL_STOP_PREFLIGHT/.test(x.reason);
+    const lostArbitration=!zoneModeLive&&!counterDirection&&x.ready&&strongestQualified&&strongestQualified.side!==x.side;
+    let scalpState="WAIT";
+    if(zoneModeLive) scalpState="ORDINARY SCALP SUSPENDED";
+    else if(counterDirection) scalpState="ZONE-CONTEXT BLOCKED";
+    else if(executionError) scalpState=x.reason.includes("PREFLIGHT")?"LOCAL PREFLIGHT BLOCKED":"BROKER / SEND REJECTED";
+    else if(lostArbitration) scalpState="SIGNAL QUALIFIED · NOT SELECTED";
+    else if(x.ready) scalpState="SIGNAL QUALIFIED · SELECTED";
+    const authority=zoneModeLive?`ACTIVE · ${activeZoneSide} CAMPAIGN`:analysisZoneAware?`ZONE-AWARE SCALP · ${activeZoneSide} ALIGNED`:zoneExecutorInstalled&&zoneExecutorEnabled?"SCALP ACTIVE · ZONE ENGINE ARMED":"SCALP ACTIVE";
+    let explanation="";
+    if(zoneModeLive) explanation=`Active ${activeZoneSide} zone campaign owns execution authority; this ${x.side} score is informational and cannot launch an ordinary scalp.`;
+    else if(counterDirection) explanation=`${x.side} is counter-direction to the active ${activeZoneSide} zone context and is deterministically blocked regardless of raw score.`;
+    else if(executionError) explanation=`Execution did not complete: ${pretty(x.reason)}${lastOrderDirection===x.side&&lastOrderRetcode?` · MT5 ${lastOrderRetcode}`:""}. Nyao will re-evaluate on the next eligible cycle; it does not fall back into the opposite direction.`;
+    else if(lostArbitration) explanation=`Signal passed its own threshold, but ${strongestQualified.side} won this cycle's directional arbitration (${fmt(strongestQualified.score,2)} vs ${fmt(x.score,2)}). No opposite-direction fallback is attempted if the selected side later fails execution.`;
+    else if(x.ready) explanation=`Signal passed its threshold and won the currently qualified directional arbitration. Normal capital, spread, sizing, stop preflight and broker checks still apply before an order is accepted.`;
+    else explanation=`Current blocker: ${pretty(text(x.reason,"NONE"))}`;
+    const badgeClassName=executionError?"bad":lostArbitration?"info":zoneModeLive?"info":x.ready?"ok":"warn";
+    return `<div class="analysis-item ${x.kind}"><div class="row"><strong>${x.side} · ${scalpState}</strong><span class="badge ${badgeClassName}">${fmt(x.score,2)} / ${fmt(x.threshold,2)}</span></div><div class="muted" style="margin-top:5px">${esc(explanation)} · Zone authority: ${esc(authority)}</div></div>`;
+  }).join("");
+
+  const bundle=p.llm_policy?.bundle||{}, critic=p.llm_policy?.critic||{};
+  const criticBadge=document.getElementById("an-gemini-badge");criticBadge.textContent=text(critic.verdict,"NO LLM MAP");criticBadge.className="badge "+badgeClass(criticBadge.textContent);
+  document.getElementById("an-gemini-thesis").textContent=bundle.policy_thesis||"No Gemini policy thesis is attached to the current analysis.";
+  const llmEvidence=[...(bundle.performance_diagnosis||[]),...(bundle.responsiveness_diagnosis||[]),...(bundle.risks_and_tradeoffs||[])].slice(0,8);
+  document.getElementById("an-gemini-evidence").innerHTML=llmEvidence.map(x=>`<div class="analysis-item info">${esc(x)}</div>`).join("")||`<div class="analysis-item">Run a Gemini policy cycle to populate this interpretation.</div>`;
+}
+
+function latestAckState(){
+  const events=state.executionEvents?.events||[];
+  const e=events.find(x=>String(x.action||"").startsWith("NYAO_ACK_"));
+  return e?String(e.action).replace("NYAO_ACK_",""):"—";
+}
+function renderProposalChanges(id,changes){
+  const root=document.getElementById(id);const rows=Object.entries(changes||{});
+  root.innerHTML=rows.length?rows.map(([k,v])=>`<div class="change"><strong>${esc(pretty(k))}</strong><span>${esc(text(v.current))}</span><span><span class="arrow">→</span> ${esc(text(v.shadow))}</span></div>`).join(""):`<div class="callout">No material runtime changes.</div>`;
+}
+
+function renderPositions(){
+  const s=state.status||{}, ps=Array.isArray(s.positions)?s.positions:[];
+  document.getElementById("p-count").textContent=ps.length;
+  document.getElementById("p-lots").textContent=fmt(s.total_lots,2);
+  const pl=s.strategy_floating_pl??s.floating_profit;const el=document.getElementById("p-pl");el.textContent=money(pl);el.className="value "+(Number(pl)>0?"pos":Number(pl)<0?"neg":"");
+  document.getElementById("p-chains").textContent=text(s.active_hedge_chains,0);
+  document.getElementById("positions-body").innerHTML=ps.length?ps.map(p=>{
+    const pln=Number(p.net_pl||0);
+    return `<tr>
+      <td class="mono">${esc(text(p.ticket))}</td><td>${esc(text(p.type))}</td><td>${fmt(p.volume,2)}</td>
+      <td>${fmt(p.entry_price,3)}</td><td>${fmt(p.current_price,3)}</td>
+      <td class="${pln>0?"pos":pln<0?"neg":""}">${money(pln)}</td>
+      <td class="neg">${fmt(p.sl,3)}</td><td class="pos">${fmt(p.tp,3)}</td>
+      <td>${esc(pretty(p.order_origin||p.origin))}</td><td>${age(p.age_seconds)}</td>
+    </tr>`}).join(""):`<tr><td colspan="10" class="muted">No strategy positions.</td></tr>`;
+  renderClosedTrades();
+  renderPerformance();
+}
+
+function renderClosedTrades(){
+  const payload=state.outcomes||{};
+  const closed=Array.isArray(payload.closed)?[...payload.closed]:[];
+  closed.sort((a,b)=>Number(b.close_time_msc||b.close_time_epoch||0)-Number(a.close_time_msc||a.close_time_epoch||0));
+  const root=document.getElementById("closed-trades-body");if(!root)return;
+  const badge=document.getElementById("closed-trades-badge");
+  const exact=closed.filter(t=>t.exact_realized_pl_available).length;
+  badge.textContent=closed.length?`${closed.length} RECENT · ${exact} MT5 CONFIRMED`:"CURRENT ACCOUNT";
+  badge.className="badge "+(exact?"ok":"info");
+  root.innerHTML=closed.length?closed.slice(0,20).map(t=>{
+    const initial=t.initial_position||{}, latest=t.latest_position||{};
+    const pl=t.exact_realized_pl_available?Number(t.realized_net_pl||0):Number(t.final_observed_net_pl_before_disappearance||0);
+    const closedAt=t.close_time_epoch?new Date(Number(t.close_time_epoch)*1000):t.disappeared_at?new Date(t.disappeared_at):null;
+    const quality=t.exact_realized_pl_available?"MT5 CONFIRMED":pretty(t.outcome_quality||"INFERRED");
+    return `<tr>
+      <td class="mono">${esc(text(t.ticket||initial.ticket))}</td>
+      <td>${esc(text(t.type||initial.type))}</td>
+      <td>${fmt(t.initial_volume??initial.volume,2)}</td>
+      <td>${fmt(t.entry_price??initial.entry_price,3)}</td>
+      <td>${fmt(t.close_price??latest.current_price,3)}</td>
+      <td class="${pl>0?"pos":pl<0?"neg":""}">${money(pl)}</td>
+      <td>${esc(pretty(t.order_origin||initial.order_origin||t.origin_guess))}</td>
+      <td>${esc(text(t.entry_policy_epoch??initial.entry_policy_epoch,"—"))}</td>
+      <td>${esc(pretty(t.trading_mode||"UNKNOWN"))}</td>
+      <td>${closedAt&&!Number.isNaN(closedAt.getTime())?esc(closedAt.toLocaleString()):"—"}</td>
+      <td><span class="badge ${t.exact_realized_pl_available?"ok":"warn"}">${esc(quality)}</span></td>
+    </tr>`;
+  }).join(""):`<tr><td colspan="11" class="muted">No closed trades recorded for the selected MT5 account yet.</td></tr>`;
+}
+
+function renderPerformance(){
+  const p=state.performance||{}, o=p.overall||{};
+  document.getElementById("perf-count").textContent=text(o.closed_risk_units??o.closed_trades,0);
+  const net=document.getElementById("perf-net");net.textContent=money(o.net_pl);net.className="value small "+(Number(o.net_pl)>0?"pos":Number(o.net_pl)<0?"neg":"");
+  const exp=document.getElementById("perf-expectancy");exp.textContent=money(o.expectancy);exp.className="value small "+(Number(o.expectancy)>0?"pos":Number(o.expectancy)<0?"neg":"");
+  document.getElementById("perf-factor").textContent=o.profit_factor==null?"—":fmt(o.profit_factor,2);
+  const quality=document.getElementById("perf-quality");quality.textContent=p.quality?.exact_realized_pl_available?"MT5 REALIZED DATA":"INFERRED DATA";quality.className="badge "+(p.quality?.exact_realized_pl_available?"ok":"warn");
+  document.getElementById("perf-epochs").innerHTML=(p.by_policy_epoch||[]).slice(0,10).map(r=>`<tr><td>${esc(text(r.policy_epoch))}</td><td>${esc(text(r.closed_risk_units??r.closed_trades))}</td><td class="${Number(r.net_pl)>0?"pos":Number(r.net_pl)<0?"neg":""}">${money(r.net_pl)}</td><td>${money(r.expectancy)}</td><td>${fmt(r.win_rate_pct,1)}%</td><td><span class="badge ${r.sample_state==="EVIDENCE_AVAILABLE"?"ok":"warn"}">${esc(pretty(r.sample_state))}</span></td></tr>`).join("")||`<tr><td colspan="6" class="muted">No closed policy outcomes yet.</td></tr>`;
+  document.getElementById("perf-modes").innerHTML=(p.by_trading_mode||[]).map(r=>`<tr><td>${esc(pretty(r.trading_mode))}</td><td>${esc(text(r.closed_risk_units??r.closed_trades))}</td><td class="${Number(r.net_pl)>0?"pos":Number(r.net_pl)<0?"neg":""}">${money(r.net_pl)}</td><td>${money(r.expectancy)}</td><td>${r.profit_factor==null?"—":fmt(r.profit_factor,2)}</td></tr>`).join("")||`<tr><td colspan="5" class="muted">No closed mode outcomes yet.</td></tr>`;
+  document.getElementById("perf-note").textContent=p.interpretation||"Waiting for closed trades. Results below 20 trades are preliminary.";
+}
+
+function renderLlmCycle(){
+  const c=state.llmCycle||{};
+  const models=state.llmStatus?.model_chain||[];
+  const status=c.running?"RUNNING":c.enabled?"SCHEDULED":"DISABLED";
+  const badge=document.getElementById("cycle-badge");if(!badge)return;
+  badge.textContent=status;badge.className="badge "+(c.running?"info":c.enabled?"ok":"warn");
+  document.getElementById("cycle-last").textContent=c.last_completed_at?new Date(c.last_completed_at).toLocaleString():"Never";
+  const seconds=Number(c.seconds_until_next_run);
+  document.getElementById("cycle-next").textContent=c.running?"Running now":c.enabled&&Number.isFinite(seconds)?age(seconds):"Not scheduled";
+  document.getElementById("cycle-count").textContent=text(c.run_count,0);
+  document.getElementById("cycle-critic").textContent=text(c.last_critic_verdict);
+  const interval=document.getElementById("cycle-interval");
+  if(interval && document.activeElement!==interval)interval.value=text(c.interval_minutes,240);
+  const enabled=document.getElementById("cycle-enabled");
+  if(enabled && document.activeElement!==enabled)enabled.checked=Boolean(c.enabled);
+  const mode=document.getElementById("cycle-mode");if(mode&&document.activeElement!==mode)mode.value=text(c.execution_mode,"SUPERVISED");
+  const dwell=document.getElementById("cycle-dwell");if(dwell&&document.activeElement!==dwell)dwell.value=text(c.minimum_dwell_minutes,240);
+  const confidence=document.getElementById("cycle-confidence");if(confidence&&document.activeElement!==confidence)confidence.value=text(c.minimum_confidence,70);
+  document.getElementById("btn-run-cycle").disabled=Boolean(c.running);
+  const autoWait=Number(c.seconds_until_auto_apply_eligible||0);
+  const consensus=state.autoConsensus||{};
+  const consensusText=c.execution_mode==="AUTONOMOUS"
+    ? ` Consensus window: ${text(consensus.observation_count,0)} current observations (${text(consensus.lifetime_observation_count??consensus.observation_count,0)} lifetime) · ${text(consensus.consensus_control_count,0)} controls currently meet ≥${fmt(Number(consensus.minimum_support_ratio||0.6)*100,0)}% support${consensus.ready?" · READY":""}.`
+    : "";
+  const detail=c.running
+    ? `Gemini is analyzing ${text(state.selectedSymbol)}. This may take a few minutes.`
+    : c.last_error
+      ? `${pretty(c.last_status)}: ${c.last_error}`
+      : c.execution_mode==="AUTONOMOUS"&&c.last_auto_apply_status==="MINIMUM_DWELL_ACTIVE"
+        ? `AUTO APPLY DEFERRED · current policy minimum dwell${autoWait>0?` · eligible in ${age(autoWait)}`:" complete"}. Gemini observations continue accumulating during the hold.`
+        : c.execution_mode==="AUTONOMOUS"&&c.last_auto_apply_status==="CONSENSUS_NOT_READY"
+          ? `AUTO APPLY DEFERRED · dwell is complete, but the accumulated Gemini observations have not reached policy consensus yet.`
+          : `${pretty(c.last_status||"NEVER_RUN")} · ${c.execution_mode==="AUTONOMOUS"?`validated Nyao scalp-policy autonomous activation; last apply ${pretty(c.last_auto_apply_status||"NEVER_APPLIED")}`:"human approval and application required"}.`;
+  document.getElementById("cycle-detail").textContent=`${detail}${consensusText}${models.length?` Configured model chain: ${models.join(" → ")}.`:""}`;
+}
+
+function renderAutonomousConsensus(){
+  const root=document.getElementById("consensus-controls");
+  if(!root)return;
+  const c=state.autoConsensus||{};
+  const autonomous=state.llmCycle?.execution_mode==="AUTONOMOUS";
+  const total=Number(c.observation_count||0);
+  const minObs=Number(c.minimum_observations||3);
+  const minRatio=Number(c.minimum_support_ratio||0.6);
+  const backendQualified=Number(c.consensus_control_count||0);
+  const qualified=total>=minObs?backendQualified:0;
+  const controls=Object.entries(c.controls||{}).map(([name,row])=>({name,...(row||{})}));
+  const badge=document.getElementById("consensus-badge");
+  const ready=Boolean(c.ready);
+  badge.textContent=!autonomous?"SUPERVISED":ready?"CONSENSUS READY":total?"COLLECTING":"WAITING";
+  badge.className="badge "+(!autonomous?"info":ready?"ok":total?"warn":"");
+  document.getElementById("consensus-observations").textContent=text(total,0);
+  document.getElementById("consensus-qualified").textContent=text(qualified,0);
+  document.getElementById("consensus-threshold").textContent=`${fmt(minRatio*100,0)}%`;
+  document.getElementById("consensus-epoch").textContent=c.baseline_policy_epoch==null?"—":text(c.baseline_policy_epoch);
+  const lifetime=Number(c.lifetime_observation_count??total);
+  const archived=Number(c.archived_window_count||0);
+  const lifetimeEl=document.getElementById("consensus-lifetime");if(lifetimeEl)lifetimeEl.textContent=text(lifetime,0);
+  const historyNote=document.getElementById("consensus-history-note");if(historyNote)historyNote.textContent=archived?`${archived} prior policy window${archived===1?"":"s"} archived`:"No archived windows yet";
+  document.getElementById("consensus-observation-rule").textContent=total<minObs?`${minObs-total} more accepted observation${minObs-total===1?"":"s"} before consensus can qualify`:`Minimum ${minObs} observations satisfied`;
+  const anchor=c.baseline_anchor?new Date(c.baseline_anchor):null;
+  document.getElementById("consensus-window-age").textContent=anchor&&!Number.isNaN(anchor.getTime())?`Window started ${anchor.toLocaleString()}`:"Window not anchored yet";
+  const wait=Number(state.llmCycle?.seconds_until_auto_apply_eligible||0);
+  const dwellDone=wait<=0;
+  document.getElementById("consensus-headline").textContent=!autonomous
+    ?"Consensus is observational while application mode is supervised."
+    : ready&&dwellDone
+      ?`${qualified} control${qualified===1?" is":"s are"} consensus-qualified and dwell is complete.`
+      : ready
+        ?`${qualified} control${qualified===1?" has":"s have"} consensus; activation still waits for policy dwell.`
+        : total
+          ?"Gemini observations are accumulating; no control has cleared all consensus gates yet."
+          :"Waiting for the first accepted Gemini observation in this dwell window.";
+  document.getElementById("consensus-detail").textContent=!autonomous
+    ?"Switching to autonomous mode does not automatically apply these observations; normal confidence, epoch, risk and mode-boundary gates still apply."
+    : `${dwellDone?"Policy dwell complete":"Policy dwell remaining: "+age(wait)} · ${qualified} qualifying control${qualified===1?"":"s"} · each control needs ≥${fmt(minRatio*100,0)}% support and at least ${minObs} supporting observations.`;
+  const historyRoot=document.getElementById("consensus-history");
+  if(historyRoot){
+    const windows=Array.isArray(c.recent_windows)?c.recent_windows:[];
+    historyRoot.innerHTML=windows.length?windows.map(w=>{const produced=w.produced_policy_epoch;const label=w.current_window?`Baseline Epoch ${esc(text(w.baseline_policy_epoch))}`:produced?`Baseline Epoch ${esc(text(w.baseline_policy_epoch))} → Produced Epoch ${esc(text(produced))}`:`Baseline Epoch ${esc(text(w.baseline_policy_epoch))}`;const applied=w.applied_at?` · applied ${esc(new Date(w.applied_at).toLocaleString())}`:"";return `<div class="analysis-item ${w.current_window?"info":""}"><div class="row"><strong>${label}</strong><span class="badge ${w.current_window?"info":produced?"ok":""}">${w.current_window?"CURRENT WINDOW":produced?"APPLIED WINDOW":"ARCHIVED"}</span></div><div class="muted" style="margin-top:5px">${esc(text(w.observation_count,0))} accepted observation${Number(w.observation_count)===1?"":"s"}${w.last_observed_at?` · last ${esc(new Date(w.last_observed_at).toLocaleString())}`:""}${applied}${w.minimum_dwell_overridden?" · dwell override":""}</div></div>`}).join(""):`<div class="analysis-item">No policy-window history recorded yet.</div>`;
+  }
+  if(!controls.length){
+    root.innerHTML=`<div class="consensus-empty">No controls have been proposed during the current policy dwell window yet. Prior windows remain archived below.</div>`;
+    return;
+  }
+  controls.sort((a,b)=>Number(Boolean(b.ready))-Number(Boolean(a.ready)) || Number(b.support_ratio||0)-Number(a.support_ratio||0) || Number(b.support_count||0)-Number(a.support_count||0) || a.name.localeCompare(b.name));
+  root.innerHTML=controls.map(row=>{
+    const support=Number(row.support_count||0);
+    const ratio=Number(row.support_ratio||0);
+    const requiredNow=Math.max(minObs,Math.ceil(total*minRatio));
+    const supportGap=Math.max(0,requiredNow-support);
+    const globalGap=Math.max(0,minObs-total);
+    const pct=Math.max(0,Math.min(100,ratio*100));
+    const trulyReady=Boolean(row.ready)&&total>=minObs&&support>=minObs&&ratio>=minRatio;
+    const status=trulyReady?"QUALIFIED":globalGap>0?"EARLY SUPPORT":supportGap>0?"BUILDING SUPPORT":"NOT QUALIFIED";
+    const gate=trulyReady
+      ?`Clears the minimum-observation and ${fmt(minRatio*100,0)}% support gates.`
+      : globalGap>0
+        ?`${support}/${total} currently supports this change, but consensus cannot qualify until ${globalGap} more accepted observation${globalGap===1?"":"s"} exist in this policy window.`
+        : `${supportGap} more supporting observation${supportGap===1?"":"s"} needed at the current window size.`;
+    return `<div class="consensus-row ${trulyReady?"ready":""}">
+      <div class="consensus-name"><strong>${esc(pretty(row.name))}</strong><div class="muted">${esc(pretty(row.method||"EXACT_TARGET"))}</div></div>
+      <div class="consensus-values"><span class="muted">Current</span> <strong>${esc(text(row.baseline))}</strong><br><span class="muted">Consensus</span> <strong>${esc(text(row.selected))}</strong></div>
+      <div class="consensus-support"><div class="consensus-support-line"><span>${support}/${total} support</span><strong>${fmt(pct,0)}%</strong></div><div class="consensus-meter"><span style="width:${pct}%"></span></div></div>
+      <div class="consensus-gate">${esc(gate)}</div>
+      <span class="badge ${trulyReady?"ok":"warn"}">${esc(status)}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderResponsiveness(){
+  const r=state.responsiveness||{}, entry=r.entry_observations||{}, exit=r.exit_observations||{};
+  const badge=document.getElementById("resp-badge");if(!badge)return;
+  badge.textContent=text(r.profile);badge.className="badge "+(r.profile==="FAST"?"ok":r.profile==="BALANCED"?"info":"warn");
+  document.getElementById("resp-pressure").textContent=r.latency_pressure_score==null?"—":`${fmt(r.latency_pressure_score,1)} / 100`;
+  document.getElementById("resp-eligible").textContent=entry.eligible_rate_pct==null?"—":`${fmt(entry.eligible_rate_pct,1)}%`;
+  document.getElementById("resp-hold").textContent=exit.median_holding_minutes==null?"—":`${fmt(exit.median_holding_minutes,1)} min`;
+  document.getElementById("resp-capture").textContent=exit.average_mfe_capture_ratio==null?"—":`${fmt(Number(exit.average_mfe_capture_ratio)*100,1)}%`;
+  document.getElementById("resp-blockers").innerHTML=(entry.dominant_block_reasons||[]).slice(0,6).map(x=>`<div class="change"><strong>${esc(pretty(x.reason))}</strong><span>${esc(text(x.count))}</span><span>${esc(fmt(x.share_pct,1))}%</span></div>`).join("")||`<div class="callout">No blocker history available yet.</div>`;
+  document.getElementById("resp-levers").innerHTML=(r.candidate_levers||[]).slice(0,6).map(x=>`<div class="change" style="grid-template-columns:1fr auto"><div><strong>${esc(pretty(x.control))}</strong><div class="muted">${esc(x.effect)}</div></div><span class="badge info">${esc(pretty(x.direction))}</span></div>`).join("")||`<div class="callout">Current responsiveness has no obvious latency lever.</div>`;
+  document.getElementById("resp-detail").textContent=`${pretty(r.evidence_quality||"LIMITED")} evidence · ${text(entry.history_snapshot_count,0)} market snapshots · ${text(exit.closed_trade_count,0)} closed trades. Gemini receives this analysis on every policy cycle.`;
+}
+
+function renderAtlas(){
+  const p=state.proposal||{}, rs=p.review_summary||{}, ev=rs.shadow_evidence||{}, st=rs.stability||{};
+  const lifecycle=p.lifecycle?.state||p.review_state;
+  const applied=["APPLIED","AWAITING_NYAO_ACK"].includes(String(lifecycle));
+  document.getElementById("a-candidate").textContent=text(p.selected_candidate);
+  const autonomous=state.llmCycle?.execution_mode==="AUTONOMOUS";
+  document.getElementById("a-readiness").textContent=applied?lifecycle:autonomous?pretty(lifecycle):p.recommendation_ready?"READY FOR REVIEW":"NOT READY";
+  const activeEpoch=state.autoApplications?.current_active?.policy_epoch;
+  document.getElementById("a-epoch").textContent=autonomous&&activeEpoch!=null?text(activeEpoch):text(p.proposed_policy_epoch);
+  const b=document.getElementById("a-review-state");b.textContent=text(lifecycle);b.className="badge "+badgeClass(b.textContent);
+  const consensus=state.autoConsensus||{};
+  const applications=state.autoApplications||{};
+  const activeApplication=applications.current_active||null;
+  const title=document.getElementById("atlas-policy-title");
+  const subtitle=document.getElementById("atlas-policy-subtitle");
+  const historyRoot=document.getElementById("applied-policy-history");
+  if(autonomous&&activeApplication){
+    title.textContent="Current active policy";
+    subtitle.textContent=`Epoch ${text(activeApplication.policy_epoch)} · command ${text(activeApplication.command_version)} · autonomous Gemini consensus`;
+    const appliedChanges={};
+    Object.entries(activeApplication.changes||{}).forEach(([name,row])=>{
+      appliedChanges[name]={current:row?.before,shadow:row?.intended};
+    });
+    renderProposalChanges("atlas-changes",appliedChanges);
+    document.getElementById("atlas-rationale").textContent=`Applied from ${text(activeApplication.consensus_observation_count,0)} accepted observations. Reconciliation: ${pretty(activeApplication.reconciliation)}. Intended changes are shown only as confirmed when the policy registry or current Nyao runtime agrees.`;
+    b.textContent=pretty(activeApplication.reconciliation);b.className="badge "+(String(activeApplication.reconciliation).includes("CONFIRMED")?"ok":String(activeApplication.reconciliation).includes("MISMATCH")?"bad":"warn");
+  }else{
+    title.textContent=autonomous?"Current active policy":"Proposed policy change";
+    subtitle.textContent=autonomous?"No autonomous application has been recorded for this symbol yet.":"Runtime IDs and hashes stay underneath the UI.";
+    renderProposalChanges("atlas-changes",p.changed_controls);
+    document.getElementById("atlas-rationale").textContent=p.transition_plan?.rationale||"No additional rationale.";
+  }
+  if(historyRoot){
+    const apps=Array.isArray(applications.applications)?applications.applications:[];
+    historyRoot.innerHTML=apps.length?apps.slice(0,12).map(app=>{
+      const changes=Object.entries(app.changes||{});
+      const detail=changes.length?changes.map(([name,row])=>`${pretty(name)}: ${text(row?.before)} → ${text(row?.intended)}${row?.confirmed===false?" ⚠ mismatch":""}`).join(" · "):"No material controls recorded";
+      const cls=String(app.reconciliation||"").includes("MISMATCH")?"bad":String(app.reconciliation||"").includes("CONFIRMED")?"ok":"warn";
+      return `<div class="analysis-item"><div class="row"><strong>Epoch ${esc(text(app.policy_epoch))}</strong><span class="badge ${cls}">${esc(pretty(app.reconciliation))}</span></div><div class="muted" style="margin-top:5px">${esc((app.timestamp||"").replace("T"," ").slice(0,19))} · ${esc(text(app.consensus_observation_count,0))} consensus observations</div><div style="margin-top:5px">${esc(detail)}</div></div>`;
+    }).join(""):`<div class="analysis-item">No autonomous policy applications recorded yet.</div>`;
+  }
+  const llm=p.llm_policy||{}, bundle=llm.bundle||{}, critic=llm.critic||{};
+  const diagnoses=bundle.performance_diagnosis||rs.performance_diagnosis||[];
+  const weaknesses=bundle.weaknesses_targeted||rs.weaknesses_targeted||[];
+  const speed=bundle.responsiveness_diagnosis||rs.responsiveness_diagnosis||[];
+  document.getElementById("atlas-llm-evidence").innerHTML=llm.proposal_id
+    ? `<strong>Gemini + critic evidence</strong><br>${esc((diagnoses.length?diagnoses:["No performance diagnosis supplied."]).join(" · "))}${speed.length?`<br><span class="muted">Responsiveness (${esc(text(bundle.responsiveness_profile||rs.responsiveness_profile))}): ${esc(speed.join(" · "))}</span>`:""}<br><span class="muted">Targets: ${esc((weaknesses.length?weaknesses:["not specified"]).join(" · "))} · Critic: ${esc(text(critic.verdict||rs.critic_verdict))} — ${esc(text(critic.summary||rs.critic_summary,"No summary"))}</span>`
+    : "Deterministic Atlas proposal; no Gemini evidence attached.";
+  document.getElementById("a-risk").textContent=text(p.risk?.state||rs.risk_state);
+  document.getElementById("a-confidence").textContent=rs.confidence==null?"—":fmt(rs.confidence,1)+"%";
+  document.getElementById("a-evidence").textContent=text(ev.quality);
+  document.getElementById("a-stability").textContent=st.stable?"STABLE":"NOT STABLE";
+  const blockers=p.recommendation_blockers||[];const natural=p.natural_recommendation_blockers||[];
+  document.getElementById("a-blockers").textContent=lifecycle==="AUTO_APPLY_DEFERRED_ZONE"
+    ? `Queued, not applied. Atlas will reconsider proposed epoch ${text(p.proposed_policy_epoch)} when the active zone campaign ends; current Nyao policy remains epoch ${text(state.command?.policy_epoch)}.`
+    : blockers.length?blockers.map(pretty).join(" · "):(p.test_override_active&&natural.length?`Test override active. Natural blockers: ${natural.map(pretty).join(" · ")}`:"No recommendation blockers.");
+  const approval=state.review?.approval||p.approval||{};
+  const status=approval.status||"NOT_REQUESTED";
+  const steps=[
+    ["Proposal",p.proposal_id?"READY":"WAITING"],
+    ["Review",status==="NOT_REQUESTED"?"WAITING":"DONE"],
+    ["Approval",status],
+    ["Command package",applied?lifecycle:state.supervised?"READY":"WAITING"]
+  ];
+  document.getElementById("review-workflow").innerHTML=steps.map((x,i)=>`<div class="step ${["DONE","APPROVED","READY"].some(v=>String(x[1]).includes(v))?"done":""}"><div class="step-num">${i+1}</div><div><strong>${x[0]}</strong></div><span class="badge ${badgeClass(x[1])}">${esc(x[1])}</span></div>`).join("");
+  document.getElementById("btn-request-review").disabled=autonomous||applied||!p.proposal_id || p.review_state!=="READY_FOR_HUMAN_REVIEW" || status!=="NOT_REQUESTED";
+  document.getElementById("btn-approve").disabled=autonomous||applied||status!=="PENDING_APPROVAL";
+  document.getElementById("btn-reject").disabled=autonomous||applied||status!=="PENDING_APPROVAL";
+  document.getElementById("btn-build-command").disabled=autonomous||applied||status!=="APPROVED";
+}
+
+function renderParameterIntelligence(){
+  const p=state.parameterIntel||{}, r=p.registry||{}, domains=p.domain_maturity||{};
+  const count=document.getElementById("pi-count"); if(!count)return;
+  count.textContent=text(r.parameter_count,157);
+  document.getElementById("pi-locked").textContent=text(r.position_sensitive_count,53);
+  document.getElementById("pi-budget").textContent=text(p.change_budget??r.change_budget,3);
+  const autonomous=state.llmCycle?.execution_mode==="AUTONOMOUS";
+  document.getElementById("pi-exec").textContent=autonomous?"ENABLED":"SUPERVISED";
+  document.getElementById("pi-authority-note").textContent=autonomous
+    ? "Historical value/outcome differences are descriptive associations, not causal proof. Gemini changes require critic acceptance, schema validation, confidence and dwell checks, a current policy epoch, and a clean mode boundary before Atlas can apply them."
+    : "Historical value/outcome differences are descriptive associations, not causal proof. Gemini can propose validated numeric changes, but human approval and application remain required in supervised mode.";
+  document.getElementById("pi-real-changes").textContent=text(p.current_advisor_change_count,0);
+  document.getElementById("pi-noop").textContent=text(p.no_op_advisor_changes_filtered,0);
+
+  document.getElementById("pi-domains").innerHTML=Object.entries(domains).map(([name,v])=>{
+    const dist=v.distribution||{};
+    const detail=`${text(v.mature_or_moderate_parameters,0)}/${text(v.parameter_count,0)} moderate+ · ${text(dist.MATURE,0)} mature`;
+    return `<div class="change"><div><strong>${esc(pretty(name))}</strong><div class="muted">${esc(detail)}</div></div><span class="badge ${v.level==="MATURE"?"ok":v.level==="MODERATE"?"info":"warn"}">${esc(text(v.level))}</span></div>`
+  }).join("")||`<div class="callout">No evidence maturity calculated yet.</div>`;
+
+  const candidates=[...(p.supervised_candidates||[]),...(p.top_investigation_candidates||[])].slice(0,10);
+  document.getElementById("pi-candidates").innerHTML=candidates.map(c=>{
+    const maturity=c.parameter_maturity||{};
+    const assoc=c.descriptive_association||{};
+    const why=(c.why_relevant||[])[0]||"No direct relevance reason yet.";
+    const caution=(c.why_not_change||[])[0]||"";
+    const assocText=assoc.available?`${pretty(assoc.strength)} association · Δ mean P/L ${text(assoc.mean_pl_gap)}`:"no comparable value/outcome groups";
+    return `<div class="change" style="align-items:flex-start">
+      <div style="min-width:0">
+        <strong>${esc(c.label||pretty(c.parameter))}</strong>
+        <div class="muted">${esc(pretty(c.domain))} · ${esc(pretty(c.family||""))}${c.position_sensitive?" · policy locked":""}</div>
+        <div class="muted" style="margin-top:5px">${esc(why)}</div>
+        ${caution?`<div class="muted" style="margin-top:3px">Hold: ${esc(caution)}</div>`:""}
+        <div class="muted" style="margin-top:3px">${esc(assocText)} · values ${esc(text(maturity.distinct_values,0))} · outcomes ${esc(text(maturity.outcomes_with_value,0))}</div>
+      </div>
+      <div style="text-align:right;flex:0 0 auto">
+        <span class="badge ${c.action==="CURRENT_ADVISOR_PROPOSAL"?"ok":c.readiness==="WAIT_FOR_EVIDENCE"?"warn":"info"}">${esc(c.action==="CURRENT_ADVISOR_PROPOSAL"?"PROPOSED":c.readiness==="WAIT_FOR_EVIDENCE"?"WAIT":"INVESTIGATE")}</span>
+        <div class="muted" style="margin-top:4px">${c.proposed!==null&&c.proposed!==undefined?`${esc(text(c.current))} → ${esc(text(c.proposed))}`:`score ${esc(text(c.relevance_score))}`}</div>
+        <div class="muted">${esc(text(c.evidence_maturity))}</div>
+      </div>
+    </div>`
+  }).join("")||`<div class="callout">No candidates yet.</div>`;
+}
+function renderControl(){
+  const c=state.command||{}, arm=state.arm||{};
+  const ab=document.getElementById("arm-badge");
+  ab.textContent=arm.armed?"ARMED":"DISARMED";
+  ab.className="badge "+(arm.armed?"ok":"bad");
+  document.getElementById("arm-detail").textContent=arm.armed
+    ? `Armed by ${text(arm.armed_by)} · ${Math.ceil(Number(arm.remaining_seconds||0)/60)} min remaining`
+    : "Execution is fail-closed until explicitly armed.";
+  document.getElementById("btn-arm").disabled=Boolean(arm.armed);
+  document.getElementById("btn-disarm").disabled=!arm.armed;
+  document.getElementById("c-version").textContent=text(c.command_version);
+  document.getElementById("c-epoch").textContent=text(c.policy_epoch);
+  document.getElementById("c-lot").textContent=text(c.base_lot_size);
+  document.getElementById("c-enabled").textContent=c.enabled===false?"NO":"YES";
+  const pkg=state.supervised?.supervised_command_proposal||state.supervised;
+  const packageEvents=(state.executionEvents?.events||[]).filter(e=>e.supervised_command_id===pkg?.supervised_command_id);
+  const completedEvent=packageEvents.find(e=>["EXECUTED","EXECUTED_RECOVERED"].includes(e.action));
+  const ackEvent=packageEvents.find(e=>String(e.action||"").startsWith("NYAO_ACK_"));
+  const packageLifecycle=ackEvent?.action==="NYAO_ACK_CONFIRMED"?"APPLIED":completedEvent?"AWAITING_NYAO_ACK":pkg?.state;
+  const eb=document.getElementById("exec-badge");
+  if(pkg?.supervised_command_id){eb.textContent=text(packageLifecycle);eb.className="badge "+badgeClass(packageLifecycle);
+    document.getElementById("exec-summary").innerHTML=packageLifecycle==="APPLIED"
+      ? `<strong>Policy applied and confirmed by Nyao</strong><br>Command ${esc(text(pkg.command_preview?.hypothetical_command_version))} / policy epoch ${esc(text(pkg.command_preview?.target_policy_epoch))} · package ${esc(pkg.supervised_command_id)}.`
+      : `<strong>Command package ${esc(pkg.supervised_command_id)}</strong><br>Baseline ${esc(text(pkg.current_context?.baseline_command_version))} / epoch ${esc(text(pkg.current_context?.baseline_policy_epoch))} → command ${esc(text(pkg.command_preview?.hypothetical_command_version))} / epoch ${esc(text(pkg.command_preview?.target_policy_epoch))}.`;
+  } else {eb.textContent="NO PACKAGE";eb.className="badge";document.getElementById("exec-summary").textContent="Build an approved command package from the Atlas page first."}
+  const ex=state.execution, ack=state.ack;
+  const executionState=ex?.status||(completedEvent?completedEvent.action:"WAITING");
+  const ackMatchesExecution=Boolean(
+    ack && completedEvent && ack.execution_id===completedEvent.execution_id
+  );
+  const ackState=ackMatchesExecution
+    ? ack.state
+    : ackEvent
+      ? String(ackEvent.action).replace("NYAO_ACK_","")
+      : "WAITING";
+  const steps=[
+    ["Package",pkg?"READY":"WAITING"],
+    ["Preflight",(state.preflight?.ready_for_supervised_execution??state.preflight?.ready_for_explicit_demo_execution)?"PASS":"WAITING"],
+    ["Execution",executionState],
+    ["Nyao ACK",ackState]
+  ];
+  document.getElementById("exec-workflow").innerHTML=steps.map((x,i)=>`<div class="step ${badgeClass(x[1])==="ok"?"done":""}"><div class="step-num">${i+1}</div><div><strong>${x[0]}</strong></div><span class="badge ${badgeClass(x[1])}">${esc(text(x[1]))}</span></div>`).join("");
+  document.getElementById("btn-preflight").disabled=!pkg||Boolean(completedEvent);
+  document.getElementById("btn-execute").disabled=!pkg||Boolean(completedEvent);
+  document.getElementById("btn-ack").disabled=!completedEvent||ackState==="CONFIRMED";
+  document.getElementById("btn-execute").textContent=completedEvent?"Policy applied":"Execute policy";
+  document.getElementById("btn-ack").textContent=ackState==="CONFIRMED"?"Nyao confirmed":"Refresh Nyao ACK";
+  renderRiskAppetite();
+}
+function renderRiskAppetite(){
+  const ra=state.riskAppetite||{};
+  const capital=state.intelligence?.capital_sizing||state.intelligence?.capital||{};
+  const pct=Number(ra.portfolio_hard_risk_pct??capital.risk_appetite?.portfolio_hard_risk_pct??1);
+  const equity=Number(state.status?.equity||capital.equity||0);
+  const hard=Number(capital.maximum_total_strategy_risk_amount||equity*pct/100);
+  const operating=Number(capital.portfolio_allocation?.operating_risk_ceiling_amount||0);
+  const badge=document.getElementById("risk-appetite-badge");
+  if(!badge)return;
+  badge.textContent=`${fmt(pct,2)}%`;
+  badge.className="badge "+(pct>=10?"bad":pct>=5?"warn":"info");
+  document.getElementById("risk-appetite-current").textContent=`${fmt(pct,2)}%`;
+  document.getElementById("risk-appetite-amount").textContent=money(hard);
+  document.getElementById("risk-appetite-operating").textContent=operating>0?money(operating):"—";
+  const input=document.getElementById("risk-appetite-input");
+  if(input && document.activeElement!==input)input.value=String(pct);
+  const warning=document.getElementById("risk-appetite-warning");
+  warning.textContent=pct>=10
+    ?`HIGH RISK CEILING · ${fmt(pct,2)}% allows substantial simultaneous strategy risk. Atlas still scales the operating envelope and individual units independently.`
+    :pct>=5
+      ?`Elevated risk ceiling · ${fmt(pct,2)}%. This expands aggregate capacity, not per-trade risk. Atlas safety governors remain active.`
+      :"Only you can increase this ceiling. Gemini and autonomous policy are not permitted to raise it.";
+}
+async function loadRiskAppetite(){
+  try{state.riskAppetite=await api("/api/v1/atlas/risk-appetite")}catch(e){console.warn("Risk appetite refresh failed",e)}
+}
+async function saveRiskAppetite(){
+  const input=document.getElementById("risk-appetite-input");
+  const pct=Number(input?.value);
+  if(!Number.isFinite(pct)||pct<1||pct>20)return toast("Risk ceiling must be between 1% and 20%.",true);
+  const equity=Number(state.status?.equity||0);
+  const amount=equity>0?equity*pct/100:0;
+  const current=Number(state.riskAppetite?.portfolio_hard_risk_pct||1);
+  const msg=pct>current
+    ?`Increase Atlas maximum aggregate portfolio risk from ${fmt(current,2)}% to ${fmt(pct,2)}%${amount>0?` (about ${money(amount)} at current equity)`:""}?`
+    :`Set Atlas maximum aggregate portfolio risk to ${fmt(pct,2)}%?`;
+  if(!confirm(msg))return;
+  try{
+    state.riskAppetite=await api("/api/v1/atlas/risk-appetite",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({portfolio_hard_risk_pct:pct,actor:"Nobel"})});
+    await loadIntelligence();
+    renderAll();
+    toast(`Portfolio hard risk ceiling set to ${fmt(pct,2)}%.`);
+  }catch(e){toast(e.message,true)}
+}
+function renderControls(){
+  const q=document.getElementById("control-search")?.value?.trim().toLowerCase()||"";
+  const root=document.getElementById("runtime-controls");if(!root)return;
+  root.innerHTML=CONTROL_CONFIG.map((g,gi)=>{
+    const cs=(g.controls||[]).filter(c=>!q||(`${c.label} ${c.name}`).toLowerCase().includes(q));
+    if(!cs.length)return"";
+    return `<details class="control-group" ${q?"open":""}><summary>${esc(g.name)} <span class="muted">· ${cs.length}</span></summary><div class="control-grid">${cs.map(c=>controlHtml(c)).join("")}</div></details>`;
+  }).join("");
+  updateDirtyCount();
+}
+function controlHtml(c){
+  const actual=state.dirty.hasOwnProperty(c.name)?state.dirty[c.name]:effectiveControl(c);
+  let input="";
+  if(c.kind==="bool"){input=`<select onchange="editControl('${c.name}',this.value==='true',this)"><option value="true" ${actual===true?"selected":""}>On</option><option value="false" ${actual===false?"selected":""}>Off</option></select>`}
+  else if(c.kind==="select"){input=`<select onchange="editControl('${c.name}',Number(this.value),this)">${(c.options||[]).map(o=>`<option value="${o.value}" ${Number(actual)===Number(o.value)?"selected":""}>${esc(o.label)}</option>`).join("")}</select>`}
+  else if(c.kind==="time"||c.kind==="string"){input=`<input value="${esc(text(actual,""))}" onchange="editControl('${c.name}',this.value,this)">`}
+  else {input=`<input type="number" value="${esc(text(actual,""))}" min="${c.min??""}" max="${c.max??""}" step="${c.step??"any"}" onchange="editControl('${c.name}',Number(this.value),this)">`}
+  return `<div class="control ${state.dirty.hasOwnProperty(c.name)?"dirty":""}"><label>${esc(c.label)}</label>${input}</div>`;
+}
+function effectiveControl(c){const s=state.status||{},cmd=state.command||{};return cmd[c.name]!==undefined?cmd[c.name]:s[c.status_key]}
+function editControl(k,v,el){
+  state.dirty[k]=v;
+  const control=el?.closest(".control");
+  if(control)control.classList.add("dirty");
+  updateDirtyCount();
+}
+function updateDirtyCount(){const n=Object.keys(state.dirty).length;const e=document.getElementById("dirty-count");if(e)e.textContent=n?`${n} unsaved change${n===1?"":"s"}`:"No unsaved changes"}
+function discardEdits(){state.dirty={};renderControls()}
+async function applyEdits(){
+  const n=Object.keys(state.dirty).length;
+  if(!n)return toast("No runtime changes to apply.");
+  if(!confirm(`Apply ${n} runtime change${n===1?"":"s"} through the Atlas command API?`))return;
+
+  try{
+    const result=await api("/api/v1/nyao/command",{
+      method:"PUT",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(state.dirty)
+    });
+
+    state.command=result?.command||result;
+    state.dirty={};
+
+    // renderAll() intentionally avoids rebuilding the 157-control editor on
+    // every polling refresh. After a successful save, force one rebuild so
+    // dirty styling and the unsaved-change counter are cleared immediately.
+    renderAll();
+    renderControls();
+
+    toast("Runtime changes applied.");
+  }catch(e){
+    toast(e.message,true);
+  }
+}
+
+async function loadReview(){
+  const p=state.proposal;if(!p?.proposal_id){state.review=null;return}
+  try{state.review=await api(`/api/v1/atlas/advisory-proposals/${p.proposal_id}/review`)}catch{state.review=null}
+}
+async function loadSupervised(){
+  const proposalId=state.proposal?.proposal_id;
+  if(!proposalId){state.supervised=null;return}
+  try{
+    const data=await api("/api/v1/atlas/supervised-command-proposals?limit=100");
+    const rows=data.proposals||data.supervised_command_proposals||[];
+    state.supervised=rows.find(x=>(x.source||{}).proposal_id===proposalId)||null;
+  }catch(e){console.warn("Command package refresh failed",e)}
+}
+async function loadLlmCycle(){
+  const results=await Promise.allSettled([
+    api("/api/v1/atlas/llm/cycle-schedule"),
+    api("/api/v1/atlas/llm/status"),
+    api("/api/v1/atlas/autonomous-policy-consensus")
+  ]);
+  if(results[0].status==="fulfilled")state.llmCycle=results[0].value;else console.warn("Gemini cycle refresh failed",results[0].reason);
+  if(results[1].status==="fulfilled")state.llmStatus=results[1].value;else console.warn("Gemini status refresh failed",results[1].reason);
+  if(results[2].status==="fulfilled")state.autoConsensus=results[2].value;else console.warn("Autonomous consensus refresh failed",results[2].reason);
+}
+async function loadResponsiveness(){
+  try{state.responsiveness=await api("/api/v1/atlas/scalping-responsiveness")}catch(e){console.warn("Responsiveness refresh failed",e)}
+}
+async function loadMarketCandles(){
+  try{state.candles=await api("/api/v1/atlas/market-candles")}catch(e){console.warn("Market candle refresh failed",e)}
+}
+async function loadZoneMap(){
+  try{state.zoneMap=await api("/api/v1/atlas/zone-map")}catch(e){console.warn("Zone map refresh failed",e)}
+}
+async function loadZonePlan(){
+  try{state.zonePlan=await api("/api/v1/atlas/zone-execution-plan");state.zonePlanLoadedAt=Date.now()}catch(e){console.warn("Zone execution plan refresh failed",e)}
+}
+async function saveLlmCycleSchedule(){
+  const interval=Number(document.getElementById("cycle-interval").value||240);
+  const enabled=document.getElementById("cycle-enabled").checked;
+  const execution_mode=document.getElementById("cycle-mode").value||"SUPERVISED";
+  const minimum_dwell_minutes=Number(document.getElementById("cycle-dwell").value||interval);
+  const minimum_confidence=Number(document.getElementById("cycle-confidence").value||70);
+  try{
+    state.llmCycle=await api("/api/v1/atlas/llm/cycle-schedule",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled,interval_minutes:interval,execution_mode,minimum_dwell_minutes,minimum_confidence})});
+    renderAll();toast(enabled?`Gemini ${execution_mode.toLowerCase()} cycle scheduled every ${interval} minutes.`:"Gemini schedule disabled.");
+  }catch(e){toast(e.message,true)}
+}
+async function runLlmCycleNow(){
+  try{
+    state.llmCycle=await jsonPost("/api/v1/atlas/llm/cycle-schedule/run-now",{});
+    renderAll();toast(state.llmCycle.claimed?"Gemini policy analysis started.":pretty(state.llmCycle.reason),!state.llmCycle.claimed);
+  }catch(e){toast(e.message,true)}
+}
+function reviewPayload(){
+  const p=state.proposal;return {reviewer:"Nobel",note:"Atlas Operator Control Center",expected_runtime_fingerprint:p.runtime_fingerprint,expected_proposed_policy_epoch:p.proposed_policy_epoch}
+}
+async function requestReview(){try{await jsonPost(`/api/v1/atlas/advisory-proposals/${state.proposal.proposal_id}/request-review`,reviewPayload());await loadReview();renderAll();toast("Review requested.")}catch(e){toast(e.message,true)}}
+async function approveCurrent(){try{await jsonPost(`/api/v1/atlas/advisory-proposals/${state.proposal.proposal_id}/approve`,reviewPayload());await loadReview();renderAll();toast("Proposal approved.")}catch(e){toast(e.message,true)}}
+async function rejectCurrent(){try{await jsonPost(`/api/v1/atlas/advisory-proposals/${state.proposal.proposal_id}/reject`,reviewPayload());await loadReview();renderAll();toast("Proposal rejected.")}catch(e){toast(e.message,true)}}
+async function buildSupervisedCommand(){
+  const p=state.proposal, review=state.review?.approval||state.review||{};
+  const hash=review.review_snapshot_hash||p.approval?.review_snapshot_hash;
+  try{
+    state.supervised=await jsonPost(`/api/v1/atlas/advisory-proposals/${p.proposal_id}/supervised-command-proposal`,{
+      reviewer:"Nobel",note:"Atlas Operator Control Center command package",
+      expected_runtime_fingerprint:p.runtime_fingerprint,expected_proposed_policy_epoch:p.proposed_policy_epoch,expected_review_snapshot_hash:hash
+    });
+    renderAll();go("control");toast("Supervised command package built.");
+  }catch(e){toast(e.message,true)}
+}
+function pkg(){return state.supervised?.supervised_command_proposal||state.supervised}
+async function loadArm(){
+  try{state.arm=await api("/api/v1/atlas/supervised-execution-arm")}catch(e){console.warn(e)}
+}
+async function armExecution(){
+  try{
+    state.arm=await jsonPost("/api/v1/atlas/supervised-execution-arm",{
+      actor:"Nobel",
+      confirmation_phrase:"ARM_SUPERVISED_EXECUTION",
+      minutes:30
+    });
+    renderAll();toast("Supervised execution armed for 30 minutes.");
+  }catch(e){toast(e.message,true)}
+}
+async function disarmExecution(){
+  try{
+    state.arm=await jsonPost("/api/v1/atlas/supervised-execution-arm/disarm",{actor:"Nobel"});
+    renderAll();toast("Supervised execution disarmed.");
+  }catch(e){toast(e.message,true)}
+}
+
+async function runPreflight(){
+  const p=pkg();if(!p)return;
+  try{state.preflight=await api(`/api/v1/atlas/supervised-command-proposals/${p.supervised_command_id}/execution-preflight`);renderAll();toast((state.preflight.ready_for_supervised_execution??state.preflight.ready_for_explicit_demo_execution)?"Preflight passed.":"Preflight returned blockers.",!(state.preflight.ready_for_supervised_execution??state.preflight.ready_for_explicit_demo_execution))}
+  catch(e){toast(e.message,true)}
+}
+function executePackage(){
+  const p=pkg();if(!p)return;
+  document.getElementById("modal-exec-summary").innerHTML=`Command <strong>${esc(text(p.command_preview?.hypothetical_command_version))}</strong> · Policy epoch <strong>${esc(text(p.command_preview?.target_policy_epoch))}</strong> · ${esc(text(p.command_preview?.runtime_control_count))} runtime controls.`;
+  document.getElementById("confirm-modal").classList.add("show")
+}
+function closeModal(){document.getElementById("confirm-modal").classList.remove("show")}
+async function confirmExecute(){
+  const p=pkg();const s=p.source||{},ctx=p.current_context||{};
+  try{
+    state.execution=await jsonPost(`/api/v1/atlas/supervised-command-proposals/${p.supervised_command_id}/execute`,{
+      actor:document.getElementById("modal-actor").value||"human_operator",
+      note:"Atlas Operator Control Center execution",
+      confirmation_phrase:"EXECUTE_SUPERVISED_COMMAND",
+      allow_test_override_execution:Boolean(s.test_override_active),
+      expected_source_proposal_id:s.proposal_id,
+      expected_runtime_fingerprint:s.runtime_fingerprint,
+      expected_target_policy_epoch:s.proposed_policy_epoch,
+      expected_review_snapshot_hash:s.review_snapshot_hash,
+      expected_baseline_command_version:ctx.baseline_command_version,
+      expected_baseline_policy_epoch:ctx.baseline_policy_epoch
+    });
+    closeModal();
+    await reconcileAuthoritativeState();
+    renderAll();renderControls();toast("Policy execution completed. Atlas state refreshed; waiting for Nyao acknowledgement.");
+  }catch(e){toast(e.message,true)}
+}
+function currentExecutionId(){
+  if(state.execution?.execution_id)return state.execution.execution_id;
+  const p=pkg();
+  const event=(state.executionEvents?.events||[]).find(e=>e.supervised_command_id===p?.supervised_command_id&&["EXECUTED","EXECUTED_RECOVERED"].includes(e.action));
+  return event?.execution_id||null;
+}
+async function reconcileAuthoritativeState(){
+  await loadCore();
+  await loadHistory();
+  await loadProposal();
+  await Promise.all([loadArm(),loadParameterIntelligence(),loadIntelligence(),loadResponsiveness(),loadMarketCandles(),loadZoneMap(),loadZonePlan()]);
+}
+async function refreshAck(){
+  const executionId=currentExecutionId();if(!executionId)return;
+  try{state.ack=await jsonPost(`/api/v1/atlas/supervised-executions/${executionId}/nyao-ack/refresh`,{});await reconcileAuthoritativeState();renderAll();renderControls();toast("Nyao acknowledgement: "+state.ack.state,badgeClass(state.ack.state)==="bad")}
+  catch(e){toast(e.message,true)}
+}
+
+function renderHistory(){
+  const a=state.audit||{};document.getElementById("h-audit").textContent=a.valid===true?"VALID":"—";document.getElementById("h-audit-count").textContent=a.checked_event_count==null?"—":`${a.checked_event_count} chained events`;
+  const eps=state.epochs?.epochs||state.epochs?.policy_epochs||[];document.getElementById("h-epochs").textContent=Array.isArray(eps)?eps.length:text(state.epochs?.count);
+  const outs=state.outcomes?.outcomes||state.outcomes?.closed||[];document.getElementById("h-outcomes").textContent=Array.isArray(outs)?outs.length:text(state.outcomes?.count);
+  const events=state.executionEvents?.events||[];
+  document.getElementById("execution-events").innerHTML=events.slice(0,16).map(e=>`<div class="event"><span class="muted">${esc((e.timestamp||"").replace("T"," ").slice(0,19))}</span><div><strong>${esc(pretty(e.action))}</strong><div class="muted mono">${esc(text(e.execution_id))}</div></div><span class="badge ${badgeClass(e.action)}">${esc(text(e.sequence))}</span></div>`).join("")||`<div class="callout">No execution events.</div>`;
+  document.getElementById("policy-epochs").innerHTML=(Array.isArray(eps)?eps.slice(-12).reverse():[]).map(e=>`<div class="event"><span class="muted">${esc(text(e.created_at||e.registered_at||""))}</span><div><strong>Epoch ${esc(text(e.policy_epoch??e.epoch))}</strong><div class="muted">Command ${esc(text(e.applied_command_version??e.command_version))}</div></div><span class="badge info">${esc(text(e.runtime_control_count??157))}</span></div>`).join("")||`<div class="callout">No policy epochs returned.</div>`;
+  document.getElementById("raw-diagnostics").textContent=JSON.stringify({audit:state.audit,latest_execution:events[0]||null,command:{command_version:state.command?.command_version,policy_epoch:state.command?.policy_epoch},status:{applied_command_version:state.status?.applied_command_version,policy_epoch:state.status?.policy_epoch}},null,2)
+}
+function renderAll(){updateChrome();renderOverview();renderLiveAnalysis();renderAnalysis();renderPositions();renderLlmCycle();renderAutonomousConsensus();renderResponsiveness();renderAtlas();renderParameterIntelligence();renderControl();renderHistory();if(!document.getElementById("runtime-controls").children.length)renderControls()}
+
+async function loadCore(){
+  const before=`${state.command?.command_version??""}:${state.command?.policy_epoch??""}:${state.status?.applied_command_version??""}:${state.status?.policy_epoch??""}`;
+  const [status,command]=await Promise.allSettled([api("/api/v1/nyao/status"),api("/api/v1/nyao/command")]);
+  if(status.status==="fulfilled")state.status=status.value;
+  if(command.status==="fulfilled")state.command=command.value;
+  const after=`${state.command?.command_version??""}:${state.command?.policy_epoch??""}:${state.status?.applied_command_version??""}:${state.status?.policy_epoch??""}`;
+  return before!==after;
+}
+async function loadIntelligence(){
+  try{state.intelligence=await api("/api/v1/atlas/intelligence")}catch(e){console.warn("Intelligence refresh failed",e)}
+}
+async function loadParameterIntelligence(){
+  try{state.parameterIntel=await api("/api/v1/atlas/parameter-intelligence")}catch(e){console.warn("Parameter intelligence refresh failed",e)}
+}
+async function loadProposal(){
+  try{const d=await api("/api/v1/atlas/advisory-proposal");state.proposal=d.proposal||d;await Promise.all([loadReview(),loadSupervised()])}catch(e){console.warn(e)}
+}
+async function loadHistory(){
+  const rs=await Promise.allSettled([
+    api("/api/v1/atlas/supervised-execution-events?limit=100"),
+    api("/api/v1/atlas/supervised-execution-events/verify"),
+    api("/api/v1/atlas/policy-epochs?limit=100"),
+    api("/api/v1/atlas/outcomes?closed_limit=100&include_active=true"),
+    api("/api/v1/atlas/policy-performance"),
+    api("/api/v1/atlas/autonomous-policy-applications?limit=50"),
+    api("/api/v1/atlas/risk-units"),
+    api("/api/v1/atlas/recovery-attribution"),
+    api("/api/v1/atlas/recovery-risk")
+  ]);
+  if(rs[0].status==="fulfilled")state.executionEvents=rs[0].value;
+  if(rs[1].status==="fulfilled")state.audit=rs[1].value;
+  if(rs[2].status==="fulfilled")state.epochs=rs[2].value;
+  if(rs[3].status==="fulfilled")state.outcomes=rs[3].value;
+  if(rs[4].status==="fulfilled")state.performance=rs[4].value;
+  if(rs[5].status==="fulfilled")state.autoApplications=rs[5].value;
+  if(rs[6].status==="fulfilled")state.riskUnits=rs[6].value;
+  if(rs[7].status==="fulfilled")state.recoveryAttribution=rs[7].value;
+  if(rs[8].status==="fulfilled")state.recoveryRisk=rs[8].value;
+}
+async function boot(){
+  try{
+    await loadSymbols();
+    await loadCore();
+    await loadRiskAppetite();
+    await loadIntelligence();
+    await loadParameterIntelligence();
+    await loadArm();
+    await loadLlmCycle();
+    await loadResponsiveness();
+    await loadMarketCandles();
+    await Promise.all([loadZoneMap(),loadZonePlan()]);
+    await loadProposal();
+    await loadHistory();
+    renderAll();
+    renderControls();
+  }catch(e){toast(e.message,true)}
+
+  setInterval(async()=>{const changed=await loadCore();await loadArm();if(changed){await loadHistory();await loadProposal()}renderAll()},2000);
+  setInterval(async()=>{await loadIntelligence();renderAll()},5000);
+  setInterval(async()=>{await loadLlmCycle();renderAll()},5000);
+  setInterval(async()=>{await loadResponsiveness();renderAll()},15000);
+  setInterval(async()=>{await loadMarketCandles();renderAll()},15000);
+  setInterval(async()=>{await loadZoneMap();renderAll()},15000);
+  setInterval(async()=>{await loadZonePlan();renderAll()},5000);
+  setInterval(async()=>{await loadParameterIntelligence();renderAll()},10000);
+  setInterval(async()=>{await loadSymbols();await loadProposal();renderAll()},10000);
+  setInterval(async()=>{await loadHistory();renderAll()},15000);
+  setInterval(()=>{if(state.zonePlan?.capital_sizing?.loss_protection?.state==="HARD_VETO"){const lp=state.zonePlan.capital_sizing.loss_protection;const loaded=Number(state.zonePlanLoadedAt||Date.now());lp.remaining_seconds=Math.max(0,Number(lp.remaining_seconds||0)-(Date.now()-loaded)/1000);state.zonePlanLoadedAt=Date.now();renderOverview();}},1000);
+}
+boot();
 </script>
 </body>
 </html>

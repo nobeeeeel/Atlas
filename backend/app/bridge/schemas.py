@@ -19,6 +19,9 @@ class SparseCommandModel(BaseModel):
 
 
 class Command(SparseCommandModel):
+    # Atlas-owned policy metadata. Callers may omit this; main.py owns increments.
+    policy_epoch: int = Field(default=1, ge=1)
+
     # Atlas master controls
     enabled: bool = True
     enable_buy_orders: bool = True
@@ -68,6 +71,7 @@ class Command(SparseCommandModel):
     max_trades_per_candle: int = Field(default=1, ge=0, le=20)
     consecutive_candle_threshold_boost: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     max_consecutive_candle_boosts: Optional[int] = Field(default=None, ge=0, le=100)
+    enable_duplicate_distance_filter: Optional[bool] = None
     zone_points: Optional[float] = Field(default=None, ge=0.0)
     buy_duplicate_multiplier: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     sell_duplicate_multiplier: Optional[float] = Field(default=None, ge=0.0, le=100.0)
@@ -210,7 +214,9 @@ class Command(SparseCommandModel):
 
 
 class PositionTelemetry(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    # Telemetry is producer-owned; preserve forward-compatible fields instead of
+    # silently deleting them at the Atlas bridge boundary.
+    model_config = ConfigDict(extra="allow")
 
     ticket: int = 0
     type: str = ""
@@ -229,6 +235,50 @@ class PositionTelemetry(BaseModel):
 
     managed: bool = False
     entry_signal_score: float = 0.0
+
+    # Authoritative Nyao entry-event telemetry for Atlas replay.
+    order_origin: str = ""
+    entry_gate_mode: str = ""
+    entry_evaluation_event: str = ""
+    entry_was_new_bar: bool = False
+    trades_on_entry_candle_before_this_entry: int = -1
+    total_trades_on_entry_candle_before_this_entry: int = -1
+    entry_policy_epoch: int = 0
+    zone_plan_id: str = ""
+    zone_layer: int = 0
+    identity_restored_from_registry: bool = False
+
+    management_policy_lock_active: bool = False
+    management_policy_source: str = ""
+    management_policy_resolved_epoch: int = 0
+    management_policy_min_health_score: float = 0.0
+    management_policy_health_grace_bars: int = 0
+    management_policy_enable_partial_close: bool = False
+    management_policy_enable_adaptive_tp: bool = False
+    management_policy_enable_adaptive_sl: bool = False
+    management_policy_trailing_distance_value: float = 0.0
+
+    recovery_policy_lock_active: bool = False
+    recovery_policy_source: str = ""
+    recovery_policy_resolved_epoch: int = 0
+    recovery_policy_enable_virtual_sl_reentry: bool = False
+    recovery_policy_reentry_min_signal_pct: float = 0.0
+    recovery_policy_enable_hedge_chain: bool = False
+    recovery_policy_hedge_trigger_atr: float = 0.0
+    recovery_policy_hedge_recovery_pct: float = 0.0
+    recovery_policy_hedge_max_lot: float = 0.0
+    recovery_policy_hedge_trail_atr: float = 0.0
+
+    trailing_policy_lock_active: bool = False
+    trailing_policy_source: str = ""
+    trailing_policy_resolved_epoch: int = 0
+    trailing_policy_enable_trailing: bool = False
+    trailing_policy_break_even_lock: bool = False
+    trailing_policy_profitable_only: bool = False
+    trailing_policy_ts_input_type: int = 0
+    trailing_policy_distance_value: float = 0.0
+    trailing_policy_value_multiplier: float = 0.0
+
     partial_close_level: int = 0
     break_even_locked: bool = False
 
@@ -240,8 +290,49 @@ class PositionTelemetry(BaseModel):
     hedge_lock_profit: float = 0.0
 
 
+class ExitDealTelemetry(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    sequence: int = 0
+    deal_ticket: int = 0
+    position_id: int = 0
+    order_ticket: int = 0
+    time_epoch: int = 0
+    time_msc: int = 0
+    deal_type: str = ""
+    deal_entry: str = ""
+    reason: str = ""
+    volume: float = 0.0
+    price: float = 0.0
+    profit: float = 0.0
+    swap: float = 0.0
+    commission: float = 0.0
+    fee: float = 0.0
+    net_pl: float = 0.0
+    position_still_open_after_deal: bool = False
+    full_close: bool = False
+    comment: str = ""
+
+    # P3.28 authoritative entry-side lifecycle metadata. These fields are
+    # emitted by Nyao for historical exit deals and must survive the bridge so
+    # Atlas can attribute outcomes to the policy that actually opened them.
+    entry_order_ticket: int = 0
+    entry_time_epoch: int = 0
+    entry_time_msc: int = 0
+    entry_price: float = 0.0
+    entry_volume: float = 0.0
+    original_position_type: str = ""
+    entry_comment: str = ""
+    entry_policy_epoch: int = 0
+    entry_order_origin: str = ""
+    entry_chain_id: int = 0
+    entry_hedge_level: int = 0
+    entry_zone_plan_id: str = ""
+    entry_zone_layer: int = 0
+
+
 class Status(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     # Connection / identity
     connected: bool = True
@@ -249,6 +340,11 @@ class Status(BaseModel):
     symbol: str = "XAUUSD"
 
     # Account
+    account_login: int = 0
+    account_server: str = ""
+    account_company: str = ""
+    account_currency: str = ""
+    account_trade_mode: int = 0
     balance: float = 0.0
     equity: float = 0.0
     floating_profit: float = 0.0
@@ -283,6 +379,27 @@ class Status(BaseModel):
     buy_notional_exposure: float = 0.0
     sell_notional_exposure: float = 0.0
     positions: List[PositionTelemetry] = Field(default_factory=list)
+    recent_exit_deals: List[ExitDealTelemetry] = Field(default_factory=list)
+    recent_exit_deal_count: int = 0
+    exit_deal_sequence: int = 0
+    policy_epoch: int = 1
+    trailing_policy_execution_enabled: bool = False
+    trailing_policy_execution_control_count: int = 0
+    trailing_policy_snapshot_count: int = 0
+
+    management_policy_execution_enabled: bool = False
+    management_policy_execution_control_count: int = 0
+    management_policy_snapshot_count: int = 0
+
+    recovery_policy_execution_enabled: bool = False
+    recovery_policy_execution_control_count: int = 0
+    position_sensitive_execution_control_count: int = 0
+    recovery_policy_snapshot_count: int = 0
+
+    position_identity_registry_enabled: bool = False
+    position_identity_registry_loaded_count: int = 0
+    position_identity_restore_count: int = 0
+    position_identity_restore_reject_count: int = 0
 
     # Hedge / recovery observability
     active_hedge_chains: int = 0
@@ -304,6 +421,35 @@ class Status(BaseModel):
     spread_points: float = 0.0
     effective_spread_cap_points: float = 0.0
     spread_within_limit: bool = True
+
+    # P3.29 dynamic scalp transaction-cost economics. The ordinary scalp lane
+    # adapts its executable SL/TP geometry to the live spread before capital
+    # sizing; the fixed spread setting is only an emergency outer ceiling.
+    scalp_cost_gate_version: str = ""
+    scalp_cost_gate_basis: str = ""
+    scalp_cost_limiting_factor: str = ""
+    scalp_cost_adjusted: bool = False
+    scalp_cost_feasible: bool = True
+    scalp_cost_headroom_multiplier: float = 1.0
+    scalp_base_stop_points: float = 0.0
+    scalp_base_target_points: float = 0.0
+    scalp_planned_stop_points: float = 0.0
+    scalp_planned_target_points: float = 0.0
+    scalp_spread_to_stop_ratio: float = 0.0
+    scalp_spread_to_target_ratio: float = 0.0
+    scalp_max_spread_stop_ratio: float = 0.0
+    scalp_max_spread_target_ratio: float = 0.0
+    scalp_cost_ratio_feasible: bool = True
+    scalp_structure_feasible: bool = True
+    scalp_structure_reason: str = ""
+    scalp_stop_expansion_ratio: float = 1.0
+    scalp_target_expansion_ratio: float = 1.0
+    scalp_planned_stop_atr_ratio: float = 0.0
+    scalp_spread_atr_ratio: float = 0.0
+    scalp_max_stop_expansion_ratio: float = 0.0
+    scalp_max_stop_atr_ratio: float = 0.0
+    scalp_max_spread_atr_ratio: float = 0.0
+
     current_atr: float = 0.0
     average_atr: float = 0.0
     atr_points: float = 0.0
@@ -357,6 +503,50 @@ class Status(BaseModel):
     atlas_enabled: bool = True
     atlas_buy_enabled: bool = True
     atlas_sell_enabled: bool = True
+    zone_execution_supported: bool = False
+    zone_execution_enabled: bool = False
+    zone_directive_fresh: bool = False
+    zone_mode_active: bool = False
+    zone_scalp_suspended: bool = False
+    zone_directive_state: str = "NOT_SUPPORTED"
+    zone_plan_id: str = ""
+    zone_map_id: str = ""
+    zone_side: str = "NONE"
+    zone_orders_submitted: int = 0
+    zone_last_execution_reason: str = "NOT_SUPPORTED"
+    zone_policy_epoch: int = 0
+    zone_policy_fingerprint: str = ""
+    zone_confirmation_score: float = 0.0
+    zone_confirmation_threshold: float = 0.0
+    zone_directional_score: float = 0.0
+    zone_minimum_directional_score: float = 0.0
+    zone_spread_within_limit: bool = True
+    zone_spread_price: float = 0.0
+    zone_effective_spread_cap_price: float = 0.0
+    zone_virtual_layer_execution: bool = False
+    zone_virtual_layers_waiting: int = 0
+    capital_sizing_active: bool = False
+    capital_sizing_version: str = ""
+    capital_veto_new_risk: bool = False
+    approved_scalp_risk_pct: float = 0.0
+    maximum_total_strategy_risk_pct: float = 0.0
+    recovery_sizing_version: str = ""
+    recovery_sizing_reason: str = "NOT_EVALUATED"
+    recovery_sizing_chain_id: int = 0
+    recovery_sizing_event_sequence: int = 0
+    recovery_sizing_evaluated_at_epoch: int = 0
+    recovery_requested_lot: float = 0.0
+    recovery_capital_capped_lot: float = 0.0
+    recovery_final_lot: float = 0.0
+    recovery_anchor_loss_usd: float = 0.0
+    recovery_original_unit_risk_usd: float = 0.0
+    recovery_unit_budget_multiplier: float = 0.0
+    recovery_portfolio_budget_usd: float = 0.0
+    recovery_budget_basis: str = ""
+    recovery_chain_budget_usd: float = 0.0
+    recovery_remaining_budget_usd: float = 0.0
+    recovery_target_move_price: float = 0.0
+    recovery_estimated_adverse_risk_usd: float = 0.0
     applied_command_version: int = -1
     structural_config_dirty: Optional[bool] = None
     last_global_block_reason: Optional[str] = None
@@ -408,6 +598,7 @@ class Status(BaseModel):
     runtime_max_trades_per_candle: Optional[int] = None
     runtime_consecutive_candle_threshold_boost: Optional[float] = None
     runtime_max_consecutive_candle_boosts: Optional[int] = None
+    runtime_enable_duplicate_distance_filter: Optional[bool] = None
     runtime_zone_points: Optional[float] = None
     runtime_buy_duplicate_multiplier: Optional[float] = None
     runtime_sell_duplicate_multiplier: Optional[float] = None
@@ -551,6 +742,16 @@ class Status(BaseModel):
     sell_entry_eligible: bool = False
     buy_block_reason: str = ""
     sell_block_reason: str = ""
+    buy_duplicate_reference_active: bool = False
+    sell_duplicate_reference_active: bool = False
+    buy_duplicate_blocked: bool = False
+    sell_duplicate_blocked: bool = False
+    buy_duplicate_reference_ticket: int = 0
+    sell_duplicate_reference_ticket: int = 0
+    buy_duplicate_distance_points: float = 0.0
+    sell_duplicate_distance_points: float = 0.0
+    buy_duplicate_required_distance_points: float = 0.0
+    sell_duplicate_required_distance_points: float = 0.0
     new_bar_entry_only: bool = False
     new_bar_ready: bool = False
     cooldown_active: bool = False
@@ -564,6 +765,10 @@ class Status(BaseModel):
     last_order_retcode: int = 0
     last_order_ticket: int = 0
     last_order_time_epoch: int = 0
+    terminal_algo_trading_allowed: Optional[bool] = None
+    ea_trading_allowed: Optional[bool] = None
+    account_trade_allowed: Optional[bool] = None
+    account_expert_trading_allowed: Optional[bool] = None
 
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
