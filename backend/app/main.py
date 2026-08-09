@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 
@@ -2320,6 +2320,8 @@ DASHBOARD_TEMPLATE = r"""
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Atlas Operator Control Center</title>
+<link rel="icon" type="image/png" sizes="64x64" href="/assets/atlas-favicon.png">
+<link rel="apple-touch-icon" href="/assets/atlas-app-icon.png">
 <style>
 :root{
   color-scheme:dark;
@@ -2336,7 +2338,7 @@ button{cursor:pointer}
 .shell{display:grid;grid-template-columns:238px 1fr;min-height:100vh}
 .sidebar{position:sticky;top:0;height:100vh;border-right:1px solid var(--border);padding:24px 18px;background:#0b0f16}
 .brand{display:flex;gap:12px;align-items:center;margin-bottom:28px;padding:0 8px}
-.logo{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(145deg,#263652,#121a28);font-weight:800;letter-spacing:.05em}
+.logo{width:42px;height:42px;border-radius:12px;display:block;object-fit:cover;background:#0b1119;box-shadow:0 0 0 1px rgba(126,174,255,.18) inset}
 .brand h1{font-size:16px;margin:0}.brand small{display:block;color:var(--muted);margin-top:2px}
 .nav{display:grid;gap:6px}
 .nav button{border:0;background:transparent;color:var(--muted);padding:11px 12px;border-radius:11px;text-align:left;font-weight:650}
@@ -2436,7 +2438,7 @@ details.raw summary{cursor:pointer;color:var(--muted);font-weight:650}pre{white-
   --radius:16px;--shadow:0 14px 45px rgba(0,0,0,.22)
 }
 body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transparent 32%),var(--bg)}
-.shell{grid-template-columns:214px 1fr}.sidebar{padding:22px 14px;background:#090d13}.brand{margin-bottom:34px}.logo{background:linear-gradient(145deg,#3f69a5,#172438);box-shadow:0 0 0 1px rgba(126,174,255,.18) inset}.brand small{font-size:10px;letter-spacing:.04em}
+.shell{grid-template-columns:214px 1fr}.sidebar{padding:22px 14px;background:#090d13}.brand{margin-bottom:34px}.logo{box-shadow:0 0 0 1px rgba(126,174,255,.18) inset,0 8px 24px rgba(0,0,0,.24)}.brand small{font-size:10px;letter-spacing:.04em}
 .nav{gap:4px}.nav button{position:relative;padding:10px 12px 10px 38px;font-size:13px}.nav button:before{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:16px;text-align:center;color:#627188;font-size:11px}.nav button[data-view="overview"]:before{content:"●"}.nav button[data-view="market"]:before{content:"∿"}.nav button[data-view="analysis"]:before{content:"◇"}.nav button[data-view="positions"]:before{content:"▤"}.nav button[data-view="atlas"]:before{content:"✦"}.nav button[data-view="control"]:before{content:"⌁"}.nav button[data-view="history"]:before{content:"◷"}.nav button.active:after{content:"";position:absolute;left:0;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--blue)}
 .connection{background:linear-gradient(145deg,#0e1721,#0a1017)}.topbar{height:64px;padding:0 28px}.top-meta #epoch-pill,.top-meta #command-pill{display:none}.content{padding:24px 28px 60px;max-width:1480px}.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.page-head h2{font-size:22px;letter-spacing:-.02em}.page-head p{font-size:12px}.card{box-shadow:none;background:linear-gradient(145deg,rgba(17,24,35,.98),rgba(13,19,28,.98))}.section{margin-top:14px}
 .hero{display:block;padding:0;overflow:hidden;border-color:#2b4260;background:linear-gradient(120deg,rgba(31,63,99,.32),rgba(14,21,31,.98) 52%)}
@@ -2454,7 +2456,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 <body>
 <div class="shell">
   <aside class="sidebar">
-    <div class="brand"><div class="logo">A</div><div><h1>Atlas</h1><small>Adaptive Trading Intelligence</small></div></div>
+    <div class="brand"><img class="logo" src="/assets/atlas-sidebar-icon.png" alt="Atlas"><div><h1>Atlas</h1><small>Adaptive Trading Intelligence</small></div></div>
     <nav class="nav">
       <button class="active" data-view="overview">Command Center</button>
       <button data-view="market">Market Analysis</button>
@@ -4292,6 +4294,21 @@ boot();
 </body>
 </html>
 """
+
+
+ASSET_DIR = Path(__file__).resolve().parent / "assets"
+
+
+@app.get("/assets/{asset_name}")
+def atlas_asset(asset_name: str):
+    allowed = {
+        "atlas-favicon.png",
+        "atlas-sidebar-icon.png",
+        "atlas-app-icon.png",
+    }
+    if asset_name not in allowed:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return FileResponse(ASSET_DIR / asset_name, media_type="image/png")
 
 
 @app.get("/dashboard", response_class=HTMLResponse)

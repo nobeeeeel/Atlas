@@ -30,5 +30,7 @@ external/nyao/settings.dat
 .DS_Store
 Thumbs.db
 
+scripts/
+
 
 .gitignore
