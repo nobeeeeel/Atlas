@@ -2470,20 +2470,20 @@ DASHBOARD_TEMPLATE = r"""
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 button,input,select,textarea{font:inherit}
 button{cursor:pointer}
-.shell{display:grid;grid-template-columns:238px 1fr;min-height:100vh}
-.sidebar{position:sticky;top:0;height:100vh;border-right:1px solid var(--border);padding:24px 18px;background:#0b0f16}
+.shell{display:grid;grid-template-columns:238px minmax(0,1fr);min-height:100vh;overflow:hidden}
+.sidebar{position:sticky;top:0;height:100vh;border-right:1px solid var(--border);padding:24px 18px;background:#0b0f16;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;z-index:30}
 .brand{display:flex;gap:12px;align-items:center;margin-bottom:28px;padding:0 8px}
 .logo{width:42px;height:42px;border-radius:12px;display:block;object-fit:cover;background:#0b1119;box-shadow:0 0 0 1px rgba(126,174,255,.18) inset}
 .brand h1{font-size:16px;margin:0}.brand small{display:block;color:var(--muted);margin-top:2px}
-.nav{display:grid;gap:6px}
+.nav{display:grid;gap:6px;min-width:0}
 .nav button{border:0;background:transparent;color:var(--muted);padding:11px 12px;border-radius:11px;text-align:left;font-weight:650}
 .nav button:hover,.nav button.active{background:#151d29;color:var(--text)}
-.sidebar-bottom{position:absolute;bottom:22px;left:18px;right:18px}
+.sidebar-bottom{position:static;margin-top:auto;padding-top:18px}
 .connection{padding:12px;border:1px solid var(--border);background:var(--panel3);border-radius:12px}
 .row{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}.dot.ok{background:var(--green)}.dot.bad{background:var(--red)}
-.main{min-width:0}
-.topbar{height:74px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);padding:0 30px;position:sticky;top:0;background:rgba(8,11,17,.93);backdrop-filter:blur(15px);z-index:20}
+.main{min-width:0;position:relative;overflow-x:hidden;isolation:isolate}
+.topbar{height:74px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);padding:0 30px;position:sticky;top:0;background:rgba(8,11,17,.93);backdrop-filter:blur(15px);z-index:20;overflow:hidden}
 .title{font-size:18px;font-weight:750}.subtitle{color:var(--muted);font-size:12px;margin-top:2px}
 .top-meta{display:flex;gap:10px;align-items:center}
 .pill{border:1px solid var(--border);background:var(--panel);padding:7px 10px;border-radius:999px;color:var(--soft);font-size:12px}
@@ -2585,7 +2585,7 @@ details.raw summary{cursor:pointer;color:var(--muted);font-weight:650}pre{white-
 }
 body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transparent 32%),var(--bg)}
 .shell{grid-template-columns:214px 1fr}.sidebar{padding:22px 14px;background:#090d13}.brand{margin-bottom:34px}.logo{box-shadow:0 0 0 1px rgba(126,174,255,.18) inset,0 8px 24px rgba(0,0,0,.24)}.brand small{font-size:10px;letter-spacing:.04em}
-.nav{gap:4px}.nav button{position:relative;padding:10px 12px 10px 38px;font-size:13px}.nav button:before{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:16px;text-align:center;color:#627188;font-size:11px}.nav button[data-view="overview"]:before{content:"●"}.nav button[data-view="market"]:before{content:"∿"}.nav button[data-view="analysis"]:before{content:"◇"}.nav button[data-view="positions"]:before{content:"▤"}.nav button[data-view="performance"]:before{content:"▥"}.nav button[data-view="atlas"]:before{content:"✦"}.nav button[data-view="control"]:before{content:"⌁"}.nav button[data-view="history"]:before{content:"◷"}.nav button.active:after{content:"";position:absolute;left:0;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--blue)}
+.nav{gap:4px}.nav button{position:relative;padding:10px 12px 10px 38px;font-size:13px}.nav button:before{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:16px;text-align:center;color:#627188;font-size:11px}.nav button[data-view="overview"]:before{content:"●"}.nav button[data-view="market"]:before{content:"∿"}.nav button[data-view="analysis"]:before{content:"◇"}.nav button[data-view="positions"]:before{content:"▤"}.nav button[data-view="performance"]:before{content:"▥"}.nav button[data-view="atlas"]:before{content:"✦"}.nav button[data-view="control"]:before{content:"⌁"}.nav button[data-view="history"]:before{content:"◷"}.nav button[data-view="help"]:before{content:"?"}.nav button.active:after{content:"";position:absolute;left:0;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--blue)}
 .connection{background:linear-gradient(145deg,#0e1721,#0a1017)}.topbar{height:64px;padding:0 28px}.top-meta #epoch-pill,.top-meta #command-pill{display:none}.content{padding:24px 28px 60px;max-width:1480px}.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.page-head h2{font-size:22px;letter-spacing:-.02em}.page-head p{font-size:12px}.card{box-shadow:none;background:linear-gradient(145deg,rgba(17,24,35,.98),rgba(13,19,28,.98))}.section{margin-top:14px}
 .hero{display:block;padding:0;overflow:hidden;border-color:#2b4260;background:linear-gradient(120deg,rgba(31,63,99,.32),rgba(14,21,31,.98) 52%)}
 .command-hero{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(330px,.8fr);min-height:210px}.command-primary{padding:24px 26px;display:flex;flex-direction:column;justify-content:space-between}.command-side{padding:18px;border-left:1px solid rgba(110,168,255,.16);background:rgba(5,10,16,.28)}.mode-line{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.mode-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 5px rgba(72,221,164,.09)}.hero-status{font-size:31px;letter-spacing:-.035em;margin:13px 0 7px}.hero-copy{font-size:13px;max-width:760px}.hero-foot{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-top:20px;color:var(--soft);font-size:12px}.hero-foot strong{color:var(--text)}
@@ -2638,7 +2638,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 @media(max-width:700px){.consensus-overview,.consensus-value-grid{grid-template-columns:1fr}.consensus-card-head{flex-direction:column}.consensus-gate{grid-template-columns:1fr}}
 
 /* Information architecture refresh — Atlas 1.30.44 */
-.global-status-strip{position:sticky;top:64px;z-index:19;display:flex;align-items:stretch;padding:0 26px;background:rgba(7,11,17,.96);border-bottom:1px solid var(--border);backdrop-filter:blur(14px);overflow-x:auto}
+.global-status-strip{position:sticky;top:64px;z-index:19;display:flex;align-items:stretch;padding:0 26px;background:rgba(7,11,17,.96);border-bottom:1px solid var(--border);backdrop-filter:blur(14px);overflow-x:auto;overflow-y:hidden}
 .global-status-strip button{appearance:none;background:transparent;border:0;border-right:1px solid var(--border);padding:10px 15px;color:var(--text);font:inherit;display:flex;align-items:center;gap:8px;white-space:nowrap;cursor:pointer}
 .global-status-strip button:first-child{border-left:1px solid var(--border)}.global-status-strip button:hover{background:rgba(84,140,220,.08)}
 .global-status-strip strong{font-size:11px}.global-label{font-size:8px;letter-spacing:.11em;color:var(--muted)}
@@ -2678,7 +2678,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 .zone-card.invalidated{opacity:.82;border-color:rgba(255,91,116,.28);background:linear-gradient(90deg,rgba(255,91,116,.045),var(--panel3) 36%)}
 .zone-plan.invalidated{border-color:rgba(255,91,116,.35);background:linear-gradient(90deg,rgba(255,91,116,.05),var(--panel2) 45%)}
 
-/* Atlas Help & Guide — 1.30.44 */
+/* Atlas Help & Guide — 1.30.47 */
 .help-hero{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(280px,.7fr);gap:14px;align-items:stretch}
 .help-hero-copy{padding:24px}.help-hero-copy h3{font-size:22px;margin:0 0 8px}.help-hero-copy p{max-width:840px;line-height:1.7}
 .help-search-wrap{display:flex;gap:10px;align-items:center;margin-top:16px}.help-search-wrap .search{flex:1;min-width:0}
@@ -2725,306 +2725,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 
 
 
-      <section id="view-help" class="view">
-        <div class="page-head"><div><h2>Help & Atlas Guide</h2><p>The complete operator handbook for understanding the dashboard, trading states, risk, zones, Nyao execution and Atlas Brain.</p></div><span class="badge info">START HERE</span></div>
 
-        <div class="help-hero">
-          <div class="card help-hero-copy">
-            <div class="label">Atlas operator handbook</div>
-            <h3>Understand what Atlas is telling you — and what it is not.</h3>
-            <p>Atlas separates <strong>market interpretation</strong>, <strong>deterministic risk authority</strong>, <strong>Nyao execution</strong>, and <strong>Gemini policy learning</strong>. This guide explains the dashboard in that same order so a new operator can understand why a trade is or is not allowed without reading the source code.</p>
-            <div class="help-flow"><span>Market evidence</span><b>→</b><span>Atlas risk & zone authority</span><b>→</b><span>Nyao execution gates</span><b>→</b><span>Position lifecycle</span><b>→</b><span>Performance evidence</span><b>→</b><span>Gemini policy learning</span></div>
-            <div class="help-search-wrap"><input id="help-search" class="search" placeholder="Search: spread cap, zone invalidated, lifecycle P/L, consensus, MFE…" oninput="filterHelp(this.value)"><button class="btn" onclick="clearHelpSearch()">Clear</button></div>
-            <div class="help-version">Guide aligned to Atlas 1.30.44 · Nyao 44.5.3</div>
-          </div>
-          <div class="card help-quick">
-            <div class="label">Jump to a live workspace</div>
-            <button class="btn" onclick="go('overview')">Command Center · What matters now</button>
-            <button class="btn" onclick="go('market')">Market · Signals & execution economics</button>
-            <button class="btn" onclick="go('analysis')">Zone Analysis · Trade locations & lifecycle</button>
-            <button class="btn" onclick="go('positions')">Portfolio · Exposure & risk allocation</button>
-            <button class="btn" onclick="go('performance')">Performance · Strategic outcomes</button>
-            <button class="btn" onclick="go('atlas')">Atlas Brain · Gemini & policies</button>
-            <button class="btn" onclick="go('control')">Settings · Operator controls</button>
-            <button class="btn" onclick="go('history')">System & Audit · Authoritative history</button>
-          </div>
-        </div>
-
-        <div id="help-no-results" class="help-empty">No Help topics match that search.</div>
-
-        <details class="help-section help-searchable" open data-help="start basics architecture atlas nyao gemini authority">
-          <summary><span>1 · Start here — how Atlas is structured</span><span class="badge ok">FOUNDATION</span></summary>
-          <div class="help-section-body">
-            <div class="help-grid three">
-              <div class="help-card"><h4>Atlas</h4><p>The orchestration, market-context and deterministic risk layer. Atlas builds zone maps, capital envelopes, risk reservations, policy evidence and instructions for Nyao. It may reduce or veto risk but cannot manufacture broker feasibility.</p></div>
-              <div class="help-card"><h4>Nyao</h4><p>The MT5 Expert Advisor and final execution authority. Nyao evaluates live BUY/SELL signals, broker constraints, actual lot sizing, order placement, position management, recovery and telemetry.</p></div>
-              <div class="help-card"><h4>Gemini / Atlas Brain</h4><p>The reasoning and policy-learning layer. Gemini can propose changes to the Nyao runtime policy. Deterministic validation, consensus, dwell, position locks and operator mode decide whether those proposals can become active.</p></div>
-            </div>
-            <div class="help-callout"><strong>Important:</strong> a Gemini opinion is not an order. A zone is not automatically a trade. A high signal score is not enough by itself. New risk is allowed only when every applicable deterministic gate agrees.</div>
-            <dl>
-              <div class="help-definition"><dt>Policy epoch</dt><dd>A durable version of the Nyao runtime policy. Existing positions keep the management/recovery policy from their entry epoch so later policy changes do not rewrite their lifecycle.</dd></div>
-              <div class="help-definition"><dt>Command version</dt><dd>The bridge package version requested by Atlas and acknowledged by Nyao. It is execution synchronization, not the same thing as a policy epoch.</dd></div>
-              <div class="help-definition"><dt>Selected symbol</dt><dd>Every workspace is scoped to the currently selected instrument. Account-level cards can still reflect the MT5 account as a whole.</dd></div>
-              <div class="help-definition"><dt>Authoritative vs diagnostic</dt><dd>Authoritative values drive execution/risk. Diagnostic values explain behavior and learning but do not independently permit a trade.</dd></div>
-            </dl>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="command center overview opportunity queue decision timeline balance equity system health campaign">
-          <summary><span>2 · Command Center</span><span class="badge info">DAILY HOME</span></summary>
-          <div class="help-section-body">
-            <div class="help-callout">Use this page first. It answers: <strong>What mode is Atlas in? Is anything actionable? What is blocking execution? What risk is being used?</strong> Detailed diagnostics live in the specialist workspaces.</div>
-            <div class="help-grid">
-              <div class="help-card"><h4>Operating mode hero</h4><p><strong>Trading mode</strong> tells you whether normal scalping, zone-aware scalping or zone campaign execution currently owns fresh-entry authority. <strong>Campaign risk</strong> is the current zone campaign risk envelope when applicable. <strong>Live / staged</strong> summarizes campaign layers. <strong>Next Brain review</strong> shows the scheduled Gemini review cadence.</p></div>
-              <div class="help-card"><h4>Account strip</h4><p><strong>Balance</strong> is closed-account value. <strong>Equity</strong> includes floating P/L. <strong>Open P/L</strong> is current mark-to-market. <strong>Drawdown</strong> is decline from tracked peak equity. <strong>Live market</strong> shows current price and spread. <strong>System health</strong> reflects bridge/Nyao synchronization.</p></div>
-              <div class="help-card"><h4>Opportunity Queue</h4><p>Each row is a possible fresh opportunity. <strong>WATCHING</strong> means a prerequisite such as score is not met. <strong>QUALIFYING</strong> means the base setup passed but an extra contextual gate remains. <strong>READY</strong> means the displayed deterministic opportunity gates pass. <strong>BLOCKED</strong> is reserved for a real veto.</p></div>
-              <div class="help-card"><h4>Decision Timeline</h4><p>A compact event log of material state transitions: signal eligibility, cost gates, zone handoffs, risk reservations, policy application and trade lifecycle events. It is intentionally not every polling refresh.</p></div>
-              <div class="help-card"><h4>Operator attention</h4><p>A synthesized “what needs attention now” card. It prioritizes synchronization failures, capital vetoes, execution blockers and material lifecycle changes over ordinary monitoring states.</p></div>
-              <div class="help-card"><h4>Active trade plan</h4><p>Shows either the current zone campaign ladder, a zone-aware scalp fallback, or ordinary scalp gates. <strong>LIVE</strong> layers are already exposed; <strong>STAGED</strong> layers are admitted but not filled; <strong>PLANNED</strong> layers are geometry only.</p></div>
-            </div>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="market signals buy sell score evaluated threshold blocker spread cost atr volatility regime confidence">
-          <summary><span>3 · Market — signals, gates and execution economics</span><span class="badge info">LIVE EVIDENCE</span></summary>
-          <div class="help-section-body">
-            <dl>
-              <div class="help-definition"><dt>BUY / SELL score</dt><dd>Nyao's raw directional evidence score built from trend, momentum, chop, peak, volatility, impulse and other configured components.</dd></div>
-              <div class="help-definition"><dt>Evaluated / adjusted score</dt><dd>The score after applicable runtime adjustments such as dampening, position pressure or contextual modifiers. This is the value compared with the effective threshold.</dd></div>
-              <div class="help-definition"><dt>Threshold</dt><dd>The minimum evaluated score required before the direction can proceed to later gates. Reaching threshold does not bypass cost, capital, duplicate-distance, cooldown, zone or broker checks.</dd></div>
-              <div class="help-definition"><dt>BUY / SELL state</dt><dd>Human-readable result of the current gate chain. A low score should normally appear as watching rather than a deterministic block.</dd></div>
-              <div class="help-definition"><dt>Global blocker</dt><dd>A market-wide veto affecting both directions, such as trading pause, account safety, committed zone ownership or another global execution condition.</dd></div>
-              <div class="help-definition"><dt>New-bar gate</dt><dd>Whether entry is restricted to a new candle. When disabled, qualified intrabar entries may be evaluated.</dd></div>
-              <div class="help-definition"><dt>Cooldown</dt><dd>Temporary protection after configured loss sequences or other timing conditions. It prevents repeated immediate re-entry.</dd></div>
-              <div class="help-definition"><dt>Spread gate</dt><dd>Whether the current bid/ask cost is acceptable for the active strategy geometry. Scalp and zone campaigns use separate economics.</dd></div>
-              <div class="help-definition"><dt>Market bias</dt><dd>Atlas's current directional interpretation. It explains context; it is not execution authority by itself.</dd></div>
-              <div class="help-definition"><dt>Volatility / volatility ratio</dt><dd>Current ATR conditions compared with recent average ATR. The ratio helps Atlas scale risk and judge whether current movement is unusual.</dd></div>
-              <div class="help-definition"><dt>Execution fit</dt><dd>Whether current market geometry and cost are suitable for the strategy. A strong directional thesis can still have poor execution fit.</dd></div>
-              <div class="help-definition"><dt>Risk state</dt><dd>Atlas's deterministic risk classification after drawdown, loss streak, volatility and other safety modifiers.</dd></div>
-              <div class="help-definition"><dt>Bid / ask gap</dt><dd>The actual spread expressed in price terms for easier comparison with stop/target geometry.</dd></div>
-              <div class="help-definition"><dt>Economic spread cap</dt><dd>The adaptive maximum spread justified by the current strategy geometry. It is not the same as the old static `MaxSpreadPoints` ceiling.</dd></div>
-              <div class="help-definition"><dt>Spread / cap</dt><dd>Cost pressure relative to the adaptive cap. Above 1.0 means current cost exceeds the allowed economic envelope.</dd></div>
-              <div class="help-definition"><dt>Entry eligible</dt><dd>Final direction-level eligibility after the current chain of Nyao gates. Broker order placement can still fail after this if the broker rejects an order.</dd></div>
-            </dl>
-            <div class="help-callout warn"><strong>Common cost reasons:</strong> <code>STOP_EXPANSION_EXCESSIVE</code> means spread forces the planned protective structure to expand too far; <code>STOP_AND_TARGET</code> indicates both stop and target economics constrain the setup. These mean the idea may be directionally valid but economically poor to execute.</div>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="zone analysis fvg order block support resistance supply demand fresh mitigated invalidated lifecycle zone aware campaign invalidation spread confirmation">
-          <summary><span>4 · Zone Analysis — locations, lifecycle and execution handoff</span><span class="badge info">STRUCTURE</span></summary>
-          <div class="help-section-body">
-            <div class="help-grid three">
-              <div class="help-card"><h4>FVG</h4><p>Fair Value Gap detected from three-candle displacement geometry. Atlas stores side, bounds, age, width in ATR and mitigation/invalidation state.</p></div>
-              <div class="help-card"><h4>Order Block</h4><p>Last opposing candle before qualifying displacement. It becomes a demand or supply location depending on displacement direction.</p></div>
-              <div class="help-card"><h4>Support / Resistance</h4><p>Repeated closed-candle pivot reactions clustered into a structural zone.</p></div>
-            </div>
-            <div class="help-flow"><span>FRESH</span><b>→ touch</b><span>MITIGATED</span><b>→ later close beyond boundary</b><span>INVALIDATED</span><b>→</b><span>ARCHIVED</span></div>
-            <dl>
-              <div class="help-definition"><dt>Demand / BUY zone</dt><dd>A structural area expected to provide buying support. Deterministic invalidation occurs when a later relevant closed candle finishes below the zone low.</dd></div>
-              <div class="help-definition"><dt>Supply / SELL zone</dt><dd>A structural area expected to provide selling pressure. Deterministic invalidation occurs when a later relevant closed candle finishes above the zone high.</dd></div>
-              <div class="help-definition"><dt>FRESH</dt><dd>Detected and not materially revisited.</dd></div>
-              <div class="help-definition"><dt>MITIGATED</dt><dd>Price has interacted with the zone but the structural boundary still holds. A wick beyond the boundary does not invalidate it.</dd></div>
-              <div class="help-definition"><dt>INVALIDATED</dt><dd>A later closed candle has closed beyond the technical boundary. The zone is removed from fresh priority selection but retained in invalidated-zone history.</dd></div>
-              <div class="help-definition"><dt>Zone score</dt><dd>Relative structural quality using timeframe, age, touches, geometry, confluence and zone-type evidence. It ranks zones; it does not by itself permit entry.</dd></div>
-              <div class="help-definition"><dt>Width ATR</dt><dd>Zone width normalized by ATR. Helps Atlas reject zones that are too broad for the current timeframe/structure model.</dd></div>
-              <div class="help-definition"><dt>Confluence</dt><dd>Other zones/structures overlapping the location, such as H4 Order Block plus H4 Support/Resistance. Confluence can strengthen location quality.</dd></div>
-              <div class="help-definition"><dt>Touch count</dt><dd>Number of historical interactions detected after creation. It is lifecycle evidence, not simply “more is better.”</dd></div>
-              <div class="help-definition"><dt>Invalidating close</dt><dd>The closed-candle price that crossed the technical boundary and caused invalidation.</dd></div>
-              <div class="help-definition"><dt>Invalidation penetration / ATR</dt><dd>How far the invalidating close finished beyond the boundary, both in price units and ATR-normalized form.</dd></div>
-              <div class="help-definition"><dt>Zone-aware scalp</dt><dd>The zone remains context while Nyao retains fresh scalp authority. Aligned scalps use normal gates; counter-zone scalps need stronger evidence and reduced risk.</dd></div>
-              <div class="help-definition"><dt>Zone-aligned scalp</dt><dd>A scalp in the same direction as the current source zone, e.g. SELL inside a SELL/supply context.</dd></div>
-              <div class="help-definition"><dt>Counter-zone scalp</dt><dd>A scalp against the current zone direction. It is conditionally allowed, not automatically blocked. It receives stricter evidence/risk rules and can be blocked near campaign commitment.</dd></div>
-              <div class="help-definition"><dt>ZONE_ENTRY_CONFIRMED</dt><dd>Campaign confirmation gates have passed and fresh scalp authority may be suspended while Atlas attempts to establish the zone campaign.</dd></div>
-              <div class="help-definition"><dt>ZONE_CAMPAIGN_ACTIVE</dt><dd>Actual `ATLAS_ZONE` exposure exists for the plan. Campaign lineage is now authoritative and the plan is managed as one composite risk unit.</dd></div>
-              <div class="help-definition"><dt>ZONE_CAMPAIGN_INVALIDATED_MANAGEMENT</dt><dd>The source zone failed after campaign exposure already existed. Existing positions remain managed, but no new campaign layers may open.</dd></div>
-              <div class="help-definition"><dt>Zone spread cap</dt><dd>Dedicated campaign spread economics computed from campaign stop/target geometry. It is separate from the scalp spread cap.</dd></div>
-              <div class="help-definition"><dt>Campaign lock</dt><dd>True only when actual exposure belonging to that exact zone plan exists. Unrelated scalp/recovery positions must not lock a zone campaign.</dd></div>
-            </dl>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="portfolio positions volume realized floating lifecycle risk allocation reservation operating ceiling hard ceiling recovery chain">
-          <summary><span>5 · Portfolio — exposure, lifecycle P/L and risk allocation</span><span class="badge info">CAPITAL</span></summary>
-          <div class="help-section-body">
-            <div class="help-grid three">
-              <div class="help-card"><h4>Strategy positions</h4><p>Number of Atlas/Nyao-managed open MT5 positions for the selected strategy/symbol.</p></div>
-              <div class="help-card"><h4>Total lots remaining</h4><p>Current still-open volume. After partial closes this is lower than the original volume.</p></div>
-              <div class="help-card"><h4>Recovery chains</h4><p>Active root + hedge-child composites being managed as one strategic risk unit.</p></div>
-              <div class="help-card"><h4>Realized while active</h4><p>Exact P/L already realised from partial exits while the position/composite is still open.</p></div>
-              <div class="help-card"><h4>Floating P/L</h4><p>Current MT5 mark-to-market of remaining open volume.</p></div>
-              <div class="help-card"><h4>Active lifecycle P/L</h4><p><strong>Realised while active + floating P/L.</strong> This is the best current economic picture of an unfinished lifecycle.</p></div>
-            </div>
-            <div class="help-callout"><strong>Risk allocation reconciliation:</strong> Operating ceiling = active reservations + prospective zone priority reservation + free operating risk. Hard-ceiling headroom is shown separately because it is not necessarily deployable immediately.</div>
-            <dl>
-              <div class="help-definition"><dt>Portfolio hard ceiling</dt><dd>The operator-owned maximum aggregate Atlas risk percentage converted to money. Atlas/Gemini may reduce deployment but cannot raise this ceiling.</dd></div>
-              <div class="help-definition"><dt>Operating risk ceiling</dt><dd>The currently deployable aggregate risk envelope after deterministic modifiers such as loss streak, volatility, drawdown and risk state.</dd></div>
-              <div class="help-definition"><dt>Active reservation</dt><dd>Risk capacity already committed to an active standalone trade, recovery chain or zone campaign. Recovery chains reserve their frozen chain ceiling rather than only current floating loss.</dd></div>
-              <div class="help-definition"><dt>Prospective zone reservation</dt><dd>Capacity preserved for a strong zone campaign before its first fill. It prevents unrelated scalp risk from consuming campaign headroom.</dd></div>
-              <div class="help-definition"><dt>Free operating risk</dt><dd>Operating capacity left after active and prospective reservations. This is not necessarily the risk of the next trade; per-opportunity caps still apply.</dd></div>
-              <div class="help-definition"><dt>Hard headroom</dt><dd>Unused portion of the operator hard ceiling. It can be larger than free operating risk because Atlas may intentionally operate below the hard limit.</dd></div>
-              <div class="help-definition"><dt>Volume 0.06 / 0.17</dt><dd>Remaining volume / original volume. In this example 0.11 lots have already been closed.</dd></div>
-              <div class="help-definition"><dt>Realized</dt><dd>Exact MT5 realised net P/L already attached to partial exit deals for this still-active lifecycle.</dd></div>
-              <div class="help-definition"><dt>Lifecycle</dt><dd>Realized-so-far plus current floating P/L. It remains provisional until the entire strategic unit is flat.</dd></div>
-              <div class="help-definition"><dt>Context / Origin</dt><dd>How the trade entered: e.g. `FRESH_MARKET`, `FRESH_LIMIT`, `HEDGE_CHILD`, `ATLAS_ZONE`, or contextual classifications such as `ZONE_ALIGNED_SCALP` / `COUNTER_ZONE_SCALP`.</dd></div>
-              <div class="help-definition"><dt>Policy epoch</dt><dd>The runtime policy locked at entry for lifecycle attribution and position-sensitive management.</dd></div>
-              <div class="help-definition"><dt>Quality</dt><dd>Outcome-lineage quality, indicating whether realised values and entry identity are exact or partly reconstructed/inferred.</dd></div>
-            </dl>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="performance expectancy win rate profit factor drawdown risk units recovery zone campaign mfe mae learning readiness evidence">
-          <summary><span>6 · Performance Intelligence</span><span class="badge info">LEARNING EVIDENCE</span></summary>
-          <div class="help-section-body">
-            <div class="help-callout">Performance scores <strong>strategic risk units</strong>, not every MT5 ticket as an independent win/loss. A recovery root plus its hedge children score once when the chain is completely flat; a multi-layer zone campaign also scores once.</div>
-            <dl>
-              <div class="help-definition"><dt>Strategic net P/L</dt><dd>Sum of completed composite risk-unit outcomes used for strategy-level learning.</dd></div>
-              <div class="help-definition"><dt>Completed risk units</dt><dd>Standalone trades, completed recovery chains and completed zone campaigns eligible to be scored.</dd></div>
-              <div class="help-definition"><dt>Expectancy / unit</dt><dd>Average realised strategic P/L per completed risk unit.</dd></div>
-              <div class="help-definition"><dt>Win rate</dt><dd>Percentage of completed strategic units with positive realised P/L.</dd></div>
-              <div class="help-definition"><dt>Profit factor</dt><dd>Gross strategic wins divided by absolute gross strategic losses. Above 1 means gross wins exceed gross losses.</dd></div>
-              <div class="help-definition"><dt>Max closed drawdown</dt><dd>Largest peak-to-trough decline in the sequence of completed strategic outcomes, not live account equity drawdown.</dd></div>
-              <div class="help-definition"><dt>Standalone scalps</dt><dd>Independent non-composite trade outcomes.</dd></div>
-              <div class="help-definition"><dt>Recovery chains</dt><dd>Root and hedge descendants aggregated into one completed outcome.</dd></div>
-              <div class="help-definition"><dt>Zone campaigns</dt><dd>All campaign layers sharing the immutable zone plan token aggregated into one completed outcome.</dd></div>
-              <div class="help-definition"><dt>Performance by policy epoch</dt><dd>Attributes each strategic unit to the policy active at its root entry so you can compare whether later runtime policies improved outcomes.</dd></div>
-              <div class="help-definition"><dt>MFE</dt><dd>Maximum Favorable Excursion: best unrealised movement achieved during a ticket's life.</dd></div>
-              <div class="help-definition"><dt>MAE</dt><dd>Maximum Adverse Excursion: worst unrealised movement experienced during a ticket's life.</dd></div>
-              <div class="help-definition"><dt>MFE captured</dt><dd>How much of available favorable excursion was ultimately converted into realised outcome; used as a responsiveness/profit-capture diagnostic.</dd></div>
-              <div class="help-definition"><dt>Exact outcomes</dt><dd>Strategic results backed by authoritative MT5 exit-deal lineage.</dd></div>
-              <div class="help-definition"><dt>Inferred outcomes</dt><dd>Historical results reconstructed from incomplete/legacy lineage. Useful but lower-quality evidence.</dd></div>
-              <div class="help-definition"><dt>Active unscored units</dt><dd>Open composites that must not influence completed win/loss streaks until fully flat.</dd></div>
-              <div class="help-definition"><dt>Learning readiness</dt><dd>Evidence-maturity assessment preventing Atlas Brain from treating a tiny sample as proof.</dd></div>
-            </dl>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="atlas brain gemini runtime policy candidate consensus observations runs epoch critic confidence dwell deferred autonomous supervised parameter intelligence">
-          <summary><span>7 · Atlas Brain — Gemini, observations, consensus and policy epochs</span><span class="badge info">POLICY LIFECYCLE</span></summary>
-          <div class="help-section-body">
-            <div class="help-flow"><span>Gemini run</span><b>→</b><span>proposal / no-change</span><b>→ critic + deterministic validation</b><span>accepted observation</span><b>→</b><span>candidate consensus</span><b>→</b><span>new policy epoch</span></div>
-            <div class="help-callout"><strong>Key distinction:</strong> a Gemini run is not automatically an accepted observation, and an accepted observation is not automatically a new policy.</div>
-            <dl>
-              <div class="help-definition"><dt>Runtime policy</dt><dd>The authoritative Nyao policy currently active. This card should never be overwritten by reasoning from a newer unapplied Gemini run.</dd></div>
-              <div class="help-definition"><dt>Policy epoch</dt><dd>The active durable runtime-policy generation.</dd></div>
-              <div class="help-definition"><dt>Runtime controls</dt><dd>Number of registered Nyao controls represented in the active policy snapshot.</dd></div>
-              <div class="help-definition"><dt>Reconciliation</dt><dd>Whether Atlas's registered policy and Nyao's applied runtime values agree.</dd></div>
-              <div class="help-definition"><dt>Gemini run history</dt><dd>Every durable policy-analysis cycle, including `NO CHANGE`, `OBSERVED`, `DEFERRED`, `REJECTED`, `FAILED` and `APPLIED` outcomes.</dd></div>
-              <div class="help-definition"><dt>Accepted observation</dt><dd>A Gemini proposal/observation that passed the requirements to enter the consensus evidence window for the current baseline epoch.</dd></div>
-              <div class="help-definition"><dt>0 of 3 minimum</dt><dd>Zero accepted observations exist in the current epoch's consensus window; at least three are required before consensus may qualify. It does not mean Gemini has never run.</dd></div>
-              <div class="help-definition"><dt>Candidate consensus</dt><dd>Aggregation of accepted observations proposing compatible control values for the same active baseline. It is evidence for a possible next policy, not the active policy.</dd></div>
-              <div class="help-definition"><dt>Baseline epoch</dt><dd>The policy epoch Gemini evaluated when creating the proposal. Consensus observations should not mix incompatible baseline epochs.</dd></div>
-              <div class="help-definition"><dt>Confidence</dt><dd>Gemini's reported confidence; deterministic minimum-confidence requirements can prevent advancement.</dd></div>
-              <div class="help-definition"><dt>Critic</dt><dd>The review layer evaluating whether the proposal is sufficiently grounded/safe to proceed into the deterministic policy pipeline.</dd></div>
-              <div class="help-definition"><dt>Minimum dwell</dt><dd>Minimum time a policy must remain active before another autonomous policy replacement can normally occur.</dd></div>
-              <div class="help-definition"><dt>Supervised mode</dt><dd>Gemini may propose and validate, but a human approval workflow is required before command application.</dd></div>
-              <div class="help-definition"><dt>Autonomous mode</dt><dd>Atlas may apply a validated proposal only after all configured confidence, consensus, dwell, safety and position-lock rules pass.</dd></div>
-              <div class="help-definition"><dt>Deferred locked change</dt><dd>A position-sensitive parameter suggested while exposure is open. Atlas records the suggestion but does not mutate that control for already-managed positions.</dd></div>
-              <div class="help-definition"><dt>Scalping responsiveness</dt><dd>Evidence about opportunity latency, blocker pressure, hold duration and favorable-excursion capture. It measures quality/speed rather than encouraging more trades.</dd></div>
-              <div class="help-definition"><dt>Parameter Intelligence</dt><dd>Ranks registered controls using parameter-specific evidence, observed runtime variation and outcome associations. Position-sensitive controls receive additional activation protection.</dd></div>
-              <div class="help-definition"><dt>Change budget</dt><dd>Maximum number of validated control mutations Atlas permits in one policy update, limiting broad simultaneous changes.</dd></div>
-              <div class="help-definition"><dt>PRE-FIX CONSENSUS BYPASS</dt><dd>Historical marker for an epoch created before the 1.30.42 consensus-gate correction. It is historical debt, not permission for future bypasses.</dd></div>
-            </dl>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="settings risk appetite hard ceiling notifications supervised execution runtime controls command global enabled base lot">
-          <summary><span>8 · Settings — operator authority and advanced controls</span><span class="badge warn">ADVANCED</span></summary>
-          <div class="help-section-body">
-            <dl>
-              <div class="help-definition"><dt>Supervised execution</dt><dd>Human-review pipeline for building and applying an approved policy command. Backend fingerprint/epoch/review checks remain authoritative.</dd></div>
-              <div class="help-definition"><dt>Current command</dt><dd>The policy command package currently requested on the Atlas↔Nyao bridge.</dd></div>
-              <div class="help-definition"><dt>Base lot</dt><dd>Runtime base lot control. When dynamic sizing/capital sizing is active, final Nyao volume can differ because broker-risk calculations remain authoritative.</dd></div>
-              <div class="help-definition"><dt>Global enabled</dt><dd>Master Atlas/Nyao strategy switch for fresh execution. Position management can remain relevant even when fresh entries are disabled.</dd></div>
-              <div class="help-definition"><dt>Portfolio risk appetite</dt><dd>Operator-owned aggregate risk ceiling. It is <strong>not per-trade risk</strong>. Atlas can operate below it but cannot autonomously exceed it.</dd></div>
-              <div class="help-definition"><dt>Current hard risk amount</dt><dd>Money value of the configured hard-ceiling percentage using current Atlas risk capital.</dd></div>
-              <div class="help-definition"><dt>Atlas operating ceiling</dt><dd>Current lower deployable ceiling after deterministic risk modifiers.</dd></div>
-              <div class="help-definition"><dt>Notifications</dt><dd>Human-facing material state changes. Repeated polling states are deduplicated; sound/browser preferences control presentation, not trading authority.</dd></div>
-              <div class="help-definition"><dt>Advanced runtime controls</dt><dd>Direct view of the full registered Nyao control surface. Changing these can materially alter execution and should be treated as advanced operator action.</dd></div>
-            </dl>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="system audit execution lifecycle policy epochs tracked outcomes authoritative history integrity">
-          <summary><span>9 · System & Audit</span><span class="badge">READ ONLY</span></summary>
-          <div class="help-section-body">
-            <dl>
-              <div class="help-definition"><dt>Execution audit</dt><dd>Integrity/verification state for recorded execution evidence.</dd></div>
-              <div class="help-definition"><dt>Policy epochs</dt><dd>Count and history of durable applied policy generations.</dd></div>
-              <div class="help-definition"><dt>Tracked outcomes</dt><dd>Number of trade/outcome lifecycles Atlas currently maintains for evidence and reconstruction.</dd></div>
-              <div class="help-definition"><dt>Execution lifecycle</dt><dd>Most recent authoritative execution events across command application, Nyao acknowledgement, position actions and other lifecycle transitions.</dd></div>
-              <div class="help-definition"><dt>Policy epoch timeline</dt><dd>Historical registered policies used to reconcile what was active when positions entered and when Gemini/Atlas changed policy.</dd></div>
-            </dl>
-            <div class="help-callout">When a dashboard card and System & Audit disagree, investigate the underlying authoritative endpoint/state rather than assuming the prettier card is correct.</div>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="status glossary watching qualifying ready blocked active complete unscored invalidated failed applied deferred no change inferred syncing stale">
-          <summary><span>10 · Status & state glossary</span><span class="badge info">REFERENCE</span></summary>
-          <div class="help-section-body">
-            <div class="help-grid">
-              <div class="help-card"><h4>Trading opportunity states</h4><p><strong>WATCHING</strong> prerequisite not met. <strong>QUALIFYING</strong> base setup passed but extra contextual evidence remains. <strong>READY</strong> current deterministic opportunity gates pass. <strong>BLOCKED</strong> a real veto prevents fresh execution. <strong>ACTIVE</strong> exposure/lifecycle exists.</p></div>
-              <div class="help-card"><h4>Outcome states</h4><p><strong>COMPLETE</strong> strategic unit is flat and scoreable. <strong>UNSCORED</strong> still active or not eligible for final classification. <strong>INCOMPLETE_HISTORY</strong> legacy lineage is insufficient for exact strategic scoring.</p></div>
-              <div class="help-card"><h4>Zone states</h4><p><strong>FRESH</strong> untouched. <strong>MITIGATED</strong> interacted but valid. <strong>INVALIDATED</strong> later closed candle broke the boundary. <strong>ZONE_AWARE_SCALP</strong> context guides scalps. <strong>ZONE_CAMPAIGN_ACTIVE</strong> actual zone exposure owns the campaign.</p></div>
-              <div class="help-card"><h4>Brain states</h4><p><strong>NO CHANGE</strong> run recommended no mutation. <strong>OBSERVED</strong> accepted evidence. <strong>DEFERRED</strong> valid suggestion withheld by a lock/gate. <strong>REJECTED</strong> critic/validation rejected it. <strong>FAILED</strong> cycle error. <strong>APPLIED</strong> policy became runtime.</p></div>
-            </div>
-            <div class="help-chip-row" style="margin-top:12px"><span class="help-chip">LIVE</span><span class="help-chip">SYNCING</span><span class="help-chip">STALE</span><span class="help-chip">RECONCILED</span><span class="help-chip">PARTIALLY ALLOCATED</span><span class="help-chip">CAPITAL VETO</span><span class="help-chip">RECOVERY</span><span class="help-chip">ZONE-ALIGNED</span><span class="help-chip">COUNTER-ZONE</span></div>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="glossary atr fvg mfe mae mtm pl rsi ema rr spread points notional drawdown equity margin">
-          <summary><span>11 · Trading & measurement glossary</span><span class="badge info">REFERENCE</span></summary>
-          <div class="help-section-body">
-            <dl>
-              <div class="help-definition"><dt>P/L</dt><dd>Profit/loss. Floating P/L is unrealised; realised P/L is booked by MT5 exit deals.</dd></div>
-              <div class="help-definition"><dt>MTM</dt><dd>Mark-to-market: current economic value of still-open exposure.</dd></div>
-              <div class="help-definition"><dt>ATR</dt><dd>Average True Range, used as a volatility/geometry normalization unit.</dd></div>
-              <div class="help-definition"><dt>RSI</dt><dd>Relative Strength Index used within momentum/health logic according to the active Nyao policy.</dd></div>
-              <div class="help-definition"><dt>EMA</dt><dd>Exponential Moving Average used by Nyao trend/slope logic.</dd></div>
-              <div class="help-definition"><dt>FVG</dt><dd>Fair Value Gap zone type.</dd></div>
-              <div class="help-definition"><dt>MFE / MAE</dt><dd>Maximum Favorable / Adverse Excursion during a trade ticket lifecycle.</dd></div>
-              <div class="help-definition"><dt>Spread points</dt><dd>Broker point-distance between ask and bid. Point size depends on the instrument; Atlas also exposes price-form spread for economic interpretation.</dd></div>
-              <div class="help-definition"><dt>Notional exposure</dt><dd>Approximate market value represented by open volume. It is not the same as maximum loss because leverage, margin and stop distance differ.</dd></div>
-              <div class="help-definition"><dt>Margin</dt><dd>Broker collateral currently required for open positions. High leverage can reduce margin usage but does not increase Atlas's permitted monetary loss.</dd></div>
-              <div class="help-definition"><dt>Equity</dt><dd>Balance plus current floating P/L and related account effects.</dd></div>
-              <div class="help-definition"><dt>Drawdown</dt><dd>Decline from a tracked peak. Atlas uses both live account drawdown and strategic closed-outcome drawdown in different contexts.</dd></div>
-            </dl>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="block reasons score below threshold counter zone cost structure spread capital atlas zone mode duplicate cooldown broker">
-          <summary><span>12 · Common block / decision reasons</span><span class="badge warn">TROUBLESHOOTING</span></summary>
-          <div class="help-section-body">
-            <dl>
-              <div class="help-definition"><dt><code>SCORE_BELOW_THRESHOLD</code></dt><dd>Evaluated directional score has not reached the active runtime threshold. This is normally a watching condition, not a structural fault.</dd></div>
-              <div class="help-definition"><dt><code>COUNTER_ZONE_EVIDENCE_INSUFFICIENT</code></dt><dd>A counter-zone scalp cleared the base signal gate but not the additional context-aware evidence premium.</dd></div>
-              <div class="help-definition"><dt><code>COUNTER_ZONE_COMMIT_PROXIMITY</code></dt><dd>The higher-timeframe zone campaign is close enough to commitment that Atlas/Nyao blocks new exposure against it.</dd></div>
-              <div class="help-definition"><dt><code>COUNTER_ZONE_SIGNAL_READY</code></dt><dd>The counter-zone evidence test has passed; other execution gates may still remain.</dd></div>
-              <div class="help-definition"><dt><code>ATLAS_ZONE_MODE</code></dt><dd>A committed zone campaign currently owns fresh-entry authority, so ordinary/context-aware scalp entries are suspended.</dd></div>
-              <div class="help-definition"><dt><code>STOP_EXPANSION_EXCESSIVE</code></dt><dd>Spread/cost would force protective structure far beyond acceptable geometry.</dd></div>
-              <div class="help-definition"><dt>Spread outside limit</dt><dd>Current cost exceeds the adaptive strategy-specific spread cap. Zone and scalp limits can disagree because their geometry is different.</dd></div>
-              <div class="help-definition"><dt>Capital veto / constrained</dt><dd>Atlas risk authority has no permitted capacity for new risk or has intentionally reduced it below a feasible opportunity size.</dd></div>
-              <div class="help-definition"><dt>Duplicate distance</dt><dd>New same-direction exposure is too close to existing exposure under the active duplicate-distance policy.</dd></div>
-              <div class="help-definition"><dt>Cooldown</dt><dd>A temporary timing/loss-protection rule prevents immediate re-entry.</dd></div>
-              <div class="help-definition"><dt>Broker infeasible</dt><dd>Minimum lot/volume step or calculated loss cannot fit within Atlas's approved monetary risk. Nyao OrderCalcProfit remains final authority.</dd></div>
-              <div class="help-definition"><dt><code>ZONE_INVALIDATED_MANAGEMENT_ONLY</code></dt><dd>The campaign's source zone invalidated after exposure existed; no new zone layers may open, but existing positions remain managed.</dd></div>
-            </dl>
-          </div>
-        </details>
-
-        <details class="help-section help-searchable" data-help="workflow new user how to use atlas daily checklist safety">
-          <summary><span>13 · Recommended operator workflow</span><span class="badge ok">QUICK START</span></summary>
-          <div class="help-section-body">
-            <div class="help-grid three">
-              <div class="help-card"><h4>1 · Check synchronization</h4><p>Open Command Center. Confirm Nyao is connected, system health is good, instrument is correct and there is no command/policy mismatch.</p></div>
-              <div class="help-card"><h4>2 · Understand current authority</h4><p>Read operating mode. Is Atlas in normal scalp mode, zone-aware scalp context, committed zone campaign, recovery management or a blocked/protected state?</p></div>
-              <div class="help-card"><h4>3 · Read risk before signals</h4><p>Open Portfolio. Confirm operating ceiling, active reservations, zone reservation and free risk reconcile before interpreting a high signal score.</p></div>
-              <div class="help-card"><h4>4 · Inspect Market when curious</h4><p>Use Market to understand why BUY/SELL are watching, qualifying, ready or blocked and whether execution economics are acceptable.</p></div>
-              <div class="help-card"><h4>5 · Inspect Zone Analysis when context changes</h4><p>Check the priority zone, lifecycle state, invalidation boundary, zone-aware handoff and campaign spread economics.</p></div>
-              <div class="help-card"><h4>6 · Judge changes with evidence</h4><p>Use Performance and Atlas Brain to see whether outcomes support policy changes. Do not interpret one trade or one Gemini run as proof.</p></div>
-            </div>
-          </div>
-        </details>
-      </section>
 
   <div id="policy-inspector-modal" class="policy-modal" onclick="if(event.target===this)closePolicyInspector()">
     <div class="policy-modal-card">
@@ -3322,7 +3023,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
       </section>
 
       <section id="view-positions" class="view">
-        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><div class="row"><span class="badge info">NYAO EXECUTION</span><span class="badge ok">RISK UI · 1.30.44</span></div></div>
+        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><div class="row"><span class="badge info">NYAO EXECUTION</span><span class="badge ok">RISK UI · 1.30.47</span></div></div>
         <div class="grid g3">
           <div class="card"><div class="label">Strategy positions</div><div class="value" id="p-count">0</div></div>
           <div class="card"><div class="label">Total lots remaining</div><div class="value" id="p-lots">0.00</div></div>
@@ -3633,6 +3334,307 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
           <div class="card"><div class="section-head"><div><h3>Policy epochs</h3><p>Most recent registered policies.</p></div></div><div id="policy-epochs" class="timeline"></div></div>
         </div>
         <details class="card raw section"><summary>Advanced raw diagnostics</summary><pre id="raw-diagnostics">Loading…</pre></details>
+      </section>
+
+      <section id="view-help" class="view">
+        <div class="page-head"><div><h2>Help &amp; Guide</h2><p>The complete operator handbook for understanding the dashboard, trading states, risk, zones, Nyao execution and Atlas Brain.</p></div><span class="badge info">START HERE</span></div>
+
+        <div class="help-hero">
+          <div class="card help-hero-copy">
+            <div class="label">Atlas operator handbook</div>
+            <h3>Understand what Atlas is telling you — and what it is not.</h3>
+            <p>Atlas separates <strong>market interpretation</strong>, <strong>deterministic risk authority</strong>, <strong>Nyao execution</strong>, and <strong>Gemini policy learning</strong>. This guide explains the dashboard in that same order so a new operator can understand why a trade is or is not allowed without reading the source code.</p>
+            <div class="help-flow"><span>Market evidence</span><b>→</b><span>Atlas risk & zone authority</span><b>→</b><span>Nyao execution gates</span><b>→</b><span>Position lifecycle</span><b>→</b><span>Performance evidence</span><b>→</b><span>Gemini policy learning</span></div>
+            <div class="help-search-wrap"><input id="help-search" class="search" placeholder="Search: spread cap, zone invalidated, lifecycle P/L, consensus, MFE…" oninput="filterHelp(this.value)"><button class="btn" onclick="clearHelpSearch()">Clear</button></div>
+            <div class="help-version">Guide aligned to Atlas 1.30.47 · Nyao 44.5.3</div>
+          </div>
+          <div class="card help-quick">
+            <div class="label">Jump to a live workspace</div>
+            <button class="btn" onclick="go('overview')">Command Center · What matters now</button>
+            <button class="btn" onclick="go('market')">Market · Signals & execution economics</button>
+            <button class="btn" onclick="go('analysis')">Zone Analysis · Trade locations & lifecycle</button>
+            <button class="btn" onclick="go('positions')">Portfolio · Exposure & risk allocation</button>
+            <button class="btn" onclick="go('performance')">Performance · Strategic outcomes</button>
+            <button class="btn" onclick="go('atlas')">Atlas Brain · Gemini & policies</button>
+            <button class="btn" onclick="go('control')">Settings · Operator controls</button>
+            <button class="btn" onclick="go('history')">System & Audit · Authoritative history</button>
+          </div>
+        </div>
+
+        <div id="help-no-results" class="help-empty">No Help topics match that search.</div>
+
+        <details class="help-section help-searchable" open data-help="start basics architecture atlas nyao gemini authority">
+          <summary><span>1 · Start here — how Atlas is structured</span><span class="badge ok">FOUNDATION</span></summary>
+          <div class="help-section-body">
+            <div class="help-grid three">
+              <div class="help-card"><h4>Atlas</h4><p>The orchestration, market-context and deterministic risk layer. Atlas builds zone maps, capital envelopes, risk reservations, policy evidence and instructions for Nyao. It may reduce or veto risk but cannot manufacture broker feasibility.</p></div>
+              <div class="help-card"><h4>Nyao</h4><p>The MT5 Expert Advisor and final execution authority. Nyao evaluates live BUY/SELL signals, broker constraints, actual lot sizing, order placement, position management, recovery and telemetry.</p></div>
+              <div class="help-card"><h4>Gemini / Atlas Brain</h4><p>The reasoning and policy-learning layer. Gemini can propose changes to the Nyao runtime policy. Deterministic validation, consensus, dwell, position locks and operator mode decide whether those proposals can become active.</p></div>
+            </div>
+            <div class="help-callout"><strong>Important:</strong> a Gemini opinion is not an order. A zone is not automatically a trade. A high signal score is not enough by itself. New risk is allowed only when every applicable deterministic gate agrees.</div>
+            <dl>
+              <div class="help-definition"><dt>Policy epoch</dt><dd>A durable version of the Nyao runtime policy. Existing positions keep the management/recovery policy from their entry epoch so later policy changes do not rewrite their lifecycle.</dd></div>
+              <div class="help-definition"><dt>Command version</dt><dd>The bridge package version requested by Atlas and acknowledged by Nyao. It is execution synchronization, not the same thing as a policy epoch.</dd></div>
+              <div class="help-definition"><dt>Selected symbol</dt><dd>Every workspace is scoped to the currently selected instrument. Account-level cards can still reflect the MT5 account as a whole.</dd></div>
+              <div class="help-definition"><dt>Authoritative vs diagnostic</dt><dd>Authoritative values drive execution/risk. Diagnostic values explain behavior and learning but do not independently permit a trade.</dd></div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="command center overview opportunity queue decision timeline balance equity system health campaign">
+          <summary><span>2 · Command Center</span><span class="badge info">DAILY HOME</span></summary>
+          <div class="help-section-body">
+            <div class="help-callout">Use this page first. It answers: <strong>What mode is Atlas in? Is anything actionable? What is blocking execution? What risk is being used?</strong> Detailed diagnostics live in the specialist workspaces.</div>
+            <div class="help-grid">
+              <div class="help-card"><h4>Operating mode hero</h4><p><strong>Trading mode</strong> tells you whether normal scalping, zone-aware scalping or zone campaign execution currently owns fresh-entry authority. <strong>Campaign risk</strong> is the current zone campaign risk envelope when applicable. <strong>Live / staged</strong> summarizes campaign layers. <strong>Next Brain review</strong> shows the scheduled Gemini review cadence.</p></div>
+              <div class="help-card"><h4>Account strip</h4><p><strong>Balance</strong> is closed-account value. <strong>Equity</strong> includes floating P/L. <strong>Open P/L</strong> is current mark-to-market. <strong>Drawdown</strong> is decline from tracked peak equity. <strong>Live market</strong> shows current price and spread. <strong>System health</strong> reflects bridge/Nyao synchronization.</p></div>
+              <div class="help-card"><h4>Opportunity Queue</h4><p>Each row is a possible fresh opportunity. <strong>WATCHING</strong> means a prerequisite such as score is not met. <strong>QUALIFYING</strong> means the base setup passed but an extra contextual gate remains. <strong>READY</strong> means the displayed deterministic opportunity gates pass. <strong>BLOCKED</strong> is reserved for a real veto.</p></div>
+              <div class="help-card"><h4>Decision Timeline</h4><p>A compact event log of material state transitions: signal eligibility, cost gates, zone handoffs, risk reservations, policy application and trade lifecycle events. It is intentionally not every polling refresh.</p></div>
+              <div class="help-card"><h4>Operator attention</h4><p>A synthesized “what needs attention now” card. It prioritizes synchronization failures, capital vetoes, execution blockers and material lifecycle changes over ordinary monitoring states.</p></div>
+              <div class="help-card"><h4>Active trade plan</h4><p>Shows either the current zone campaign ladder, a zone-aware scalp fallback, or ordinary scalp gates. <strong>LIVE</strong> layers are already exposed; <strong>STAGED</strong> layers are admitted but not filled; <strong>PLANNED</strong> layers are geometry only.</p></div>
+            </div>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="market signals buy sell score evaluated threshold blocker spread cost atr volatility regime confidence">
+          <summary><span>3 · Market — signals, gates and execution economics</span><span class="badge info">LIVE EVIDENCE</span></summary>
+          <div class="help-section-body">
+            <dl>
+              <div class="help-definition"><dt>BUY / SELL score</dt><dd>Nyao's raw directional evidence score built from trend, momentum, chop, peak, volatility, impulse and other configured components.</dd></div>
+              <div class="help-definition"><dt>Evaluated / adjusted score</dt><dd>The score after applicable runtime adjustments such as dampening, position pressure or contextual modifiers. This is the value compared with the effective threshold.</dd></div>
+              <div class="help-definition"><dt>Threshold</dt><dd>The minimum evaluated score required before the direction can proceed to later gates. Reaching threshold does not bypass cost, capital, duplicate-distance, cooldown, zone or broker checks.</dd></div>
+              <div class="help-definition"><dt>BUY / SELL state</dt><dd>Human-readable result of the current gate chain. A low score should normally appear as watching rather than a deterministic block.</dd></div>
+              <div class="help-definition"><dt>Global blocker</dt><dd>A market-wide veto affecting both directions, such as trading pause, account safety, committed zone ownership or another global execution condition.</dd></div>
+              <div class="help-definition"><dt>New-bar gate</dt><dd>Whether entry is restricted to a new candle. When disabled, qualified intrabar entries may be evaluated.</dd></div>
+              <div class="help-definition"><dt>Cooldown</dt><dd>Temporary protection after configured loss sequences or other timing conditions. It prevents repeated immediate re-entry.</dd></div>
+              <div class="help-definition"><dt>Spread gate</dt><dd>Whether the current bid/ask cost is acceptable for the active strategy geometry. Scalp and zone campaigns use separate economics.</dd></div>
+              <div class="help-definition"><dt>Market bias</dt><dd>Atlas's current directional interpretation. It explains context; it is not execution authority by itself.</dd></div>
+              <div class="help-definition"><dt>Volatility / volatility ratio</dt><dd>Current ATR conditions compared with recent average ATR. The ratio helps Atlas scale risk and judge whether current movement is unusual.</dd></div>
+              <div class="help-definition"><dt>Execution fit</dt><dd>Whether current market geometry and cost are suitable for the strategy. A strong directional thesis can still have poor execution fit.</dd></div>
+              <div class="help-definition"><dt>Risk state</dt><dd>Atlas's deterministic risk classification after drawdown, loss streak, volatility and other safety modifiers.</dd></div>
+              <div class="help-definition"><dt>Bid / ask gap</dt><dd>The actual spread expressed in price terms for easier comparison with stop/target geometry.</dd></div>
+              <div class="help-definition"><dt>Economic spread cap</dt><dd>The adaptive maximum spread justified by the current strategy geometry. It is not the same as the old static `MaxSpreadPoints` ceiling.</dd></div>
+              <div class="help-definition"><dt>Spread / cap</dt><dd>Cost pressure relative to the adaptive cap. Above 1.0 means current cost exceeds the allowed economic envelope.</dd></div>
+              <div class="help-definition"><dt>Entry eligible</dt><dd>Final direction-level eligibility after the current chain of Nyao gates. Broker order placement can still fail after this if the broker rejects an order.</dd></div>
+            </dl>
+            <div class="help-callout warn"><strong>Common cost reasons:</strong> <code>STOP_EXPANSION_EXCESSIVE</code> means spread forces the planned protective structure to expand too far; <code>STOP_AND_TARGET</code> indicates both stop and target economics constrain the setup. These mean the idea may be directionally valid but economically poor to execute.</div>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="zone analysis fvg order block support resistance supply demand fresh mitigated invalidated lifecycle zone aware campaign invalidation spread confirmation">
+          <summary><span>4 · Zone Analysis — locations, lifecycle and execution handoff</span><span class="badge info">STRUCTURE</span></summary>
+          <div class="help-section-body">
+            <div class="help-grid three">
+              <div class="help-card"><h4>FVG</h4><p>Fair Value Gap detected from three-candle displacement geometry. Atlas stores side, bounds, age, width in ATR and mitigation/invalidation state.</p></div>
+              <div class="help-card"><h4>Order Block</h4><p>Last opposing candle before qualifying displacement. It becomes a demand or supply location depending on displacement direction.</p></div>
+              <div class="help-card"><h4>Support / Resistance</h4><p>Repeated closed-candle pivot reactions clustered into a structural zone.</p></div>
+            </div>
+            <div class="help-flow"><span>FRESH</span><b>→ touch</b><span>MITIGATED</span><b>→ later close beyond boundary</b><span>INVALIDATED</span><b>→</b><span>ARCHIVED</span></div>
+            <dl>
+              <div class="help-definition"><dt>Demand / BUY zone</dt><dd>A structural area expected to provide buying support. Deterministic invalidation occurs when a later relevant closed candle finishes below the zone low.</dd></div>
+              <div class="help-definition"><dt>Supply / SELL zone</dt><dd>A structural area expected to provide selling pressure. Deterministic invalidation occurs when a later relevant closed candle finishes above the zone high.</dd></div>
+              <div class="help-definition"><dt>FRESH</dt><dd>Detected and not materially revisited.</dd></div>
+              <div class="help-definition"><dt>MITIGATED</dt><dd>Price has interacted with the zone but the structural boundary still holds. A wick beyond the boundary does not invalidate it.</dd></div>
+              <div class="help-definition"><dt>INVALIDATED</dt><dd>A later closed candle has closed beyond the technical boundary. The zone is removed from fresh priority selection but retained in invalidated-zone history.</dd></div>
+              <div class="help-definition"><dt>Zone score</dt><dd>Relative structural quality using timeframe, age, touches, geometry, confluence and zone-type evidence. It ranks zones; it does not by itself permit entry.</dd></div>
+              <div class="help-definition"><dt>Width ATR</dt><dd>Zone width normalized by ATR. Helps Atlas reject zones that are too broad for the current timeframe/structure model.</dd></div>
+              <div class="help-definition"><dt>Confluence</dt><dd>Other zones/structures overlapping the location, such as H4 Order Block plus H4 Support/Resistance. Confluence can strengthen location quality.</dd></div>
+              <div class="help-definition"><dt>Touch count</dt><dd>Number of historical interactions detected after creation. It is lifecycle evidence, not simply “more is better.”</dd></div>
+              <div class="help-definition"><dt>Invalidating close</dt><dd>The closed-candle price that crossed the technical boundary and caused invalidation.</dd></div>
+              <div class="help-definition"><dt>Invalidation penetration / ATR</dt><dd>How far the invalidating close finished beyond the boundary, both in price units and ATR-normalized form.</dd></div>
+              <div class="help-definition"><dt>Zone-aware scalp</dt><dd>The zone remains context while Nyao retains fresh scalp authority. Aligned scalps use normal gates; counter-zone scalps need stronger evidence and reduced risk.</dd></div>
+              <div class="help-definition"><dt>Zone-aligned scalp</dt><dd>A scalp in the same direction as the current source zone, e.g. SELL inside a SELL/supply context.</dd></div>
+              <div class="help-definition"><dt>Counter-zone scalp</dt><dd>A scalp against the current zone direction. It is conditionally allowed, not automatically blocked. It receives stricter evidence/risk rules and can be blocked near campaign commitment.</dd></div>
+              <div class="help-definition"><dt>ZONE_ENTRY_CONFIRMED</dt><dd>Campaign confirmation gates have passed and fresh scalp authority may be suspended while Atlas attempts to establish the zone campaign.</dd></div>
+              <div class="help-definition"><dt>ZONE_CAMPAIGN_ACTIVE</dt><dd>Actual `ATLAS_ZONE` exposure exists for the plan. Campaign lineage is now authoritative and the plan is managed as one composite risk unit.</dd></div>
+              <div class="help-definition"><dt>ZONE_CAMPAIGN_INVALIDATED_MANAGEMENT</dt><dd>The source zone failed after campaign exposure already existed. Existing positions remain managed, but no new campaign layers may open.</dd></div>
+              <div class="help-definition"><dt>Zone spread cap</dt><dd>Dedicated campaign spread economics computed from campaign stop/target geometry. It is separate from the scalp spread cap.</dd></div>
+              <div class="help-definition"><dt>Campaign lock</dt><dd>True only when actual exposure belonging to that exact zone plan exists. Unrelated scalp/recovery positions must not lock a zone campaign.</dd></div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="portfolio positions volume realized floating lifecycle risk allocation reservation operating ceiling hard ceiling recovery chain">
+          <summary><span>5 · Portfolio — exposure, lifecycle P/L and risk allocation</span><span class="badge info">CAPITAL</span></summary>
+          <div class="help-section-body">
+            <div class="help-grid three">
+              <div class="help-card"><h4>Strategy positions</h4><p>Number of Atlas/Nyao-managed open MT5 positions for the selected strategy/symbol.</p></div>
+              <div class="help-card"><h4>Total lots remaining</h4><p>Current still-open volume. After partial closes this is lower than the original volume.</p></div>
+              <div class="help-card"><h4>Recovery chains</h4><p>Active root + hedge-child composites being managed as one strategic risk unit.</p></div>
+              <div class="help-card"><h4>Realized while active</h4><p>Exact P/L already realised from partial exits while the position/composite is still open.</p></div>
+              <div class="help-card"><h4>Floating P/L</h4><p>Current MT5 mark-to-market of remaining open volume.</p></div>
+              <div class="help-card"><h4>Active lifecycle P/L</h4><p><strong>Realised while active + floating P/L.</strong> This is the best current economic picture of an unfinished lifecycle.</p></div>
+            </div>
+            <div class="help-callout"><strong>Risk allocation reconciliation:</strong> Operating ceiling = active reservations + prospective zone priority reservation + free operating risk. Hard-ceiling headroom is shown separately because it is not necessarily deployable immediately.</div>
+            <dl>
+              <div class="help-definition"><dt>Portfolio hard ceiling</dt><dd>The operator-owned maximum aggregate Atlas risk percentage converted to money. Atlas/Gemini may reduce deployment but cannot raise this ceiling.</dd></div>
+              <div class="help-definition"><dt>Operating risk ceiling</dt><dd>The currently deployable aggregate risk envelope after deterministic modifiers such as loss streak, volatility, drawdown and risk state.</dd></div>
+              <div class="help-definition"><dt>Active reservation</dt><dd>Risk capacity already committed to an active standalone trade, recovery chain or zone campaign. Recovery chains reserve their frozen chain ceiling rather than only current floating loss.</dd></div>
+              <div class="help-definition"><dt>Prospective zone reservation</dt><dd>Capacity preserved for a strong zone campaign before its first fill. It prevents unrelated scalp risk from consuming campaign headroom.</dd></div>
+              <div class="help-definition"><dt>Free operating risk</dt><dd>Operating capacity left after active and prospective reservations. This is not necessarily the risk of the next trade; per-opportunity caps still apply.</dd></div>
+              <div class="help-definition"><dt>Hard headroom</dt><dd>Unused portion of the operator hard ceiling. It can be larger than free operating risk because Atlas may intentionally operate below the hard limit.</dd></div>
+              <div class="help-definition"><dt>Volume 0.06 / 0.17</dt><dd>Remaining volume / original volume. In this example 0.11 lots have already been closed.</dd></div>
+              <div class="help-definition"><dt>Realized</dt><dd>Exact MT5 realised net P/L already attached to partial exit deals for this still-active lifecycle.</dd></div>
+              <div class="help-definition"><dt>Lifecycle</dt><dd>Realized-so-far plus current floating P/L. It remains provisional until the entire strategic unit is flat.</dd></div>
+              <div class="help-definition"><dt>Context / Origin</dt><dd>How the trade entered: e.g. `FRESH_MARKET`, `FRESH_LIMIT`, `HEDGE_CHILD`, `ATLAS_ZONE`, or contextual classifications such as `ZONE_ALIGNED_SCALP` / `COUNTER_ZONE_SCALP`.</dd></div>
+              <div class="help-definition"><dt>Policy epoch</dt><dd>The runtime policy locked at entry for lifecycle attribution and position-sensitive management.</dd></div>
+              <div class="help-definition"><dt>Quality</dt><dd>Outcome-lineage quality, indicating whether realised values and entry identity are exact or partly reconstructed/inferred.</dd></div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="performance expectancy win rate profit factor drawdown risk units recovery zone campaign mfe mae learning readiness evidence">
+          <summary><span>6 · Performance Intelligence</span><span class="badge info">LEARNING EVIDENCE</span></summary>
+          <div class="help-section-body">
+            <div class="help-callout">Performance scores <strong>strategic risk units</strong>, not every MT5 ticket as an independent win/loss. A recovery root plus its hedge children score once when the chain is completely flat; a multi-layer zone campaign also scores once.</div>
+            <dl>
+              <div class="help-definition"><dt>Strategic net P/L</dt><dd>Sum of completed composite risk-unit outcomes used for strategy-level learning.</dd></div>
+              <div class="help-definition"><dt>Completed risk units</dt><dd>Standalone trades, completed recovery chains and completed zone campaigns eligible to be scored.</dd></div>
+              <div class="help-definition"><dt>Expectancy / unit</dt><dd>Average realised strategic P/L per completed risk unit.</dd></div>
+              <div class="help-definition"><dt>Win rate</dt><dd>Percentage of completed strategic units with positive realised P/L.</dd></div>
+              <div class="help-definition"><dt>Profit factor</dt><dd>Gross strategic wins divided by absolute gross strategic losses. Above 1 means gross wins exceed gross losses.</dd></div>
+              <div class="help-definition"><dt>Max closed drawdown</dt><dd>Largest peak-to-trough decline in the sequence of completed strategic outcomes, not live account equity drawdown.</dd></div>
+              <div class="help-definition"><dt>Standalone scalps</dt><dd>Independent non-composite trade outcomes.</dd></div>
+              <div class="help-definition"><dt>Recovery chains</dt><dd>Root and hedge descendants aggregated into one completed outcome.</dd></div>
+              <div class="help-definition"><dt>Zone campaigns</dt><dd>All campaign layers sharing the immutable zone plan token aggregated into one completed outcome.</dd></div>
+              <div class="help-definition"><dt>Performance by policy epoch</dt><dd>Attributes each strategic unit to the policy active at its root entry so you can compare whether later runtime policies improved outcomes.</dd></div>
+              <div class="help-definition"><dt>MFE</dt><dd>Maximum Favorable Excursion: best unrealised movement achieved during a ticket's life.</dd></div>
+              <div class="help-definition"><dt>MAE</dt><dd>Maximum Adverse Excursion: worst unrealised movement experienced during a ticket's life.</dd></div>
+              <div class="help-definition"><dt>MFE captured</dt><dd>How much of available favorable excursion was ultimately converted into realised outcome; used as a responsiveness/profit-capture diagnostic.</dd></div>
+              <div class="help-definition"><dt>Exact outcomes</dt><dd>Strategic results backed by authoritative MT5 exit-deal lineage.</dd></div>
+              <div class="help-definition"><dt>Inferred outcomes</dt><dd>Historical results reconstructed from incomplete/legacy lineage. Useful but lower-quality evidence.</dd></div>
+              <div class="help-definition"><dt>Active unscored units</dt><dd>Open composites that must not influence completed win/loss streaks until fully flat.</dd></div>
+              <div class="help-definition"><dt>Learning readiness</dt><dd>Evidence-maturity assessment preventing Atlas Brain from treating a tiny sample as proof.</dd></div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="atlas brain gemini runtime policy candidate consensus observations runs epoch critic confidence dwell deferred autonomous supervised parameter intelligence">
+          <summary><span>7 · Atlas Brain — Gemini, observations, consensus and policy epochs</span><span class="badge info">POLICY LIFECYCLE</span></summary>
+          <div class="help-section-body">
+            <div class="help-flow"><span>Gemini run</span><b>→</b><span>proposal / no-change</span><b>→ critic + deterministic validation</b><span>accepted observation</span><b>→</b><span>candidate consensus</span><b>→</b><span>new policy epoch</span></div>
+            <div class="help-callout"><strong>Key distinction:</strong> a Gemini run is not automatically an accepted observation, and an accepted observation is not automatically a new policy.</div>
+            <dl>
+              <div class="help-definition"><dt>Runtime policy</dt><dd>The authoritative Nyao policy currently active. This card should never be overwritten by reasoning from a newer unapplied Gemini run.</dd></div>
+              <div class="help-definition"><dt>Policy epoch</dt><dd>The active durable runtime-policy generation.</dd></div>
+              <div class="help-definition"><dt>Runtime controls</dt><dd>Number of registered Nyao controls represented in the active policy snapshot.</dd></div>
+              <div class="help-definition"><dt>Reconciliation</dt><dd>Whether Atlas's registered policy and Nyao's applied runtime values agree.</dd></div>
+              <div class="help-definition"><dt>Gemini run history</dt><dd>Every durable policy-analysis cycle, including `NO CHANGE`, `OBSERVED`, `DEFERRED`, `REJECTED`, `FAILED` and `APPLIED` outcomes.</dd></div>
+              <div class="help-definition"><dt>Accepted observation</dt><dd>A Gemini proposal/observation that passed the requirements to enter the consensus evidence window for the current baseline epoch.</dd></div>
+              <div class="help-definition"><dt>0 of 3 minimum</dt><dd>Zero accepted observations exist in the current epoch's consensus window; at least three are required before consensus may qualify. It does not mean Gemini has never run.</dd></div>
+              <div class="help-definition"><dt>Candidate consensus</dt><dd>Aggregation of accepted observations proposing compatible control values for the same active baseline. It is evidence for a possible next policy, not the active policy.</dd></div>
+              <div class="help-definition"><dt>Baseline epoch</dt><dd>The policy epoch Gemini evaluated when creating the proposal. Consensus observations should not mix incompatible baseline epochs.</dd></div>
+              <div class="help-definition"><dt>Confidence</dt><dd>Gemini's reported confidence; deterministic minimum-confidence requirements can prevent advancement.</dd></div>
+              <div class="help-definition"><dt>Critic</dt><dd>The review layer evaluating whether the proposal is sufficiently grounded/safe to proceed into the deterministic policy pipeline.</dd></div>
+              <div class="help-definition"><dt>Minimum dwell</dt><dd>Minimum time a policy must remain active before another autonomous policy replacement can normally occur.</dd></div>
+              <div class="help-definition"><dt>Supervised mode</dt><dd>Gemini may propose and validate, but a human approval workflow is required before command application.</dd></div>
+              <div class="help-definition"><dt>Autonomous mode</dt><dd>Atlas may apply a validated proposal only after all configured confidence, consensus, dwell, safety and position-lock rules pass.</dd></div>
+              <div class="help-definition"><dt>Deferred locked change</dt><dd>A position-sensitive parameter suggested while exposure is open. Atlas records the suggestion but does not mutate that control for already-managed positions.</dd></div>
+              <div class="help-definition"><dt>Scalping responsiveness</dt><dd>Evidence about opportunity latency, blocker pressure, hold duration and favorable-excursion capture. It measures quality/speed rather than encouraging more trades.</dd></div>
+              <div class="help-definition"><dt>Parameter Intelligence</dt><dd>Ranks registered controls using parameter-specific evidence, observed runtime variation and outcome associations. Position-sensitive controls receive additional activation protection.</dd></div>
+              <div class="help-definition"><dt>Change budget</dt><dd>Maximum number of validated control mutations Atlas permits in one policy update, limiting broad simultaneous changes.</dd></div>
+              <div class="help-definition"><dt>PRE-FIX CONSENSUS BYPASS</dt><dd>Historical marker for an epoch created before the 1.30.42 consensus-gate correction. It is historical debt, not permission for future bypasses.</dd></div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="settings risk appetite hard ceiling notifications supervised execution runtime controls command global enabled base lot">
+          <summary><span>8 · Settings — operator authority and advanced controls</span><span class="badge warn">ADVANCED</span></summary>
+          <div class="help-section-body">
+            <dl>
+              <div class="help-definition"><dt>Supervised execution</dt><dd>Human-review pipeline for building and applying an approved policy command. Backend fingerprint/epoch/review checks remain authoritative.</dd></div>
+              <div class="help-definition"><dt>Current command</dt><dd>The policy command package currently requested on the Atlas↔Nyao bridge.</dd></div>
+              <div class="help-definition"><dt>Base lot</dt><dd>Runtime base lot control. When dynamic sizing/capital sizing is active, final Nyao volume can differ because broker-risk calculations remain authoritative.</dd></div>
+              <div class="help-definition"><dt>Global enabled</dt><dd>Master Atlas/Nyao strategy switch for fresh execution. Position management can remain relevant even when fresh entries are disabled.</dd></div>
+              <div class="help-definition"><dt>Portfolio risk appetite</dt><dd>Operator-owned aggregate risk ceiling. It is <strong>not per-trade risk</strong>. Atlas can operate below it but cannot autonomously exceed it.</dd></div>
+              <div class="help-definition"><dt>Current hard risk amount</dt><dd>Money value of the configured hard-ceiling percentage using current Atlas risk capital.</dd></div>
+              <div class="help-definition"><dt>Atlas operating ceiling</dt><dd>Current lower deployable ceiling after deterministic risk modifiers.</dd></div>
+              <div class="help-definition"><dt>Notifications</dt><dd>Human-facing material state changes. Repeated polling states are deduplicated; sound/browser preferences control presentation, not trading authority.</dd></div>
+              <div class="help-definition"><dt>Advanced runtime controls</dt><dd>Direct view of the full registered Nyao control surface. Changing these can materially alter execution and should be treated as advanced operator action.</dd></div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="system audit execution lifecycle policy epochs tracked outcomes authoritative history integrity">
+          <summary><span>9 · System & Audit</span><span class="badge">READ ONLY</span></summary>
+          <div class="help-section-body">
+            <dl>
+              <div class="help-definition"><dt>Execution audit</dt><dd>Integrity/verification state for recorded execution evidence.</dd></div>
+              <div class="help-definition"><dt>Policy epochs</dt><dd>Count and history of durable applied policy generations.</dd></div>
+              <div class="help-definition"><dt>Tracked outcomes</dt><dd>Number of trade/outcome lifecycles Atlas currently maintains for evidence and reconstruction.</dd></div>
+              <div class="help-definition"><dt>Execution lifecycle</dt><dd>Most recent authoritative execution events across command application, Nyao acknowledgement, position actions and other lifecycle transitions.</dd></div>
+              <div class="help-definition"><dt>Policy epoch timeline</dt><dd>Historical registered policies used to reconcile what was active when positions entered and when Gemini/Atlas changed policy.</dd></div>
+            </dl>
+            <div class="help-callout">When a dashboard card and System & Audit disagree, investigate the underlying authoritative endpoint/state rather than assuming the prettier card is correct.</div>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="status glossary watching qualifying ready blocked active complete unscored invalidated failed applied deferred no change inferred syncing stale">
+          <summary><span>10 · Status & state glossary</span><span class="badge info">REFERENCE</span></summary>
+          <div class="help-section-body">
+            <div class="help-grid">
+              <div class="help-card"><h4>Trading opportunity states</h4><p><strong>WATCHING</strong> prerequisite not met. <strong>QUALIFYING</strong> base setup passed but extra contextual evidence remains. <strong>READY</strong> current deterministic opportunity gates pass. <strong>BLOCKED</strong> a real veto prevents fresh execution. <strong>ACTIVE</strong> exposure/lifecycle exists.</p></div>
+              <div class="help-card"><h4>Outcome states</h4><p><strong>COMPLETE</strong> strategic unit is flat and scoreable. <strong>UNSCORED</strong> still active or not eligible for final classification. <strong>INCOMPLETE_HISTORY</strong> legacy lineage is insufficient for exact strategic scoring.</p></div>
+              <div class="help-card"><h4>Zone states</h4><p><strong>FRESH</strong> untouched. <strong>MITIGATED</strong> interacted but valid. <strong>INVALIDATED</strong> later closed candle broke the boundary. <strong>ZONE_AWARE_SCALP</strong> context guides scalps. <strong>ZONE_CAMPAIGN_ACTIVE</strong> actual zone exposure owns the campaign.</p></div>
+              <div class="help-card"><h4>Brain states</h4><p><strong>NO CHANGE</strong> run recommended no mutation. <strong>OBSERVED</strong> accepted evidence. <strong>DEFERRED</strong> valid suggestion withheld by a lock/gate. <strong>REJECTED</strong> critic/validation rejected it. <strong>FAILED</strong> cycle error. <strong>APPLIED</strong> policy became runtime.</p></div>
+            </div>
+            <div class="help-chip-row" style="margin-top:12px"><span class="help-chip">LIVE</span><span class="help-chip">SYNCING</span><span class="help-chip">STALE</span><span class="help-chip">RECONCILED</span><span class="help-chip">PARTIALLY ALLOCATED</span><span class="help-chip">CAPITAL VETO</span><span class="help-chip">RECOVERY</span><span class="help-chip">ZONE-ALIGNED</span><span class="help-chip">COUNTER-ZONE</span></div>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="glossary atr fvg mfe mae mtm pl rsi ema rr spread points notional drawdown equity margin">
+          <summary><span>11 · Trading & measurement glossary</span><span class="badge info">REFERENCE</span></summary>
+          <div class="help-section-body">
+            <dl>
+              <div class="help-definition"><dt>P/L</dt><dd>Profit/loss. Floating P/L is unrealised; realised P/L is booked by MT5 exit deals.</dd></div>
+              <div class="help-definition"><dt>MTM</dt><dd>Mark-to-market: current economic value of still-open exposure.</dd></div>
+              <div class="help-definition"><dt>ATR</dt><dd>Average True Range, used as a volatility/geometry normalization unit.</dd></div>
+              <div class="help-definition"><dt>RSI</dt><dd>Relative Strength Index used within momentum/health logic according to the active Nyao policy.</dd></div>
+              <div class="help-definition"><dt>EMA</dt><dd>Exponential Moving Average used by Nyao trend/slope logic.</dd></div>
+              <div class="help-definition"><dt>FVG</dt><dd>Fair Value Gap zone type.</dd></div>
+              <div class="help-definition"><dt>MFE / MAE</dt><dd>Maximum Favorable / Adverse Excursion during a trade ticket lifecycle.</dd></div>
+              <div class="help-definition"><dt>Spread points</dt><dd>Broker point-distance between ask and bid. Point size depends on the instrument; Atlas also exposes price-form spread for economic interpretation.</dd></div>
+              <div class="help-definition"><dt>Notional exposure</dt><dd>Approximate market value represented by open volume. It is not the same as maximum loss because leverage, margin and stop distance differ.</dd></div>
+              <div class="help-definition"><dt>Margin</dt><dd>Broker collateral currently required for open positions. High leverage can reduce margin usage but does not increase Atlas's permitted monetary loss.</dd></div>
+              <div class="help-definition"><dt>Equity</dt><dd>Balance plus current floating P/L and related account effects.</dd></div>
+              <div class="help-definition"><dt>Drawdown</dt><dd>Decline from a tracked peak. Atlas uses both live account drawdown and strategic closed-outcome drawdown in different contexts.</dd></div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="block reasons score below threshold counter zone cost structure spread capital atlas zone mode duplicate cooldown broker">
+          <summary><span>12 · Common block / decision reasons</span><span class="badge warn">TROUBLESHOOTING</span></summary>
+          <div class="help-section-body">
+            <dl>
+              <div class="help-definition"><dt><code>SCORE_BELOW_THRESHOLD</code></dt><dd>Evaluated directional score has not reached the active runtime threshold. This is normally a watching condition, not a structural fault.</dd></div>
+              <div class="help-definition"><dt><code>COUNTER_ZONE_EVIDENCE_INSUFFICIENT</code></dt><dd>A counter-zone scalp cleared the base signal gate but not the additional context-aware evidence premium.</dd></div>
+              <div class="help-definition"><dt><code>COUNTER_ZONE_COMMIT_PROXIMITY</code></dt><dd>The higher-timeframe zone campaign is close enough to commitment that Atlas/Nyao blocks new exposure against it.</dd></div>
+              <div class="help-definition"><dt><code>COUNTER_ZONE_SIGNAL_READY</code></dt><dd>The counter-zone evidence test has passed; other execution gates may still remain.</dd></div>
+              <div class="help-definition"><dt><code>ATLAS_ZONE_MODE</code></dt><dd>A committed zone campaign currently owns fresh-entry authority, so ordinary/context-aware scalp entries are suspended.</dd></div>
+              <div class="help-definition"><dt><code>STOP_EXPANSION_EXCESSIVE</code></dt><dd>Spread/cost would force protective structure far beyond acceptable geometry.</dd></div>
+              <div class="help-definition"><dt>Spread outside limit</dt><dd>Current cost exceeds the adaptive strategy-specific spread cap. Zone and scalp limits can disagree because their geometry is different.</dd></div>
+              <div class="help-definition"><dt>Capital veto / constrained</dt><dd>Atlas risk authority has no permitted capacity for new risk or has intentionally reduced it below a feasible opportunity size.</dd></div>
+              <div class="help-definition"><dt>Duplicate distance</dt><dd>New same-direction exposure is too close to existing exposure under the active duplicate-distance policy.</dd></div>
+              <div class="help-definition"><dt>Cooldown</dt><dd>A temporary timing/loss-protection rule prevents immediate re-entry.</dd></div>
+              <div class="help-definition"><dt>Broker infeasible</dt><dd>Minimum lot/volume step or calculated loss cannot fit within Atlas's approved monetary risk. Nyao OrderCalcProfit remains final authority.</dd></div>
+              <div class="help-definition"><dt><code>ZONE_INVALIDATED_MANAGEMENT_ONLY</code></dt><dd>The campaign's source zone invalidated after exposure existed; no new zone layers may open, but existing positions remain managed.</dd></div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="help-section help-searchable" data-help="workflow new user how to use atlas daily checklist safety">
+          <summary><span>13 · Recommended operator workflow</span><span class="badge ok">QUICK START</span></summary>
+          <div class="help-section-body">
+            <div class="help-grid three">
+              <div class="help-card"><h4>1 · Check synchronization</h4><p>Open Command Center. Confirm Nyao is connected, system health is good, instrument is correct and there is no command/policy mismatch.</p></div>
+              <div class="help-card"><h4>2 · Understand current authority</h4><p>Read operating mode. Is Atlas in normal scalp mode, zone-aware scalp context, committed zone campaign, recovery management or a blocked/protected state?</p></div>
+              <div class="help-card"><h4>3 · Read risk before signals</h4><p>Open Portfolio. Confirm operating ceiling, active reservations, zone reservation and free risk reconcile before interpreting a high signal score.</p></div>
+              <div class="help-card"><h4>4 · Inspect Market when curious</h4><p>Use Market to understand why BUY/SELL are watching, qualifying, ready or blocked and whether execution economics are acceptable.</p></div>
+              <div class="help-card"><h4>5 · Inspect Zone Analysis when context changes</h4><p>Check the priority zone, lifecycle state, invalidation boundary, zone-aware handoff and campaign spread economics.</p></div>
+              <div class="help-card"><h4>6 · Judge changes with evidence</h4><p>Use Performance and Atlas Brain to see whether outcomes support policy changes. Do not interpret one trade or one Gemini run as proof.</p></div>
+            </div>
+          </div>
+        </details>
       </section>
     </div>
   </main>
