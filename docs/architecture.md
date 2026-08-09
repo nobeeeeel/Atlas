@@ -1,4 +1,232 @@
-ATLAS ↔ NYAO FULL RUNTIME CONTROL INVENTORY
+# Atlas System Architecture
+
+**Current release:** Atlas **1.30.19** · Nyao **44.3** · Capital engine **atlas-capital-regime-v2.0**
+
+Atlas is an adaptive trading-intelligence and deterministic risk-control platform. Atlas owns market interpretation, strategy policy, portfolio capital authority, composite risk accounting, durable evidence and operator controls; Nyao is the MetaTrader 5 execution layer and retains final broker-side feasibility and order execution authority.
+
+The design objective is not simply to trade more often. Atlas is intended to continuously evaluate opportunities, avoid wasting valid capacity, and execute whenever an opportunity is justified **without allowing speed or concurrency to bypass deterministic risk authority**.
+
+## 1. Runtime boundary
+
+```text
+Market / MT5 broker state
+        │
+        ▼
+┌──────────────────────────┐
+│ Nyao 44.3 · MT5 Executor │
+│ signals · orders · fills │
+│ broker math · positions  │
+└─────────────┬────────────┘
+              │ status / positions / deals
+              ▼
+┌──────────────────────────────────────────┐
+│ Atlas 1.30.19                            │
+│                                          │
+│ deterministic market intelligence       │
+│ capital regime + portfolio allocator     │
+│ spread / structure economics            │
+│ zone planning                            │
+│ composite risk units                     │
+│ recovery authority + durable ledger      │
+│ policy epochs + outcomes                 │
+│ Gemini analyst / critic                  │
+│ operator settings and dashboard          │
+└─────────────┬────────────────────────────┘
+              │ validated command / policy
+              ▼
+┌──────────────────────────┐
+│ Nyao execution preflight │
+│ OrderCalcProfit / Check  │
+│ broker volume / stops    │
+└─────────────┬────────────┘
+              ▼
+            MT5
+```
+
+### Authority model
+
+| Authority | Owner | Rule |
+|---|---|---|
+| Operator portfolio risk appetite | Operator | 1–20% aggregate hard ceiling; Atlas/Gemini may reduce but cannot raise it |
+| Market/regime interpretation | Atlas | Deterministic evidence plus policy context |
+| Scalp policy optimization | Atlas + Gemini | Gemini proposes/criticizes within schemas; hard risk remains deterministic |
+| Zone construction | Atlas | Deterministic candle/structure evidence; Gemini cannot invent zones |
+| Capital allocation | Atlas | Concurrent reservation-based allocator |
+| Recovery-chain ceiling | Atlas/Nyao contract | Frozen per risk unit; recovery cannot borrow unused portfolio capacity |
+| Broker feasibility | Nyao/MT5 | Final volume, stops, OrderCheck/OrderCalcProfit and execution truth |
+| Realized P/L | MT5 | Authoritative exit deals |
+
+## 2. Capital architecture
+
+Atlas separates risk appetite from actual deployment. A configured 20% ceiling does **not** mean a 20% trade.
+
+```text
+OPERATOR HARD CEILING (1–20%)
+              │
+              ▼
+ATLAS DETERMINISTIC MODIFIERS
+(drawdown · loss state · market risk · volatility)
+              │
+              ▼
+CURRENT OPERATING CEILING
+              │
+              ├── minus recovery-chain reservations
+              ├── minus standalone downside reservations
+              ├── minus zone-campaign reservations
+              └── minus working-order reservations
+              │
+              ▼
+REMAINING OPERATING CAPACITY
+              │
+       ┌──────┴──────┐
+       ▼             ▼
+  SCALP CANDIDATE   ZONE CANDIDATE
+       │             │
+       └──── broker / structure / cost / concentration gates ────► execute
+```
+
+### P3.31 concurrent portfolio allocation
+
+Before P3.31, any strategy exposure forced fresh risk to zero. Atlas now uses deterministic reservations instead:
+
+- existing exposure **reserves risk** but does not automatically veto unrelated opportunities;
+- recovery chains reserve their **full frozen chain ceiling**;
+- standalone positions reserve remaining downside to their broker stop;
+- positions whose stops have moved to break-even or locked profit release unused downside capacity;
+- working orders reserve capacity before execution so Atlas cannot double-promise capital;
+- same-symbol active risk receives **no diversification credit**;
+- hard protection states can still veto all fresh risk.
+
+Allocation states exposed to the dashboard are `AVAILABLE`, `PARTIALLY_ALLOCATED`, `FULLY_ALLOCATED`, and hard protection/veto states.
+
+### P3.31.1 configurable risk appetite
+
+The Settings page persists an operator-owned `portfolio_hard_risk_pct` from **1% to 20%**, default **1%**. This setting controls aggregate portfolio authority only. Per-opportunity scalp/zone sizing continues to come from the capital regime and current risk modifiers.
+
+## 3. Composite risk-unit model
+
+Strategic performance and loss protection operate on **risk units**, not blindly on MT5 tickets.
+
+```text
+STANDALONE_TRADE
+  └── one position
+
+RECOVERY_CHAIN
+  ├── root
+  ├── hedge child 1
+  ├── hedge child 2 ...
+  └── scored once when the whole chain is flat
+
+ZONE_CAMPAIGN
+  ├── layer 1
+  ├── layer 2
+  ├── layer 3
+  └── scored once when the whole campaign is flat
+```
+
+Rules:
+
+- member exits inside an active recovery chain or zone campaign are provisional;
+- active composite units never increment a completed-loss streak;
+- when all members close, Atlas sums authoritative MT5 realized P/L and creates one `WIN`, `LOSS`, or `FLAT`;
+- a composite win resets the strategic loss streak;
+- a composite loss increments it once;
+- a flat unit preserves the prior streak;
+- policy performance is attributed to the frozen/root lineage rather than each child ticket independently.
+
+## 4. Recovery risk architecture
+
+Recovery is permitted to manage an existing risk unit, but it is not permitted to become an unbounded martingale.
+
+```text
+root admitted risk
+      │
+      ▼
+original unit risk
+      │ × recovery envelope (currently 1.5× baseline)
+      ▼
+frozen chain ceiling
+      │
+      ├── raw recovery lot requirement
+      ├── broker min/max/step
+      ├── current chain loss / remaining capacity
+      └── OrderCheck / OrderCalcProfit
+      │
+      ▼
+capital-safe recovery lot or deterministic rejection
+```
+
+The recovery ledger persists sizing/adoption decisions so a later idle tick cannot erase why a hedge was authorized. On restart, an already-active pre-ledger chain is conservatively adopted into a finite ceiling before any additional expansion can occur.
+
+Important recovery reason families include `ATLAS_CHAIN_RISK_CAP`, `RECOVERY_RISK_BUDGET_INFEASIBLE`, `RECOVERY_CHAIN_BUDGET_UNRESOLVED`, and `ACTIVE_RECOVERY_CHAIN_ADOPTED`.
+
+## 5. Transaction-cost and market-structure economics
+
+P3.29 removed the assumption that one static spread threshold is intelligent across instruments. For each scalp opportunity Atlas/Nyao separate:
+
+1. **cost-ratio feasibility** — spread relative to planned stop/target;
+2. **market-structure feasibility** — whether satisfying the cost would distort the setup beyond acceptable ATR/base geometry;
+3. **capital feasibility** — whether the final structure fits the approved risk amount and broker minimum volume.
+
+A large BTC spread therefore does not create a permanent symbol ban. The opportunity is rejected when the required geometry is economically or structurally unreasonable, e.g. `SCALP_COST_STRUCTURE_MISMATCH` / `STOP_EXPANSION_EXCESSIVE`.
+
+## 6. Outcome truth and lineage
+
+MT5 deal history is the source of truth for realized P/L. Atlas reconstructs and preserves entry lineage so restarts and broker-side exits do not destroy strategic attribution.
+
+Current lineage mechanisms include:
+
+- entry policy epoch;
+- `FRESH_MARKET`, `HEDGE_CHILD`, reconstructed-history and zone origin;
+- immutable recovery entry lineage (`H|<chain>|<level>|<epoch>` for new-format children);
+- immutable zone lineage (`AZ|<plan>|L<layer>|P<epoch>` for new-format zone legs);
+- conservative legacy inference only when lifecycle/policy evidence is strong enough.
+
+## 7. Primary API surfaces
+
+Representative runtime endpoints:
+
+```text
+GET /api/v1/nyao/status?symbol=<SYMBOL>
+GET /api/v1/atlas/capital-sizing?symbol=<SYMBOL>
+GET /api/v1/atlas/risk-units?symbol=<SYMBOL>
+GET /api/v1/atlas/recovery-risk?symbol=<SYMBOL>
+GET /api/v1/atlas/risk-appetite?symbol=<SYMBOL>
+PUT /api/v1/atlas/risk-appetite?symbol=<SYMBOL>
+GET /api/v1/atlas/outcomes?symbol=<SYMBOL>
+GET /api/v1/atlas/outcomes/summary?symbol=<SYMBOL>
+GET /api/v1/atlas/policy-epochs?symbol=<SYMBOL>
+GET /api/v1/atlas/policy-performance?symbol=<SYMBOL>
+```
+
+## 8. Current phase map
+
+| Phase | Capability | Status |
+|---|---|---|
+| P3.28 | Authoritative MT5 outcome ingestion and entry attribution | Implemented / live verified |
+| P3.29 | Dynamic cost + structure-aware scalp economics | Implemented / live verified |
+| P3.30 | Composite recovery risk units | Implemented / live verified |
+| P3.30.1 | Exit-lineage repair | Implemented / live verified |
+| P3.30.2 | Zone-campaign composite units | Implemented / live verified |
+| P3.30.3 | Durable recovery budget ledger | Implemented |
+| P3.30.4 | Active recovery-chain adoption after restart | Implemented / live verified |
+| P3.31 | Concurrent portfolio risk allocation | Implemented / live verified |
+| P3.31.1 | Operator-configurable 1–20% portfolio risk appetite | Implemented / live verified |
+
+## 9. Deployment and safety boundary
+
+- Keep repository `data/` account evidence across upgrades; do not overwrite live history with packaged sample/runtime data.
+- Recompile `external/nyao/nyao_scalper.mq5` only when the Nyao version changes. Atlas-only UI/backend releases do not require MetaEditor compilation.
+- Nyao remains final broker execution authority. Atlas percentages do not bypass broker minimum volume, stop constraints, margin checks, `OrderCheck`, or `OrderCalcProfit`.
+- High leverage changes margin availability, not Atlas's permitted monetary loss.
+- The operator risk-appetite ceiling is an upper boundary, not a deployment target.
+
+---
+
+## Appendix A — Atlas ↔ Nyao Runtime Control Inventory
+
+The inventory below is retained as the low-level control contract. It documents runtime-controllable Nyao inputs and their corresponding status telemetry.
+
 Runtime-controllable inputs: 156
 Immutable infrastructure: MagicNumber, DiscordWebhookURL
 
