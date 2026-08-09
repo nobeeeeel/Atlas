@@ -12,7 +12,8 @@ from backend.app.intelligence.risk_appetite import get_risk_appetite
 from backend.app.intelligence.risk_units import build_risk_units
 
 
-SIZING_VERSION = "atlas-capital-regime-v2.0"
+SIZING_VERSION = "atlas-capital-regime-v2.1"
+OPPORTUNITY_ALLOCATION_VERSION = "atlas-adaptive-opportunity-risk-v1"
 
 DEMO_CAPITAL_SIMULATION_ENV = "ATLAS_DEMO_CAPITAL_SIMULATION"
 DEMO_RISK_CAPITAL_ENV = "ATLAS_DEMO_RISK_CAPITAL"
@@ -912,6 +913,136 @@ def _execution_equivalent_pct(
 
 
 
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _score_ratio(status: dict[str, Any], side: str) -> float:
+    side = side.lower()
+    score = max(0.0, _f(status, f"{side}_adjusted_score", _f(status, f"{side}_score")))
+    threshold = max(0.0, _f(status, f"{side}_effective_threshold", _f(status, f"runtime_min_{side}_signal_score")))
+    if threshold <= 0:
+        return 0.0
+    return score / threshold
+
+
+def _signal_tier(ratio: float) -> str:
+    if ratio >= 1.20:
+        return "STRONG"
+    if ratio >= 1.0:
+        return "QUALIFIED"
+    if ratio >= 0.75:
+        return "NEAR_THRESHOLD"
+    return "DEVELOPING"
+
+
+def _adaptive_opportunity_allocation(
+    status: dict[str, Any],
+    *,
+    risk_capital: float,
+    operating_risk_amount: float,
+    remaining_operating_risk_amount: float,
+    regime_scalp_floor_amount: float,
+    regime_zone_floor_amount: float,
+    recovery_probe: bool,
+) -> dict[str, Any]:
+    """Allocate bounded risk from the live operating envelope to each opportunity.
+
+    The capital-regime budgets remain conservative floors. A larger operator-owned
+    portfolio envelope can therefore be used efficiently without turning the
+    portfolio ceiling into per-trade risk.
+    """
+    if recovery_probe:
+        return {
+            "version": OPPORTUNITY_ALLOCATION_VERSION,
+            "scalp": {
+                "signal_tier": "RECOVERY_PROBE",
+                "directional_score_ratio": 0.0,
+                "quality_strength": 0.0,
+                "operating_share_pct": 0.0,
+                "regime_floor_amount": round(regime_scalp_floor_amount, 2),
+                "envelope_amount": round(regime_scalp_floor_amount, 2),
+                "absolute_equity_cap_pct": RECOVERY_PROBE_SCALP_RISK_PCT,
+                "absolute_equity_cap_amount": round(risk_capital * RECOVERY_PROBE_SCALP_RISK_PCT / 100.0, 2),
+                "pre_capacity_amount": round(regime_scalp_floor_amount, 2),
+            },
+            "zone": {
+                "signal_tier": "DISABLED_DURING_RECOVERY_PROBE",
+                "quality_strength": 0.0,
+                "operating_share_pct": 0.0,
+                "regime_floor_amount": 0.0,
+                "envelope_amount": 0.0,
+                "absolute_equity_cap_pct": 0.0,
+                "absolute_equity_cap_amount": 0.0,
+                "pre_capacity_amount": 0.0,
+            },
+        }
+
+    buy_ratio = _score_ratio(status, "buy")
+    sell_ratio = _score_ratio(status, "sell")
+    scalp_ratio = max(buy_ratio, sell_ratio)
+    scalp_strength = _clamp((scalp_ratio - 0.55) / 0.75, 0.0, 1.0)
+    scalp_share = 0.06 + 0.04 * scalp_strength
+    scalp_envelope = max(0.0, operating_risk_amount) * scalp_share
+    scalp_equity_cap_pct = 2.0
+    scalp_equity_cap = max(0.0, risk_capital) * scalp_equity_cap_pct / 100.0
+    scalp_pre_capacity = min(
+        max(regime_scalp_floor_amount, scalp_envelope),
+        scalp_equity_cap,
+    )
+
+    confirmation = max(0.0, _f(status, "zone_confirmation_score"))
+    confirmation_threshold = max(0.0, _f(status, "zone_confirmation_threshold"))
+    directional = max(0.0, _f(status, "zone_directional_score"))
+    directional_threshold = max(0.0, _f(status, "zone_minimum_directional_score"))
+    confirmation_ratio = confirmation / confirmation_threshold if confirmation_threshold > 0 else 0.0
+    directional_ratio = directional / directional_threshold if directional_threshold > 0 else 0.0
+    zone_ratio = 0.65 * confirmation_ratio + 0.35 * directional_ratio
+    zone_strength = _clamp((zone_ratio - 0.45) / 0.75, 0.0, 1.0)
+    zone_share = 0.09 + 0.06 * zone_strength
+    zone_envelope = max(0.0, operating_risk_amount) * zone_share
+    zone_equity_cap_pct = 3.0
+    zone_equity_cap = max(0.0, risk_capital) * zone_equity_cap_pct / 100.0
+    zone_pre_capacity = min(
+        max(regime_zone_floor_amount, zone_envelope),
+        zone_equity_cap,
+    )
+
+    return {
+        "version": OPPORTUNITY_ALLOCATION_VERSION,
+        "scalp": {
+            "signal_tier": _signal_tier(scalp_ratio),
+            "directional_score_ratio": round(scalp_ratio, 4),
+            "quality_strength": round(scalp_strength, 4),
+            "operating_share_pct": round(scalp_share * 100.0, 4),
+            "regime_floor_amount": round(regime_scalp_floor_amount, 2),
+            "envelope_amount": round(scalp_envelope, 2),
+            "absolute_equity_cap_pct": scalp_equity_cap_pct,
+            "absolute_equity_cap_amount": round(scalp_equity_cap, 2),
+            "pre_capacity_amount": round(scalp_pre_capacity, 2),
+        },
+        "zone": {
+            "signal_tier": _signal_tier(zone_ratio),
+            "confirmation_ratio": round(confirmation_ratio, 4),
+            "directional_ratio": round(directional_ratio, 4),
+            "quality_strength": round(zone_strength, 4),
+            "operating_share_pct": round(zone_share * 100.0, 4),
+            "regime_floor_amount": round(regime_zone_floor_amount, 2),
+            "envelope_amount": round(zone_envelope, 2),
+            "absolute_equity_cap_pct": zone_equity_cap_pct,
+            "absolute_equity_cap_amount": round(zone_equity_cap, 2),
+            "pre_capacity_amount": round(zone_pre_capacity, 2),
+        },
+        "rules": [
+            "Capital-regime percentages are conservative opportunity floors, not permanent ceilings.",
+            "A larger operator portfolio appetite may increase individual opportunity size only through a bounded share of the current operating envelope.",
+            "Scalp opportunity risk is capped at 2% of risk capital and zone-campaign risk at 3% regardless of the aggregate portfolio ceiling.",
+            "Opportunity allocation never overrides signal, execution-economics, broker, concentration, recovery, drawdown, or protection gates.",
+        ],
+    }
+
+
+
 def _position_stop_risk_usd(status: dict[str, Any], position: dict[str, Any]) -> float | None:
     """Estimate remaining downside to the broker stop; None means risk is unobservable."""
     entry = _f(position, "entry_price")
@@ -1221,14 +1352,28 @@ def build_capital_sizing_plan(
     max_total_risk_amount = risk_capital * max_total_base / 100.0
 
     # The operating envelope contracts with current risk/drawdown/volatility,
-    # while maximum_total remains the absolute outer ceiling. Existing risk
-    # units reserve capacity inside this envelope rather than globally locking it.
+    # while maximum_total remains the absolute outer ceiling. Opportunity
+    # authority is computed before reservations so an unobservable active stop
+    # can conservatively fall back to the same adaptive budget that could have
+    # admitted that position.
     operating_total_risk_amount = max_total_risk_amount * combined
+    opportunity_allocation = _adaptive_opportunity_allocation(
+        status,
+        risk_capital=risk_capital,
+        operating_risk_amount=operating_total_risk_amount,
+        remaining_operating_risk_amount=operating_total_risk_amount,
+        regime_scalp_floor_amount=raw_scalp_risk_amount,
+        regime_zone_floor_amount=raw_zone_risk_amount,
+        recovery_probe=loss_protection["state"] == "RECOVERY_PROBE",
+    )
+    adaptive_scalp_amount = max(0.0, _f(opportunity_allocation.get("scalp") or {}, "pre_capacity_amount"))
+    adaptive_zone_amount = max(0.0, _f(opportunity_allocation.get("zone") or {}, "pre_capacity_amount"))
+
     reservations = _active_risk_reservations(
         status,
         outcomes,
-        default_scalp_risk_amount=max(0.0, raw_scalp_risk_amount),
-        default_zone_risk_amount=max(0.0, raw_zone_risk_amount),
+        default_scalp_risk_amount=adaptive_scalp_amount,
+        default_zone_risk_amount=adaptive_zone_amount,
     )
     reserved_risk_amount = float(reservations["reserved_risk_amount"])
     remaining_operating_risk_amount = max(0.0, operating_total_risk_amount - reserved_risk_amount)
@@ -1246,8 +1391,8 @@ def build_capital_sizing_plan(
         scalp_risk_amount = 0.0
         zone_risk_amount = 0.0
     else:
-        scalp_risk_amount = min(raw_scalp_risk_amount, remaining_operating_risk_amount)
-        zone_risk_amount = min(raw_zone_risk_amount, remaining_operating_risk_amount)
+        scalp_risk_amount = min(adaptive_scalp_amount, remaining_operating_risk_amount)
+        zone_risk_amount = min(adaptive_zone_amount, remaining_operating_risk_amount)
 
     scalp_capital_pct = (scalp_risk_amount / risk_capital * 100.0) if risk_capital > 0 else 0.0
     zone_capital_pct = (zone_risk_amount / risk_capital * 100.0) if risk_capital > 0 else 0.0
@@ -1309,8 +1454,8 @@ def build_capital_sizing_plan(
     )
 
     capacity_limited = bool(
-        scalp_risk_amount + 1e-9 < raw_scalp_risk_amount
-        or zone_risk_amount + 1e-9 < raw_zone_risk_amount
+        scalp_risk_amount + 1e-9 < adaptive_scalp_amount
+        or zone_risk_amount + 1e-9 < adaptive_zone_amount
     )
     decision = (
         "VETO" if veto else (
@@ -1605,6 +1750,8 @@ def build_capital_sizing_plan(
             "scalp_pct_of_risk_capital": round(raw_scalp_capital_pct, 6),
             "zone_pct_of_risk_capital": round(raw_zone_capital_pct, 6),
         },
+
+        "opportunity_allocation": opportunity_allocation,
 
         "modifiers": {
             key: round(

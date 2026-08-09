@@ -4,7 +4,7 @@
 
 # Atlas --- Adaptive Trading Intelligence
 
-**Current release:** Atlas 1.30.19 · Nyao 44.3
+**Current release:** Atlas 1.30.21 · Nyao 44.4
 
 **Documentation:** [Architecture](docs/architecture.md) · [Nyao MT5 Execution Layer](external/nyao/README.md)
 
@@ -56,6 +56,12 @@ operator-owned ceiling.
 Individual scalp and zone budgets remain independently calculated
 beneath the portfolio ceiling.
 
+### Adaptive opportunity risk allocation
+Atlas can allocate a bounded share of the current operating envelope to a qualified scalp or zone campaign instead of permanently capping every opportunity at the capital-regime floor. The regime budget remains a conservative floor; per-opportunity hard caps, portfolio capacity and all execution gates remain authoritative.
+
+### Adaptive zone execution economics
+Zone campaigns use campaign-aware transaction-cost economics. The legacy direct `ATR × fixed ratio` veto is disabled in the Nyao directive; ATR remains market context while bounded dynamic stop/target cost ratios are derived from zone quality, confirmation progress and campaign reward/risk geometry.
+
 ### Concurrent portfolio risk allocation
 
 Existing positions no longer create a blanket account-wide exposure
@@ -99,6 +105,12 @@ Atlas uses MT5 deal history as the authoritative source for realised
 exits when available. It tracks exact realised P/L, reconstructs trades
 that occur between polls, preserves policy attribution and maintains
 immutable lineage for recovery and zone campaigns.
+
+
+### Zone-aware scalp coexistence
+A detected zone owns **context before execution**. While a qualified campaign is still waiting for confirmation or acceptable execution economics, Atlas keeps a `ZONE_AWARE_SCALP` lane open instead of idling the symbol. Scalp entries are constrained to the zone-aligned direction, keep their normal score/cost/risk gates, and are clipped when necessary to preserve prospective campaign headroom. Once every deterministic zone commit gate passes, Atlas atomically suspends new scalps and transfers fresh-entry authority to the zone campaign.
+
+Gemini receives the same zone state as read-only scalp context. Autonomous Nyao policy updates may continue while the zone is only being watched; new policy activation is deferred once the campaign crosses the commit boundary and remains deferred until campaign authority is released.
 
 ### Zone campaigns
 

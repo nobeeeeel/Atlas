@@ -467,10 +467,11 @@ def _candidate_fingerprint(
 
 
 def _zone_campaign_owns_execution(status: dict[str, Any]) -> bool:
-    """Return True only when an executable zone campaign owns fresh entries.
+    """Return True only after a zone campaign has crossed the commit boundary.
 
-    A capital-infeasible zero-leg zone may remain useful context for P3.23A
-    zone-aware scalping and must not block autonomous NYAO scalp-policy updates.
+    Zone-aware WATCHING state deliberately keeps autonomous Nyao scalp-policy
+    updates live. Once Nyao acknowledges an executable campaign with admitted
+    entries, new policy activation is deferred until the campaign is flat.
     """
     try:
         entry_count = int(status.get("zone_entry_count") or 0)
@@ -618,9 +619,10 @@ def apply_autonomous_llm_policy(
         current_command=current_command,
     )
 
-    # Do not activate a new NYAO scalp runtime while an executable zone campaign
-    # owns fresh-entry authority. P3.23A zero-leg zone-aware scalp fallback is not
-    # a zone campaign and therefore does not block autonomous scalp-policy updates.
+    # Keep Gemini/Nyao policy adaptation live while Atlas is only WATCHING a zone.
+    # Once a zone campaign crosses the deterministic commit boundary and Nyao
+    # acknowledges executable entries, freeze new policy activation at that mode
+    # boundary. New candidates remain auditable and queue for the clean boundary.
     if _zone_campaign_owns_execution(current_status):
         queue_result = _queue_zone_boundary_candidate(
             llm_result=llm_result,

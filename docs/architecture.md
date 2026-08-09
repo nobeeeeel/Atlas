@@ -1,6 +1,6 @@
 # Atlas Architecture
 
-**Current release:** Atlas 1.30.19 · Nyao 44.3
+**Current release:** Atlas 1.30.21 · Nyao 44.4
 
 This document is the canonical technical architecture for Atlas. It
 describes system boundaries, authority, risk accounting, execution flow
@@ -150,7 +150,11 @@ operating ceiling
 A 20% configured hard ceiling does not imply Atlas should seek 20%
 exposure. The operating governor may be substantially lower.
 
-### 4.4 Concurrent allocation
+### 4.4 Adaptive opportunity allocation
+
+Atlas converts the current operating envelope into bounded candidate budgets. Capital-regime scalp/zone values remain conservative floors, while setup quality may authorize a larger share of available operating capacity. Scalp opportunities remain capped at 2% of risk capital and zone campaigns at 3%, independently of the aggregate operator ceiling. Eligibility gates remain separate from sizing authority.
+
+### 4.5 Concurrent allocation
 
 Active risk is represented by reservations.
 
@@ -167,7 +171,7 @@ the remaining envelope.
 Allocation states include: - `AVAILABLE` - `PARTIALLY_ALLOCATED` -
 `FULLY_ALLOCATED` - capital/protection veto states
 
-### 4.5 Concentration
+### 4.6 Concentration
 
 Same-symbol exposure receives no diversification credit. Opposing
 positions are not assumed to eliminate risk because unequal volume, stop
@@ -251,6 +255,10 @@ Typical structural rejection reasons include cost/structure mismatch and
 excessive required expansion. Capital availability does not override
 this gate.
 
+## 7.1 Campaign-aware zone execution economics
+
+Zone spread feasibility is derived from the shared-stop risk distance and the active leg target distance using bounded dynamic ratios informed by zone quality, confirmation progress, campaign reward/risk and volatility context. A direct `ATR × fixed ratio` cap is no longer authoritative because it can collapse during quiet markets even when the campaign geometry is much larger. ATR remains diagnostic context and can tighten the quality multiplier without acting as a standalone hard veto.
+
 ## 8. Zone architecture
 
 Atlas builds deterministic zone context from market structure and candle
@@ -261,6 +269,31 @@ broker feasibility; - existing campaign identity.
 A valid existing unrelated risk unit does not automatically block a new
 zone campaign when sufficient portfolio capacity remains. A continuing
 zone campaign retains its immutable plan identity.
+
+
+## Zone execution ownership lifecycle
+
+Atlas separates zone **context ownership** from zone **execution ownership**.
+
+```text
+NORMAL_SCALP
+    ↓ qualified zone detected
+ZONE_AWARE_SCALP (WATCHING)
+    ↓ confirmation + directional + spread economics + broker + capital pass
+ZONE_ENTRY_CONFIRMED / COMMIT BOUNDARY
+    ↓ Nyao acknowledgement / exposure
+ZONE_CAMPAIGN (COMMITTED)
+    ↓ all campaign exposure released
+NORMAL_SCALP or next zone-aware state
+```
+
+While WATCHING, the zone-aligned scalp direction remains available under the ordinary scalp score, execution-economics, duplicate, broker and capital gates. Counter-direction scalps are deterministically suppressed by Nyao. Atlas also preserves prospective zone headroom by clipping the zone-aware scalp budget when necessary so that the higher-priority campaign can still commit if its gates qualify on the next refresh.
+
+A zone campaign receives exclusive fresh-entry authority only at the deterministic commit boundary. Existing positions continue to be managed; new conflicting scalps stop. This avoids wasting opportunities while a non-executable zone waits without allowing a scalp to steal the campaign's required risk capacity.
+
+### Gemini policy behavior across the zone lifecycle
+
+Gemini receives zone side, timeframe, quality, structure, feasibility and execution-lane state as read-only scalp-policy context. During `ZONE_AWARE_SCALP`, autonomous Nyao policy updates may continue and should optimize the scalp runtime for the aligned zone context without altering Atlas zone policy or weakening cost/risk gates. Once the zone crosses the commit boundary and Nyao acknowledges an executable campaign, new policy activation is deferred; candidate policies may still be evaluated/queued and are activated only after a clean campaign boundary. This prevents mid-campaign policy drift while preserving continuous learning.
 
 ## 9. Outcome authority and lineage
 

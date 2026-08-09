@@ -167,7 +167,7 @@ from backend.app.agents.policy_proposal import (
 
 app = FastAPI(
     title="Atlas",
-    version="1.30.19",
+    version="1.30.21",
 )
 
 
@@ -372,7 +372,7 @@ def root() -> dict[str, str]:
 def health() -> dict[str, str]:
     return {
         "status": "running",
-        "version": "1.30.19",
+        "version": "1.30.21",
         "strategy": "nyao",
         "execution_model": "account_environment_agnostic",
     }
@@ -1671,6 +1671,16 @@ def _build_gemini_scalp_zone_context(
             for key in ("zone_id", "side", "timeframe", "kind", "low", "high", "score", "status", "confluence")
         } if source_zone else None,
         "zone_plan_state": zone_plan.get("state"),
+        "campaign_commit_state": (
+            "COMMITTED" if execution_lane == "ZONE_CAMPAIGN"
+            else "WATCHING" if execution_lane == "ZONE_AWARE_SCALP"
+            else "NONE"
+        ),
+        "scalp_policy_update_rule": (
+            "CONTINUE_WITH_ZONE_CONTEXT" if execution_lane == "ZONE_AWARE_SCALP"
+            else "DEFER_NEW_ACTIVATION_AT_CAMPAIGN_BOUNDARY" if execution_lane == "ZONE_CAMPAIGN"
+            else "NORMAL"
+        ),
         "selected_zone_structure": active_plan.get("selected_structure") or broker.get("selected_structure"),
         "broker_campaign_feasible": broker.get("campaign_feasible"),
         "composite_bias": zone_map.get("composite_bias"),
@@ -1681,7 +1691,10 @@ def _build_gemini_scalp_zone_context(
             "Do not alter zone policy or turn a zone into a direct trade instruction. "
             "When execution_lane is ZONE_AWARE_SCALP, the zone-aligned direction is a "
             "deterministic constraint; optimize the Nyao scalp runtime around that context "
-            "without mutating the zone system itself."
+            "without mutating the zone system itself. Autonomous Nyao scalp-policy updates "
+            "may continue in this WATCHING state. When execution_lane becomes ZONE_CAMPAIGN, "
+            "the campaign has crossed the deterministic commit boundary; new scalp-policy "
+            "activation is deferred until the campaign releases execution authority."
         ),
     }
 
@@ -3555,7 +3568,7 @@ function renderAnalysis(){
     const entries=Array.isArray(activePlan.entries)?activePlan.entries:[], targets=Array.isArray(activePlan.take_profits)?activePlan.take_profits:[],zc=activePlan.confirmation?.zone_confirmation||{};
     const quoteLabel=zonePlan.price_basis==="BID_SELL_EXECUTION"?"live bid":zonePlan.price_basis==="ASK_BUY_EXECUTION"?"live ask":pretty(zonePlan.price_basis||"execution quote");
   const zoneSpread=activePlan.confirmation?.spread_assessment||{};
-  zoneExecution.innerHTML=`<div class="zone-plan"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE · ${esc(text(activePlan.plan_id))}</div><div class="zone-price" style="margin-top:5px">${esc(activePlan.side)} ${zonePlan.zone_aware_scalping_active?"ZONE-AWARE SCALP":"ZONE CAMPAIGN"} · ${zonePlan.zone_aware_scalping_active?"zone context retained; ordinary scalp engine released":"ordinary scalping suspended"}</div><div class="muted" style="margin-top:5px">${esc(quoteLabel)} ${fmt(zonePlan.live_price,3)} is inside ${esc(activePlan.source_zone?.timeframe||"")} ${esc(pretty(activePlan.source_zone?.kind||"ZONE"))}. MT5 bid ${fmt(zonePlan.live_bid,3)} · ask ${fmt(zonePlan.live_ask,3)} · closed M30 reference ${fmt(zonePlan.closed_m30_reference,3)}. Zone spread ${fmt(zoneSpread.spread_price,3)} / cap ${fmt(zoneSpread.effective_cap_price,3)}; scalp cost gate is separate. ${zoneExecutorInstalled?`Nyao executor: ${esc(pretty(s.zone_last_execution_reason||"READY"))}.`:"Install the newly compiled Nyao build to enforce this directive."}</div></div><span class="badge ${zoneModeLive?"ok":"warn"}">${esc(zoneModeLive?"LIVE IN NYAO":pretty(zonePlan.state))}</span></div><div class="zone-plan-grid">${entries.map((entry,index)=>`<div class="zone-plan-leg"><div class="label">ENTRY ${entry.leg} · ${fmt(entry.risk_allocation_pct,0)}% · ${esc(pretty(entry.order_type))}</div><strong>${entry.order_type==="MARKET_ON_CONFIRMATION"?`LIVE (ref ${fmt(entry.entry_price,3)})`:fmt(entry.entry_price,3)}</strong><div class="muted">${targets[index]?`TP${targets[index].target} ${fmt(targets[index].price,3)} · close ${fmt(targets[index].close_allocation_pct,0)}%`:"Target pending"}</div></div>`).join("")}</div><div class="grid g4" style="margin-top:9px"><div class="kpi"><div class="label">Shared stop</div><div class="value small neg">${fmt(activePlan.stop_loss,3)}</div></div><div class="kpi"><div class="label">Total account risk</div><div class="value small">${fmt(activePlan.risk?.account_risk_pct,2)}%</div></div><div class="kpi"><div class="label">Zone confirmation</div><div class="value small ${zc.eligible?"pos":""}">${fmt(zc.combined_score,1)} / ${fmt(zc.threshold,1)}</div><div class="muted">Directional ${fmt(zc.directional_score,2)} / ${fmt(zc.minimum_directional_score,2)} · policy ${text(zc.policy_epoch)}</div></div><div class="kpi"><div class="label">Execution authority</div><div class="value small ${zoneModeLive?"pos":"neg"}">${zoneModeLive?"ACTIVE":"NOT ACTIVE"}</div></div></div>${(zonePlan.blockers||[]).length?`<div class="callout" style="margin-top:9px">${esc(zonePlan.blockers.join(" "))}</div>`:""}</div>`;
+  zoneExecution.innerHTML=`<div class="zone-plan"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE · ${esc(text(activePlan.plan_id))}</div><div class="zone-price" style="margin-top:5px">${esc(activePlan.side)} ${zonePlan.zone_aware_scalping_active?"ZONE-AWARE SCALP":"ZONE CAMPAIGN"} · ${zonePlan.zone_aware_scalping_active?"zone context retained; ordinary scalp engine released":"ordinary scalping suspended"}</div><div class="muted" style="margin-top:5px">${esc(quoteLabel)} ${fmt(zonePlan.live_price,3)} is inside ${esc(activePlan.source_zone?.timeframe||"")} ${esc(pretty(activePlan.source_zone?.kind||"ZONE"))}. MT5 bid ${fmt(zonePlan.live_bid,3)} · ask ${fmt(zonePlan.live_ask,3)} · closed M30 reference ${fmt(zonePlan.closed_m30_reference,3)}. Zone spread ${fmt(zoneSpread.spread_price,3)} / adaptive cap ${fmt(zoneSpread.effective_cap_price,3)}${zoneSpread.limiting_factor?` · ${esc(pretty(zoneSpread.limiting_factor))} limited`:""}; scalp cost gate is separate. ${zoneExecutorInstalled?`Nyao executor: ${esc(pretty(s.zone_last_execution_reason||"READY"))}.`:"Install the newly compiled Nyao build to enforce this directive."}</div></div><span class="badge ${zoneModeLive?"ok":"warn"}">${esc(zoneModeLive?"LIVE IN NYAO":pretty(zonePlan.state))}</span></div><div class="zone-plan-grid">${entries.map((entry,index)=>`<div class="zone-plan-leg"><div class="label">ENTRY ${entry.leg} · ${fmt(entry.risk_allocation_pct,0)}% · ${esc(pretty(entry.order_type))}</div><strong>${entry.order_type==="MARKET_ON_CONFIRMATION"?`LIVE (ref ${fmt(entry.entry_price,3)})`:fmt(entry.entry_price,3)}</strong><div class="muted">${targets[index]?`TP${targets[index].target} ${fmt(targets[index].price,3)} · close ${fmt(targets[index].close_allocation_pct,0)}%`:"Target pending"}</div></div>`).join("")}</div><div class="grid g4" style="margin-top:9px"><div class="kpi"><div class="label">Shared stop</div><div class="value small neg">${fmt(activePlan.stop_loss,3)}</div></div><div class="kpi"><div class="label">Total account risk</div><div class="value small">${fmt(activePlan.risk?.account_risk_pct,2)}%</div></div><div class="kpi"><div class="label">Zone confirmation</div><div class="value small ${zc.eligible?"pos":""}">${fmt(zc.combined_score,1)} / ${fmt(zc.threshold,1)}</div><div class="muted">Directional ${fmt(zc.directional_score,2)} / ${fmt(zc.minimum_directional_score,2)} · policy ${text(zc.policy_epoch)}</div></div><div class="kpi"><div class="label">Execution authority</div><div class="value small ${zoneModeLive?"pos":"neg"}">${zoneModeLive?"ACTIVE":"NOT ACTIVE"}</div></div></div>${(zonePlan.blockers||[]).length?`<div class="callout" style="margin-top:9px">${esc(zonePlan.blockers.join(" "))}</div>`:""}</div>`;
   }else{
     const sizingNote=capital.version?` Atlas capital budget: ${fmt(capital.approved_scalp_risk_pct,3)}% equity per qualified scalp (${esc(pretty(capital.decision))}); current-account loss streak ${text(capital.consecutive_losses,0)}.`:"";
     zoneExecution.innerHTML=`<div class="zone-plan"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE</div><div class="zone-price" style="margin-top:5px">${esc(pretty(zonePlan.mode||"WAITING"))}</div><div class="muted" style="margin-top:5px">${zonePlan.mode==="SCALP_MODE"?"Live price is outside the priority zones, so the ordinary scalp strategy remains the proposed mode.":esc((zonePlan.blockers||[])[0]||"Waiting for the live zone execution plan.")}${sizingNote}</div></div><span class="badge ${capital.veto_new_risk?"bad":zonePlan.mode==="SCALP_MODE"?"info":"warn"}">${esc(capital.veto_new_risk?"CAPITAL VETO":pretty(zonePlan.state||"PENDING"))}</span></div></div>`;
@@ -3973,7 +3986,7 @@ function renderControl(){
 }
 function renderRiskAppetite(){
   const ra=state.riskAppetite||{};
-  const capital=state.intelligence?.capital_sizing||state.intelligence?.capital||{};
+  const capital=state.zonePlan?.capital_sizing||state.intelligence?.capital_sizing||state.intelligence?.capital||{};
   const pct=Number(ra.portfolio_hard_risk_pct??capital.risk_appetite?.portfolio_hard_risk_pct??1);
   const equity=Number(state.status?.equity||capital.equity||0);
   const hard=Number(capital.maximum_total_strategy_risk_amount||equity*pct/100);

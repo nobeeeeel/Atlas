@@ -10,8 +10,13 @@ from backend.app.intelligence.broker_feasibility import evaluate_zone_campaign_f
 from backend.app.intelligence.zone_policy import get_zone_policy
 
 
-PLAN_VERSION = "zone-execution-plan-v0.8"
+PLAN_VERSION = "zone-execution-plan-v1.0"
+ZONE_COST_MODEL_VERSION = "atlas-adaptive-zone-execution-economics-v1"
 CAMPAIGN_REATTACH_GRACE_SECONDS = 90
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
 
 
 def _quotes(status: dict[str, Any], zone_map: dict[str, Any]) -> dict[str, float]:
@@ -622,63 +627,19 @@ def _trade_plan(
     ]
 
     #
-    # Dedicated zone spread gate.
+    # Adaptive zone execution economics.
     #
-    zone_spread_caps = [
-        cap
-        for cap
-        in (
-            m30_atr
-            * float(
-                policy[
-                    "zone_market_spread_atr_ratio"
-                ]
-            ),
-
-            abs(
-                live_price
-                - stop_loss
-            )
-            * float(
-                policy[
-                    "zone_max_spread_stop_ratio"
-                ]
-            ),
-
-            abs(
-                take_profits[
-                    0
-                ][
-                    "price"
-                ]
-                - live_price
-            )
-            * float(
-                policy[
-                    "zone_max_spread_target_ratio"
-                ]
-            ),
-        )
-        if cap > 0
-    ]
-
-    zone_spread_cap = (
-        min(
-            zone_spread_caps
-        )
-        if zone_spread_caps
-        else 0.0
-    )
-
-    zone_spread_within_limit = bool(
-        not policy[
-            "enable_zone_spread_filter"
-        ]
-        or zone_spread_cap <= 0
-        or spread
-        <= zone_spread_cap
-    )
-
+    # The legacy zone gate used the minimum of:
+    #   ATR * fixed ratio, stop distance * fixed ratio, TP1 distance * fixed ratio.
+    # On instruments whose broker spread can remain wider than current ATR (for
+    # example weekend BTC), the ATR term collapses toward zero and becomes a
+    # quasi-static veto even when the campaign itself has much larger geometry.
+    #
+    # Atlas now treats ATR as context/telemetry and derives the executable cost
+    # allowance from campaign risk/reward geometry plus bounded setup quality.
+    # Nyao receives the resulting dynamic stop/target ratios and a zero ATR ratio,
+    # so its existing final broker-time gate reproduces the same philosophy.
+    #
     zone_confirmation = (
         _zone_confirmation(
             zone=zone,
@@ -688,6 +649,112 @@ def _trade_plan(
             price=live_price,
         )
     )
+
+    target_allocations = [
+        max(0.0, float(item.get("close_allocation_pct") or 0.0))
+        for item in take_profits
+    ]
+    target_allocation_total = sum(target_allocations) or 100.0
+    weighted_target_distance = sum(
+        abs(float(item.get("price") or 0.0) - live_price)
+        * allocation / target_allocation_total
+        for item, allocation in zip(take_profits, target_allocations)
+    )
+    live_risk_distance = abs(live_price - stop_loss)
+    campaign_reward_risk_ratio = (
+        weighted_target_distance / live_risk_distance
+        if live_risk_distance > 0
+        else 0.0
+    )
+
+    confirmation_ratio = (
+        float(zone_confirmation["combined_score"])
+        / float(zone_confirmation["threshold"])
+        if float(zone_confirmation["threshold"]) > 0
+        else 0.0
+    )
+    directional_ratio = (
+        float(zone_confirmation["directional_score"])
+        / float(zone_confirmation["minimum_directional_score"])
+        if float(zone_confirmation["minimum_directional_score"]) > 0
+        else 0.0
+    )
+    zone_quality_strength = _clamp(float(zone.get("score") or 0.0) / 100.0, 0.0, 1.0)
+    confirmation_strength = _clamp(confirmation_ratio / 1.15, 0.0, 1.0)
+    directional_strength = _clamp(directional_ratio / 1.15, 0.0, 1.0)
+    setup_quality_strength = _clamp(
+        0.40 * zone_quality_strength
+        + 0.40 * confirmation_strength
+        + 0.20 * directional_strength,
+        0.0,
+        1.0,
+    )
+    reward_strength = _clamp((campaign_reward_risk_ratio - 0.8) / 1.2, 0.0, 1.0)
+
+    current_atr = max(0.0, float(status.get("current_atr") or m30_atr or 0.0))
+    average_atr = max(0.0, float(status.get("average_atr") or 0.0))
+    volatility_ratio = (
+        current_atr / average_atr
+        if current_atr > 0 and average_atr > 0
+        else max(0.0, float(status.get("volatility_ratio") or 0.0))
+    )
+    spread_atr_ratio = spread / current_atr if current_atr > 0 else 0.0
+
+    # Quality/reward can widen transaction-cost tolerance, but only within
+    # explicit bounded multipliers. Quiet volatility slightly tightens rather
+    # than directly vetoing the campaign.
+    quality_multiplier = 0.85 + 0.45 * setup_quality_strength + 0.20 * reward_strength
+    if 0 < volatility_ratio < 0.55:
+        quality_multiplier *= 0.90
+    elif volatility_ratio > 1.75:
+        quality_multiplier *= 0.95
+    quality_multiplier = _clamp(quality_multiplier, 0.75, 1.50)
+
+    base_stop_ratio = max(0.0, float(policy["zone_max_spread_stop_ratio"]))
+    base_target_ratio = max(0.0, float(policy["zone_max_spread_target_ratio"]))
+    effective_stop_ratio = _clamp(base_stop_ratio * quality_multiplier, 0.05, 0.18)
+    effective_target_ratio = _clamp(base_target_ratio * quality_multiplier, 0.08, 0.27)
+
+    # Initial market-on-confirmation leg must match what Nyao will check using
+    # the actual live execution price, shared stop and TP1.
+    first_target_price = float(take_profits[0]["price"]) if take_profits else 0.0
+    stop_cost_cap = live_risk_distance * effective_stop_ratio if live_risk_distance > 0 else 0.0
+    target_distance = abs(first_target_price - live_price) if first_target_price > 0 else 0.0
+    target_cost_cap = target_distance * effective_target_ratio if target_distance > 0 else 0.0
+    active_caps = [cap for cap in (stop_cost_cap, target_cost_cap) if cap > 0]
+    zone_spread_cap = min(active_caps) if active_caps else 0.0
+    limiting_factor = (
+        "STOP_DISTANCE" if stop_cost_cap > 0 and stop_cost_cap <= target_cost_cap
+        else "TARGET_DISTANCE" if target_cost_cap > 0
+        else "UNAVAILABLE"
+    )
+
+    zone_spread_within_limit = bool(
+        not policy["enable_zone_spread_filter"]
+        or zone_spread_cap <= 0
+        or spread <= zone_spread_cap
+    )
+
+    layer_assessments: list[dict[str, Any]] = []
+    for index, entry in enumerate(ideal_layers):
+        entry_price = float(entry.get("entry_price") or 0.0)
+        target = take_profits[index] if index < len(take_profits) else (take_profits[-1] if take_profits else {})
+        target_price = float(target.get("price") or 0.0)
+        layer_risk = abs(entry_price - stop_loss) if entry_price > 0 else 0.0
+        layer_reward = abs(target_price - entry_price) if entry_price > 0 and target_price > 0 else 0.0
+        layer_stop_cap = layer_risk * effective_stop_ratio if layer_risk > 0 else 0.0
+        layer_target_cap = layer_reward * effective_target_ratio if layer_reward > 0 else 0.0
+        layer_caps = [cap for cap in (layer_stop_cap, layer_target_cap) if cap > 0]
+        layer_cap = min(layer_caps) if layer_caps else 0.0
+        layer_assessments.append({
+            "leg": int(entry.get("leg") or index + 1),
+            "entry_price": round(entry_price, 8),
+            "target_price": round(target_price, 8),
+            "risk_distance": round(layer_risk, 8),
+            "target_distance": round(layer_reward, 8),
+            "effective_cap_price": round(layer_cap, 8),
+            "spread_within_limit_if_executed_now": bool(layer_cap <= 0 or spread <= layer_cap),
+        })
 
     selected_structure = str(
         broker_feasibility.get(
@@ -918,23 +985,29 @@ def _trade_plan(
                     zone_spread_within_limit
                 ),
 
-                "market_atr_ratio": float(
-                    policy[
-                        "zone_market_spread_atr_ratio"
-                    ]
-                ),
-
-                "maximum_stop_ratio": float(
-                    policy[
-                        "zone_max_spread_stop_ratio"
-                    ]
-                ),
-
-                "maximum_target_ratio": float(
-                    policy[
-                        "zone_max_spread_target_ratio"
-                    ]
-                ),
+                "model": ZONE_COST_MODEL_VERSION,
+                "basis": "CAMPAIGN_GEOMETRY_ADAPTIVE",
+                # Zero disables the legacy direct ATR cap in Nyao. ATR remains
+                # diagnostic context and influences bounded quality scaling.
+                "market_atr_ratio": 0.0,
+                "legacy_market_atr_ratio": float(policy["zone_market_spread_atr_ratio"]),
+                "maximum_stop_ratio": round(effective_stop_ratio, 8),
+                "maximum_target_ratio": round(effective_target_ratio, 8),
+                "base_stop_ratio": round(base_stop_ratio, 8),
+                "base_target_ratio": round(base_target_ratio, 8),
+                "quality_multiplier": round(quality_multiplier, 6),
+                "setup_quality_strength": round(setup_quality_strength, 6),
+                "campaign_reward_risk_ratio": round(campaign_reward_risk_ratio, 6),
+                "weighted_target_distance": round(weighted_target_distance, 8),
+                "live_risk_distance": round(live_risk_distance, 8),
+                "current_atr": round(current_atr, 8),
+                "average_atr": round(average_atr, 8),
+                "volatility_ratio": round(volatility_ratio, 6),
+                "spread_atr_ratio": round(spread_atr_ratio, 6),
+                "stop_cost_cap_price": round(stop_cost_cap, 8),
+                "target_cost_cap_price": round(target_cost_cap, 8),
+                "limiting_factor": limiting_factor,
+                "layer_assessments": layer_assessments,
 
                 "virtual_layer_activation_atr_ratio": float(
                     policy[
@@ -1166,57 +1239,81 @@ def build_zone_execution_plan(
     if not zone_capacity_available:
         blockers.append("Concurrent portfolio allocation has no approved zone risk capacity for this campaign.")
 
-    # ------------------------------------------------------------------
-    # P3.23A — Zone-aware scalp fallback
-    # ------------------------------------------------------------------
+    # Zone-aware scalp coexistence.
     #
-    # A qualified zone can still be valuable market context even when the
-    # account cannot afford the broker-minimum zone campaign.
+    # A detected zone owns CONTEXT before it owns EXECUTION. While the full
+    # campaign is not yet ready to commit, Atlas can keep the scalp lane open
+    # in the zone-aligned direction instead of idling the symbol. This applies
+    # both to broker/capital-infeasible campaigns and to otherwise feasible
+    # campaigns still waiting on confirmation or execution economics.
     #
-    # In that specific case Atlas releases the ordinary scalp engine instead
-    # of leaving the symbol idle.
-    #
-    # Safety:
-    #   - concurrent portfolio capacity remains available
-    #   - no global capital veto
-    #   - scalp has a positive approved risk budget
-    #   - zone campaign itself is broker/capital infeasible
-    #
-    # Nyao will use the zone side as directional context:
-    #
-    #   SUPPLY / SELL zone -> SELL scalp only
-    #   DEMAND / BUY zone  -> BUY scalp only
-    #
-    # Normal scalp thresholds and execution gates remain unchanged.
-    #
-    allow_zone_aware_scalping = bool(
-        not broker_feasible
-        and not bool(
-            capital_plan.get(
-                "veto_new_risk",
-                False,
-            )
-        )
-        and float(
-            capital_plan.get(
-                "approved_scalp_risk_pct"
-            )
-            or 0.0
-        ) > 0.0
-        and not confirmation[
-            "trading_paused"
-        ]
+    # The campaign receives exclusive fresh-entry authority only once every
+    # deterministic commit gate passes (confirmation, spread economics, broker
+    # feasibility, capital capacity, pause/conflict checks). At that boundary
+    # Atlas atomically suspends new scalps and Nyao may execute the zone plan.
+    scalp_capacity_available = bool(
+        not bool(capital_plan.get("veto_new_risk", False))
+        and float(capital_plan.get("approved_scalp_risk_pct") or 0.0) > 0.0
     )
+    waiting_for_campaign = bool(
+        not ready
+        and not conflicting_zone_campaign
+        and not confirmation["trading_paused"]
+    )
+    allow_zone_aware_scalping = bool(
+        waiting_for_campaign
+        and scalp_capacity_available
+    )
+
+    # Preserve prospective campaign headroom while a feasible zone is WATCHING.
+    # This is not an active risk-unit reservation yet; it is a deterministic
+    # admission reserve applied to the scalp authority carried by this directive.
+    # As live scalps appear, the normal concurrent portfolio allocator will turn
+    # them into real reservations and this preview is recomputed on the next tick.
+    directive_capital_plan = dict(capital_plan)
+    zone_priority_reservation: dict[str, Any] = {
+        "active": False,
+        "basis": "NONE",
+        "zone_priority_amount": 0.0,
+        "scalp_budget_before_priority": float(capital_plan.get("approved_scalp_risk_amount") or 0.0),
+        "scalp_budget_after_priority": float(capital_plan.get("approved_scalp_risk_amount") or 0.0),
+    }
+    if allow_zone_aware_scalping and broker_feasible and zone_capacity_available:
+        allocation = dict(capital_plan.get("portfolio_allocation") or {})
+        remaining_operating = float(allocation.get("remaining_operating_risk_amount") or 0.0)
+        zone_priority_amount = float(capital_plan.get("approved_zone_risk_amount") or 0.0)
+        scalp_before = float(capital_plan.get("approved_scalp_risk_amount") or 0.0)
+        scalp_after = min(scalp_before, max(0.0, remaining_operating - zone_priority_amount))
+        risk_capital = float(capital_plan.get("risk_capital") or status.get("equity") or 0.0)
+        directive_capital_plan["approved_scalp_risk_amount"] = round(scalp_after, 2)
+        directive_capital_plan["approved_scalp_risk_pct"] = round(
+            (scalp_after / risk_capital * 100.0) if risk_capital > 0 else 0.0,
+            6,
+        )
+        directive_capital_plan["execution_scalp_risk_pct_of_equity"] = directive_capital_plan["approved_scalp_risk_pct"]
+        zone_priority_reservation = {
+            "active": True,
+            "basis": "PROSPECTIVE_ZONE_COMMIT_HEADROOM",
+            "zone_priority_amount": round(zone_priority_amount, 2),
+            "remaining_operating_before_priority": round(remaining_operating, 2),
+            "scalp_budget_before_priority": round(scalp_before, 2),
+            "scalp_budget_after_priority": round(scalp_after, 2),
+        }
+
+    if ready:
+        execution_state = "ZONE_ENTRY_CONFIRMED"
+    elif not broker_feasible or not zone_capacity_available:
+        execution_state = "ZONE_CAPITAL_INFEASIBLE"
+    elif allow_zone_aware_scalping:
+        execution_state = "ZONE_AWARE_SCALP"
+    else:
+        execution_state = "ZONE_WAITING_FOR_CONFIRMATION"
 
     return {
         **base,
-        "state": (
-            "ZONE_ENTRY_CONFIRMED"
-            if ready
-            else "ZONE_CAPITAL_INFEASIBLE"
-            if (not broker_feasible or not zone_capacity_available)
-            else "ZONE_WAITING_FOR_CONFIRMATION"
-        ),
+        "capital_sizing": directive_capital_plan,
+        "zone_priority_reservation": zone_priority_reservation,
+        "state": execution_state,
         "mode": "ZONE_MODE",
         "live_price": round(price, 8),
         "price_basis": price_basis,
@@ -1277,6 +1374,8 @@ def flatten_zone_execution_directive(plan: dict[str, Any]) -> dict[str, Any]:
         "execution_requested": bool(
             plan.get("mode") == "ZONE_MODE"
             and len(entries) > 0
+            and not bool(plan.get("ordinary_scalping_allowed", True))
+            and bool((plan.get("directive_preview") or {}).get("zone_entry_allowed"))
         ),
         "suspend_ordinary_scalp_entries": not bool(
             plan.get("ordinary_scalping_allowed", True)
@@ -1319,7 +1418,8 @@ def flatten_zone_execution_directive(plan: dict[str, Any]) -> dict[str, Any]:
             ((zone_plan.get("confirmation") or {}).get("spread_assessment") or {}).get("enabled", True)
         ),
         "zone_market_spread_atr_ratio": (
-            ((zone_plan.get("confirmation") or {}).get("spread_assessment") or {}).get("market_atr_ratio") or 0.75
+            0.75 if ((zone_plan.get("confirmation") or {}).get("spread_assessment") or {}).get("market_atr_ratio") is None
+            else float(((zone_plan.get("confirmation") or {}).get("spread_assessment") or {}).get("market_atr_ratio"))
         ),
         "zone_max_spread_stop_ratio": (
             ((zone_plan.get("confirmation") or {}).get("spread_assessment") or {}).get("maximum_stop_ratio") or 0.10

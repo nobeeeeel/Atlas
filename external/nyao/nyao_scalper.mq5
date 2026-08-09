@@ -4,7 +4,7 @@
 // | © Copyright Nyao Scalper by Elriz Wiraswara                      |
 // +------------------------------------------------------------------+
 #property copyright "© Copyright Nyao Scalper by Elriz Wiraswara"
-#property version "44.3"
+#property version "44.4"
 #property description "Auto Trading EA Robot with Comprehensive Features"
 #property description ""
 #property description "This is an open-source project for educational and experimental purposes only"
@@ -5224,7 +5224,7 @@ void CheckForTradingSignal()
     double buySignal = BuySignal();
     double sellSignal = SellSignal();
 
-    // P3.23A — Zone-aware scalp fallback.
+    // Atlas zone-aware scalp coexistence.
     //
     // When Atlas has identified a valid zone but the full zone campaign is
     // broker/capital infeasible, Atlas may deliberately release ordinary
@@ -5239,9 +5239,11 @@ void CheckForTradingSignal()
     // spread, capital, duplicate-distance, cooldown, margin, or other gates.
     bool zoneAwareScalpFallback = (
         atlasZoneDirectiveFresh &&
-        atlasZoneDirectiveState == "ZONE_CAPITAL_INFEASIBLE" &&
         !atlasZoneScalpSuspended &&
-        atlasZoneEntryCount <= 0 &&
+        (
+            atlasZoneDirectiveState == "ZONE_AWARE_SCALP" ||
+            atlasZoneDirectiveState == "ZONE_CAPITAL_INFEASIBLE"
+        ) &&
         (atlasZoneSide == "BUY" || atlasZoneSide == "SELL")
     );
 

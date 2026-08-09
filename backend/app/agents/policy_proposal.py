@@ -117,8 +117,13 @@ execution lane (NORMAL_SCALP, ZONE_AWARE_SCALP, or ZONE_CAMPAIGN), zone side,
 timeframe, score, freshness, price location, higher-timeframe structure, and
 campaign feasibility. When Atlas is in ZONE_AWARE_SCALP, the aligned direction is
 a deterministic constraint enforced by Atlas/Nyao; reason about how the NYAO scalp
-policy performs inside that context without overriding the constraint. When a zone
-campaign owns fresh-entry authority, do not try to force concurrent scalp entries.
+policy performs inside that context without overriding the constraint. Autonomous
+scalp-policy updates may continue while the zone is WATCHING, because no campaign
+risk has been committed yet. Do not tune merely to force the waiting zone to trade,
+and do not weaken normal scalp cost/risk gates. When execution_lane becomes
+ZONE_CAMPAIGN, Atlas has crossed the deterministic commit boundary: do not try to
+force concurrent scalp entries, and allow new policy activation to defer until the
+campaign releases execution authority.
 
 Use performance context as mandatory feedback when closed outcomes exist. Diagnose
 loss streaks, expectancy, entry/exit behavior, regime splits, MFE/MAE, recovery

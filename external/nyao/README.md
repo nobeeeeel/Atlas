@@ -1,6 +1,6 @@
 # Nyao --- Atlas MT5 Execution Layer
 
-**Current release:** Nyao 44.3 · paired with Atlas 1.30.19
+**Current release:** Nyao 44.4 · paired with Atlas 1.30.21
 
 Nyao is the MetaTrader 5 execution component of Atlas Adaptive Trading
 Intelligence. It observes live broker state, publishes execution
@@ -84,7 +84,7 @@ loss.
 
 ## Concurrent risk units
 
-Nyao 44.3 is compatible with Atlas concurrent portfolio allocation.
+Nyao 44.4 is compatible with Atlas concurrent portfolio allocation.
 
 Existing exposure is represented by strategic risk units rather than a
 blanket global lock. Nyao therefore permits another qualified entry when
@@ -120,6 +120,15 @@ When Nyao/Atlas discovers an already-active recovery chain after restart
 or upgrade, further expansion is not allowed until Atlas has established
 a finite adopted chain budget. Existing positions may still be managed
 or reduced while authority is reconciled.
+
+
+## Zone-aware scalp coexistence
+
+Nyao 44.4 distinguishes a zone that is being **watched** from a zone campaign that has been **committed**. In `ZONE_AWARE_SCALP`, ordinary scalp evaluation continues but Nyao deterministically suppresses the direction opposite the Atlas zone. The aligned direction still has to pass the normal signal, spread/structure, capital, duplicate-distance and broker-volume gates.
+
+When Atlas reports the zone as execution-ready, Nyao crosses the commit boundary: new scalp entries are suspended and the zone executor owns fresh-entry authority. Existing positions continue to be managed normally.
+
+Atlas may continue applying autonomous Gemini/Nyao scalp-policy updates while a zone is only being watched. Once a committed campaign is acknowledged, new policy activation is deferred until the campaign releases execution authority so that the runtime does not drift underneath an active campaign.
 
 ## Zone campaigns
 
@@ -168,3 +177,7 @@ See the repository root `README.md` for the product overview and
 
 This README intentionally documents Nyao's execution responsibilities
 rather than historical development phases.
+
+## Adaptive zone cost ratios
+
+Atlas 1.30.21 supplies dynamic zone stop/target cost ratios and sets the legacy direct zone ATR spread ratio to zero. Nyao 44.4 interprets a zero ATR ratio as disabled and continues to perform its final live bid/ask check against the supplied stop/target ratios. **Nyao 44.4 must be recompiled for the zone-aware scalp coexistence state introduced in this release.**
