@@ -373,3 +373,8 @@ architectural capabilities should update this document rather than
 create phase-specific architecture files. Temporary implementation
 phases, migration scripts and test packages should not become permanent
 repository documentation.
+
+
+## Notification event layer
+
+The dashboard derives human-facing notifications from authoritative Atlas/Nyao state transitions rather than from raw polling ticks. The first observed snapshot establishes a baseline; later material transitions are deduplicated and surfaced through the in-app drawer, optional browser notifications, and configurable severity-aware audio. Notification state/preferences are browser-local and are not trading authority or audit evidence. Trading ledgers and policy/outcome stores remain authoritative.

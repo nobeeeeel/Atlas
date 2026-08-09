@@ -2462,6 +2462,9 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 .workspace-intro{padding:14px 16px;border:1px solid rgba(110,168,255,.18);border-radius:13px;background:rgba(110,168,255,.045);margin-bottom:14px;color:var(--soft);font-size:12px}.workspace-intro strong{color:var(--text)}
 .signal-grid .card{min-height:210px}
 .table-wrap table th:nth-child(n+6),.table-wrap table td:nth-child(n+6){font-size:11px;color:var(--muted)}
+
+/* Atlas notification center */
+.notify-wrap{position:relative}.notify-bell{position:relative;width:36px;height:36px;border:1px solid var(--border);border-radius:10px;background:#0d141e;color:var(--text);cursor:pointer;font-size:17px}.notify-bell:hover{border-color:rgba(110,168,255,.45)}.notify-count{position:absolute;right:-5px;top:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#ff5c6c;color:white;font-size:10px;font-weight:800;display:none;align-items:center;justify-content:center}.notify-count.show{display:flex}.notify-drawer{position:fixed;z-index:90;right:18px;top:68px;width:min(430px,calc(100vw - 28px));max-height:72vh;background:#0b1119;border:1px solid rgba(110,168,255,.25);border-radius:15px;box-shadow:0 22px 70px rgba(0,0,0,.48);display:none;overflow:hidden}.notify-drawer.open{display:block}.notify-head{display:flex;justify-content:space-between;align-items:center;padding:15px 16px;border-bottom:1px solid var(--border)}.notify-list{max-height:60vh;overflow:auto}.notify-item{padding:13px 16px;border-bottom:1px solid var(--border);cursor:pointer}.notify-item:hover{background:rgba(110,168,255,.045)}.notify-item.unread{background:rgba(110,168,255,.07)}.notify-row{display:flex;justify-content:space-between;gap:12px}.notify-title{font-weight:760;font-size:13px}.notify-time{color:var(--muted);font-size:10px;white-space:nowrap}.notify-body{color:var(--soft);font-size:11px;margin-top:4px;line-height:1.45}.notify-sev{font-size:9px;font-weight:800;letter-spacing:.08em;margin-right:6px}.notify-sev.INFO{color:var(--blue)}.notify-sev.IMPORTANT{color:var(--green)}.notify-sev.WARNING{color:#ffbf69}.notify-sev.CRITICAL{color:#ff6b78}.notify-empty{padding:28px 16px;text-align:center;color:var(--muted);font-size:12px}.notification-settings{display:grid;gap:10px}.notification-setting{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}.notification-setting:last-child{border-bottom:0}.switch{width:42px;height:24px;accent-color:#6ea8ff}.volume{width:150px}
 @media(max-width:1100px){.command-hero,.operator-grid{grid-template-columns:1fr}.command-side{border-left:0;border-top:1px solid rgba(110,168,255,.16)}.account-strip{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:760px){.shell{grid-template-columns:1fr}.sidebar{padding:14px}.brand{margin-bottom:14px}.nav{grid-template-columns:repeat(3,1fr)}.nav button{padding:9px 4px}.nav button:before,.nav button.active:after{display:none}.content{padding:18px 12px 45px}.page-head{display:block}.command-primary{padding:20px}.command-hero{min-height:0}.command-side .kpis,.account-strip,.campaign-ladder{grid-template-columns:1fr}.operator-grid{grid-template-columns:1fr}.hero-status{font-size:26px}.topbar{height:58px}}
 </style>
@@ -2492,12 +2495,18 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
     <header class="topbar">
       <div><div class="title" id="top-title">Command Center</div><div class="subtitle" id="top-subtitle">Live intent, exposure and operator attention</div></div>
       <div class="top-meta">
+        <div class="notify-wrap"><button class="notify-bell" id="notify-bell" onclick="toggleNotifications()" title="Notifications">♢<span id="notify-count" class="notify-count">0</span></button></div>
         <select id="symbol-select" class="symbol-select" onchange="switchSymbol(this.value)"><option value="">Symbol —</option></select>
         <span class="pill" id="account-pill">MT5 ACCOUNT</span>
         <span class="pill" id="epoch-pill">Epoch —</span>
         <span class="pill" id="command-pill">Command —</span>
       </div>
     </header>
+
+    <div id="notify-drawer" class="notify-drawer">
+      <div class="notify-head"><div><strong>Atlas Notifications</strong><div class="muted" style="font-size:10px;margin-top:2px">Material state changes and execution events</div></div><div class="actions"><button class="btn" onclick="markAllNotificationsRead()">Mark read</button><button class="btn" onclick="toggleNotifications()">Close</button></div></div>
+      <div id="notify-list" class="notify-list"></div>
+    </div>
 
     <div class="content">
       <section id="view-overview" class="view active">
@@ -2907,6 +2916,18 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
         </div>
 
         <div class="card section">
+          <div class="section-head"><div><h3>Notifications</h3><p>Human-facing alerts for material Atlas state changes. Repeated polling states are deduplicated.</p></div><span class="badge info">EVENT AWARE</span></div>
+          <div class="notification-settings">
+            <div class="notification-setting"><div><strong>In-app notifications</strong><div class="muted">Persist alerts in the Atlas bell and notification drawer.</div></div><input id="notif-inapp" class="switch" type="checkbox" onchange="saveNotificationSettings()"></div>
+            <div class="notification-setting"><div><strong>Browser notifications</strong><div class="muted">Show desktop/browser alerts when Atlas is in the background.</div></div><div class="actions"><input id="notif-browser" class="switch" type="checkbox" onchange="setBrowserNotifications(this.checked)"><button class="btn" onclick="requestBrowserNotifications()">Permission</button></div></div>
+            <div class="notification-setting"><div><strong>Sound effects</strong><div class="muted">Play severity-aware tones on new material alerts.</div></div><input id="notif-sound" class="switch" type="checkbox" onchange="saveNotificationSettings()"></div>
+            <div class="notification-setting"><div><strong>Sound volume</strong><div class="muted">Master notification volume.</div></div><div class="actions"><input id="notif-volume" class="volume" type="range" min="0" max="1" step="0.05" oninput="saveNotificationSettings()"><button class="btn" onclick="testNotificationSound()">Test sound</button></div></div>
+            <div class="notification-setting"><div><strong>Minimum sound severity</strong><div class="muted">Lower-priority notifications remain visible but silent.</div></div><select id="notif-min-severity" class="symbol-select" onchange="saveNotificationSettings()"><option>INFO</option><option>IMPORTANT</option><option>WARNING</option><option>CRITICAL</option></select></div>
+          </div>
+          <div class="callout" style="margin-top:12px">Sounds are armed after your first interaction with Atlas because browsers block unsolicited audio. Atlas alerts on state transitions, not every polling tick.</div>
+        </div>
+
+        <div class="card section">
           <div class="section-head"><div><h3>Advanced runtime controls</h3><p>157 controls remain available, but they no longer dominate the dashboard.</p></div><span class="badge warn">ADVANCED</span></div>
           <input id="control-search" class="search" placeholder="Search runtime controls…" oninput="renderControls()">
           <div id="runtime-controls" class="controls" style="margin-top:12px"></div>
@@ -2951,7 +2972,7 @@ const CONTROL_CONFIG = __CONTROL_CONFIG__;
 const state = {
   status:null, command:null, intelligence:null, parameterIntel:null, proposal:null, review:null,
   supervised:null, preflight:null, execution:null, ack:null, arm:null, llmCycle:null, llmStatus:null, autoConsensus:null, responsiveness:null, candles:null, zoneMap:null, zonePlan:null,
-  executionEvents:null, epochs:null, outcomes:null, performance:null, riskUnits:null, recoveryAttribution:null, recoveryRisk:null, riskAppetite:null, audit:null, autoApplications:null, dirty:{}, symbols:[], selectedSymbol:null
+  executionEvents:null, epochs:null, outcomes:null, performance:null, riskUnits:null, recoveryAttribution:null, recoveryRisk:null, riskAppetite:null, audit:null, autoApplications:null, dirty:{}, symbols:[], selectedSymbol:null, notificationBaseline:null
 };
 
 const viewMeta={
@@ -2984,6 +3005,32 @@ const age=s=>{s=Number(s||0); if(s<60)return Math.round(s)+"s"; if(s<3600)return
 const countdownAge=s=>{s=Math.max(0,Math.ceil(Number(s||0)));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h?`${h}h ${String(m).padStart(2,"0")}m ${String(sec).padStart(2,"0")}s`:`${m}m ${String(sec).padStart(2,"0")}s`;};
 function badgeClass(v){v=String(v||"").toUpperCase();if(v.includes("READY")||v.includes("PASS")||v.includes("CONFIRMED")||v.includes("APPLIED")||v.includes("EXECUTED")||v==="LOW"||v==="APPROVED")return"ok";if(v.includes("BLOCK")||v.includes("FAIL")||v.includes("HIGH")||v.includes("MISMATCH")||v.includes("TIMEOUT")||v.includes("REJECT"))return"bad";return"warn"}
 function toast(msg,bad=false){const t=document.getElementById("toast");t.textContent=msg;t.className="toast show"+(bad?" bad":"");setTimeout(()=>t.className="toast",4500)}
+
+const NOTIF_DEFAULTS={inApp:true,browser:false,sound:true,volume:.35,minSeverity:"INFO"};
+const SEVERITY_RANK={INFO:0,IMPORTANT:1,WARNING:2,CRITICAL:3};
+let notificationSettings={...NOTIF_DEFAULTS};
+let notificationAudio=null;
+function loadNotificationSettings(){try{notificationSettings={...NOTIF_DEFAULTS,...JSON.parse(localStorage.getItem("atlasNotificationSettings")||"{}")}}catch{};syncNotificationSettingsUI();renderNotifications()}
+function syncNotificationSettingsUI(){const map={"notif-inapp":"inApp","notif-browser":"browser","notif-sound":"sound","notif-volume":"volume","notif-min-severity":"minSeverity"};for(const [id,k] of Object.entries(map)){const el=document.getElementById(id);if(!el)continue;if(el.type==="checkbox")el.checked=!!notificationSettings[k];else el.value=notificationSettings[k]}}
+function saveNotificationSettings(){notificationSettings.inApp=!!document.getElementById("notif-inapp")?.checked;notificationSettings.browser=!!document.getElementById("notif-browser")?.checked;notificationSettings.sound=!!document.getElementById("notif-sound")?.checked;notificationSettings.volume=Number(document.getElementById("notif-volume")?.value??.35);notificationSettings.minSeverity=document.getElementById("notif-min-severity")?.value||"INFO";localStorage.setItem("atlasNotificationSettings",JSON.stringify(notificationSettings));}
+async function requestBrowserNotifications(){if(!("Notification" in window)){toast("Browser notifications are not supported here",true);return}const p=await Notification.requestPermission();const el=document.getElementById("notif-browser");if(p==="granted"){notificationSettings.browser=true;if(el)el.checked=true;saveNotificationSettings();syncNotificationSettingsUI();toast("Browser notifications enabled")}else{notificationSettings.browser=false;if(el)el.checked=false;saveNotificationSettings();syncNotificationSettingsUI();toast("Browser notification permission not granted",true)}}
+function setBrowserNotifications(on){if(on&&("Notification" in window)&&Notification.permission!=="granted"){requestBrowserNotifications();return}notificationSettings.browser=on;saveNotificationSettings()}
+function notificationStoreKey(){return `atlasNotifications:${state.selectedSymbol||"default"}`}
+function getNotifications(){try{return JSON.parse(localStorage.getItem(notificationStoreKey())||"[]")}catch{return[]}}
+function setNotifications(v){localStorage.setItem(notificationStoreKey(),JSON.stringify(v.slice(0,150)));renderNotifications()}
+function toggleNotifications(){const d=document.getElementById("notify-drawer");d.classList.toggle("open");if(d.classList.contains("open"))renderNotifications()}
+function markAllNotificationsRead(){setNotifications(getNotifications().map(n=>({...n,read:true})))}
+function renderNotifications(){const list=document.getElementById("notify-list"),count=document.getElementById("notify-count");if(!list||!count)return;const ns=getNotifications(),unread=ns.filter(n=>!n.read).length;count.textContent=unread>99?"99+":unread;count.classList.toggle("show",unread>0);list.innerHTML=ns.length?ns.map(n=>`<div class="notify-item ${n.read?"":"unread"}" onclick="readNotification('${esc(n.id)}')"><div class="notify-row"><div class="notify-title"><span class="notify-sev ${esc(n.severity)}">${esc(n.severity)}</span>${esc(n.title)}</div><span class="notify-time">${new Date(n.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span></div><div class="notify-body">${esc(n.body)}</div></div>`).join(""):'<div class="notify-empty">No Atlas notifications yet.</div>'}
+function readNotification(id){setNotifications(getNotifications().map(n=>n.id===id?{...n,read:true}:n))}
+function armNotificationAudio(){try{notificationAudio=notificationAudio||new (window.AudioContext||window.webkitAudioContext)();if(notificationAudio.state==="suspended")notificationAudio.resume()}catch{}}
+document.addEventListener("pointerdown",armNotificationAudio,{once:true});
+function playNotificationSound(severity="INFO"){if(!notificationSettings.sound||SEVERITY_RANK[severity]<SEVERITY_RANK[notificationSettings.minSeverity])return;armNotificationAudio();if(!notificationAudio)return;const patterns={INFO:[[660,.07]],IMPORTANT:[[660,.07],[880,.1]],WARNING:[[520,.09],[520,.09]],CRITICAL:[[440,.12],[660,.12],[440,.16]]};let t=notificationAudio.currentTime+.01;for(const [freq,dur] of patterns[severity]||patterns.INFO){const o=notificationAudio.createOscillator(),g=notificationAudio.createGain();o.frequency.value=freq;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.12*notificationSettings.volume,t+.01);g.gain.exponentialRampToValueAtTime(.001,t+dur);o.connect(g);g.connect(notificationAudio.destination);o.start(t);o.stop(t+dur+.02);t+=dur+.055}}
+function testNotificationSound(){playNotificationSound("IMPORTANT")}
+function pushAtlasNotification(severity,title,body,key){const now=Date.now(),ns=getNotifications();if(ns.some(n=>n.key===key&&now-new Date(n.at).getTime()<300000))return;const n={id:`${now}-${Math.random().toString(16).slice(2)}`,key,severity,title,body,at:new Date(now).toISOString(),read:false};if(notificationSettings.inApp)setNotifications([n,...ns]);playNotificationSound(severity);if(notificationSettings.browser&&("Notification" in window)&&Notification.permission==="granted"&&document.hidden){try{new Notification(`Atlas · ${title}`,{body,icon:"/assets/atlas-app-icon.png",tag:key})}catch{}}}
+function notificationSnapshot(){const s=state.status||{},z=state.zonePlan||{},lp=z?.capital_sizing?.loss_protection||{};return{connected:!!s.connected,open:Number(s.strategy_open_positions||s.open_positions||0),lastTicket:Number(s.last_order_ticket||0),lastSuccess:!!s.last_order_success,zoneState:String(s.zone_directive_state||z.execution_lane||""),zoneSide:String(s.zone_side||z.side||"NONE"),zoneSuspended:!!s.zone_scalp_suspended,capitalVeto:!!s.capital_veto_new_risk,lossState:String(lp.state||"INACTIVE"),policyEpoch:Number(s.policy_epoch||0),appliedCommand:Number(s.applied_command_version||0),recoveryChains:Number(s.active_hedge_chains||0)}}
+function evaluateNotifications(){const cur=notificationSnapshot(),prev=state.notificationBaseline;state.notificationBaseline=cur;if(!prev)return;if(prev.connected&&!cur.connected)pushAtlasNotification("CRITICAL","Nyao disconnected","Atlas lost the live Nyao bridge.","nyao-disconnected");if(!prev.connected&&cur.connected)pushAtlasNotification("INFO","Nyao connected","Live execution telemetry is available again.","nyao-connected");if(cur.lastSuccess&&cur.lastTicket&&cur.lastTicket!==prev.lastTicket)pushAtlasNotification("IMPORTANT","Trade opened",`${cur.zoneSide!=="NONE"?cur.zoneSide+" · ":""}Ticket ${cur.lastTicket} · ${state.selectedSymbol||"symbol"}.`,`trade-${cur.lastTicket}`);if(cur.open<prev.open)pushAtlasNotification("INFO","Position closed",`${prev.open-cur.open} strategy position${prev.open-cur.open===1?"":"s"} closed on ${state.selectedSymbol||"symbol"}.`,`close-${Date.now()}`);if(cur.zoneState!==prev.zoneState){if(cur.zoneState==="ZONE_AWARE_SCALP")pushAtlasNotification("INFO",`${cur.zoneSide} zone watching`,`Zone-aware scalping is active while the campaign waits for commit gates.`,`zone-watch-${cur.zoneSide}`);else if(cur.zoneState.includes("ZONE_CAMPAIGN"))pushAtlasNotification("IMPORTANT",`${cur.zoneSide} zone committed`,`Atlas granted the zone campaign execution priority.`,`zone-commit-${cur.zoneSide}`);else if(prev.zoneState&&cur.zoneState==="OUTSIDE_PRIORITY_ZONE")pushAtlasNotification("INFO","Priority zone released","Normal scalp authority restored outside the priority zone.","zone-released")}
+if(!prev.capitalVeto&&cur.capitalVeto)pushAtlasNotification("WARNING","New risk vetoed","Atlas capital authority is blocking fresh risk.","capital-veto");if(prev.lossState!==cur.lossState&&cur.lossState&&cur.lossState!=="INACTIVE")pushAtlasNotification(cur.lossState==="HARD_VETO"?"CRITICAL":"WARNING","Loss protection changed",`Protection state is now ${pretty(cur.lossState)}.`,`loss-${cur.lossState}`);if(cur.recoveryChains>prev.recoveryChains)pushAtlasNotification("WARNING","Recovery chain active",`${cur.recoveryChains} recovery chain${cur.recoveryChains===1?"":"s"} now active.`,`recovery-${cur.recoveryChains}`);if(cur.policyEpoch!==prev.policyEpoch&&cur.policyEpoch>0)pushAtlasNotification("INFO","Policy epoch changed",`Nyao is now reporting policy epoch ${cur.policyEpoch}.`,`epoch-${cur.policyEpoch}`)}
+
 function scopedUrl(url){
   if(!state.selectedSymbol || !url.startsWith("/api/v1/") || url.startsWith("/api/v1/atlas/symbols"))return url;
   const join=url.includes("?")?"&":"?";
@@ -4074,8 +4121,10 @@ async function applyEdits(){
     // renderAll() intentionally avoids rebuilding the 157-control editor on
     // every polling refresh. After a successful save, force one rebuild so
     // dirty styling and the unsaved-change counter are cleared immediately.
+    loadNotificationSettings();
     renderAll();
     renderControls();
+    evaluateNotifications();
 
     toast("Runtime changes applied.");
   }catch(e){
@@ -4273,6 +4322,9 @@ async function loadHistory(){
   if(rs[8].status==="fulfilled")state.recoveryRisk=rs[8].value;
 }
 async function boot(){
+  // Restore operator notification preferences before the first live render.
+  // The controls persist in browser localStorage and must survive refreshes.
+  loadNotificationSettings();
   try{
     await loadSymbols();
     await loadCore();
@@ -4290,7 +4342,7 @@ async function boot(){
     renderControls();
   }catch(e){toast(e.message,true)}
 
-  setInterval(async()=>{const changed=await loadCore();await loadArm();if(changed){await loadHistory();await loadProposal()}renderAll()},2000);
+  setInterval(async()=>{const changed=await loadCore();await loadArm();if(changed){await loadHistory();await loadProposal()}renderAll();evaluateNotifications()},2000);
   setInterval(async()=>{await loadIntelligence();renderAll()},5000);
   setInterval(async()=>{await loadLlmCycle();renderAll()},5000);
   setInterval(async()=>{await loadResponsiveness();renderAll()},15000);
