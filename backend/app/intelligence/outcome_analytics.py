@@ -56,6 +56,10 @@ def _group_key(
         return str(trade.get("origin_guess") or "UNKNOWN")
     if dimension == "mode":
         return str(trade.get("trading_mode") or "UNKNOWN")
+    if dimension == "scalp_context":
+        return str(
+            trade.get("scalp_context_class") or "NEUTRAL_SCALP"
+        )
     if dimension == "duplicate_filter":
         duplicate = entry.get("duplicate_distance") or {}
         enabled = duplicate.get("enabled")
@@ -590,6 +594,10 @@ def analyze_trade_outcomes(
         "by_duplicate_filter": _by_dimension(
             closed,
             "duplicate_filter",
+        ),
+        "by_scalp_context": _by_dimension(
+            closed,
+            "scalp_context",
         ),
         "parameter_contexts": _parameter_contexts(
             closed

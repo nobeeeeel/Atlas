@@ -1,6 +1,6 @@
 # Atlas Architecture
 
-**Current release:** Atlas 1.30.21 · Nyao 44.4
+**Current release:** Atlas 1.30.43 · Nyao 44.5.3
 
 This document is the canonical technical architecture for Atlas. It
 describes system boundaries, authority, risk accounting, execution flow
@@ -287,7 +287,7 @@ ZONE_CAMPAIGN (COMMITTED)
 NORMAL_SCALP or next zone-aware state
 ```
 
-While WATCHING, the zone-aligned scalp direction remains available under the ordinary scalp score, execution-economics, duplicate, broker and capital gates. Counter-direction scalps are deterministically suppressed by Nyao. Atlas also preserves prospective zone headroom by clipping the zone-aware scalp budget when necessary so that the higher-priority campaign can still commit if its gates qualify on the next refresh.
+While WATCHING, the zone-aligned scalp direction remains available under the ordinary scalp score, execution-economics, duplicate, broker and capital gates. Counter-zone scalps remain possible only through the explicit context-aware path: they must clear the base signal gate, an additional evidence premium, reduced risk authority and the campaign-proximity veto. Atlas also preserves prospective zone headroom by clipping the zone-aware scalp budget when necessary so that the higher-priority campaign can still commit if its gates qualify on the next refresh.
 
 A zone campaign receives exclusive fresh-entry authority only at the deterministic commit boundary. Existing positions continue to be managed; new conflicting scalps stop. This avoids wasting opportunities while a non-executable zone waits without allowing a scalp to steal the campaign's required risk capacity.
 
@@ -366,6 +366,12 @@ active authority from historical/last-event telemetry.
     loss.
 10. MT5 broker truth remains final at execution.
 
+## Performance intelligence and observability
+
+Performance Intelligence is a read-only operator layer over Atlas authoritative outcome ledgers. Its primary scorecard consumes completed composite risk units and therefore preserves recovery-chain and zone-campaign semantics. Ticket-level MFE/MAE and entry-context breakdowns are diagnostic evidence only and cannot independently alter strategic loss streaks or policy performance. Policy-epoch comparisons remain descriptive until adequate sample maturity exists.
+
+The Command Center and Market Analysis share the same live entry-analysis component. UI ownership moves that component only when the operator changes workspaces; it does not duplicate or alter execution state.
+
 ## 14. Documentation policy
 
 This file is the single canonical architecture document. New
@@ -378,3 +384,27 @@ repository documentation.
 ## Notification event layer
 
 The dashboard derives human-facing notifications from authoritative Atlas/Nyao state transitions rather than from raw polling ticks. The first observed snapshot establishes a baseline; later material transitions are deduplicated and surfaced through the in-app drawer, optional browser notifications, and configurable severity-aware audio. Notification state/preferences are browser-local and are not trading authority or audit evidence. Trading ledgers and policy/outcome stores remain authoritative.
+
+
+## Operator observability
+
+Atlas maintains a non-authoritative human-facing observability layer above the deterministic trading engines. The Opportunity Queue projects current scalp, zone and recovery candidates from authoritative runtime state and states the next gate required for execution. The Decision Timeline records only material transitions (not every poll), including signal eligibility, blocker changes, transaction-cost feasibility, zone execution-lane transitions, capital/protection changes, policy epochs, order lifecycle and recovery activation/resolution.
+
+The observability layer never creates execution authority and never substitutes for MT5 outcome, policy, capital, recovery or risk-unit ledgers. Its purpose is to make Atlas's current decision state and recent decision path understandable to the operator.
+
+
+## Policy lineage model
+
+Atlas Brain distinguishes four policy states: the runtime-active Nyao policy, current consensus candidates, applied historical policy epochs, and individual accepted Gemini observations. Runtime-active identity requires an exact current policy-epoch match; the latest autonomous application is never used as an implicit fallback. Policy history is reconciled against the policy epoch registry and live Nyao runtime. Accepted observations are associated with the baseline epoch they evaluated, allowing a resulting policy epoch to expose its supporting consensus window. Full historical Gemini prose is shown only when it was durably stored; Atlas does not fabricate missing historical reasoning.
+
+
+## Zone campaign commitment vs exposure
+
+Zone execution has two distinct phases. `ZONE_ENTRY_CONFIRMED` may suspend fresh scalps while a campaign has deterministic entry priority, but the campaign is not persisted as immutable merely because Nyao acknowledged the directive. Immutable `ZONE_CAMPAIGN_ACTIVE` persistence requires actual live `ATLAS_ZONE` exposure whose `zone_plan_id` matches the persisted campaign. Existing `FRESH_MARKET`, `FRESH_LIMIT`, recovery, or hedge-chain exposure does not qualify. This prevents unrelated exposure from pinning stale zone authority.
+
+
+## Zone invalidation lifecycle
+
+Atlas zone detection uses closed candles as the deterministic invalidation authority. A demand zone becomes invalid only when a later closed candle closes below its lower boundary; a supply zone becomes invalid only when a later closed candle closes above its upper boundary. Wick-only penetration can mark a zone mitigated but cannot invalidate it. Invalidated zones are excluded from priority selection, scalp context, confluence, scenarios and new campaign admission, while remaining in `invalidated_zones` for audit.
+
+If no Atlas zone exposure exists, invalidation naturally releases zone-aware context and prospective zone-priority risk. If exposure already exists for the exact immutable zone plan, the campaign transitions to `ZONE_CAMPAIGN_INVALIDATED_MANAGEMENT`: ordinary scalping remains suspended during the live campaign, existing positions continue under their locked management/recovery lineage, and Nyao disables all unfilled/future zone layers.

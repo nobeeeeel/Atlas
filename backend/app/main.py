@@ -144,6 +144,7 @@ from backend.app.intelligence.autonomous_policy import (
     get_autonomous_policy_events,
     get_pending_autonomous_policy,
     get_autonomous_policy_consensus,
+    get_autonomous_policy_observations,
 )
 from backend.app.intelligence.llm_cycle_scheduler import (
     claim_llm_cycle,
@@ -167,7 +168,7 @@ from backend.app.agents.policy_proposal import (
 
 app = FastAPI(
     title="Atlas",
-    version="1.30.21",
+    version="1.30.43",
 )
 
 
@@ -372,7 +373,7 @@ def root() -> dict[str, str]:
 def health() -> dict[str, str]:
     return {
         "status": "running",
-        "version": "1.30.21",
+        "version": "1.30.43",
         "strategy": "nyao",
         "execution_model": "account_environment_agnostic",
     }
@@ -580,14 +581,24 @@ def _persist_zone_campaign(
             active_plan["risk"] = risk
             plan["zone_plan"] = active_plan
             plan["zone_map_id"] = directive.get("zone_map_id")
-        plan["state"] = "ZONE_CAMPAIGN_ACTIVE"
+        source_zone_invalidated = bool(directive.get("source_zone_invalidated", False))
+        plan["state"] = (
+            "ZONE_CAMPAIGN_INVALIDATED_MANAGEMENT"
+            if source_zone_invalidated
+            else "ZONE_CAMPAIGN_ACTIVE"
+        )
+        plan["source_zone_invalidated"] = source_zone_invalidated
+        plan["source_zone_invalidation_reason"] = directive.get("source_zone_invalidation_reason") or ""
+        plan["source_zone_invalidated_at_epoch"] = directive.get("source_zone_invalidated_at_epoch") or 0
+        plan["source_zone_invalidating_close"] = directive.get("source_zone_invalidating_close") or 0.0
         plan["mode"] = "ZONE_MODE"
         plan["ordinary_scalping_allowed"] = False
         preview = dict(plan.get("directive_preview") or {})
         preview.update({
             "suspend_ordinary_scalp_entries": True,
-            "zone_entry_allowed": True,
+            "zone_entry_allowed": not source_zone_invalidated,
             "plan_id": directive.get("plan_id"),
+            "source_zone_invalidated": source_zone_invalidated,
         })
         plan["directive_preview"] = preview
         spread_assessment = (
@@ -596,18 +607,25 @@ def _persist_zone_campaign(
             )
             or {}
         )
-        plan["blockers"] = (
-            [
-                "Active position management continues; new virtual zone layers "
-                "wait until the dedicated zone spread gate is clear."
+        if source_zone_invalidated:
+            plan["blockers"] = [
+                "SOURCE ZONE INVALIDATED: no new campaign layers may open. "
+                "Existing exposure remains under locked position/recovery management until flat."
             ]
-            if spread_assessment.get("zone_spread_within_limit") is False
-            else []
-        )
+        else:
+            plan["blockers"] = (
+                [
+                    "Active position management continues; new virtual zone layers "
+                    "wait until the dedicated zone spread gate is clear."
+                ]
+                if spread_assessment.get("zone_spread_within_limit") is False
+                else []
+            )
         plan["campaign_lock"] = {
             "active": True,
             "plan_id": directive.get("plan_id"),
             "reason": directive.get("campaign_lock_reason"),
+            "source_zone_invalidated": source_zone_invalidated,
         }
     else:
         plan["campaign_lock"] = {"active": False}
@@ -1664,7 +1682,7 @@ def _build_gemini_scalp_zone_context(
         "zone_side": side,
         "aligned_scalp_direction": side if zone_aware else "BOTH_OR_NORMAL_POLICY",
         "counter_direction_rule": (
-            "BLOCKED_DETERMINISTICALLY_BY_NYAO" if zone_aware else "NORMAL_SCALP_RULES"
+            "CONDITIONAL_STRONGER_EVIDENCE_REDUCED_RISK" if zone_aware else "NORMAL_SCALP_RULES"
         ),
         "active_zone": {
             key: source_zone.get(key)
@@ -1689,9 +1707,10 @@ def _build_gemini_scalp_zone_context(
         "instruction": (
             "Use deterministic zone analysis as contextual evidence for SCALP policy only. "
             "Do not alter zone policy or turn a zone into a direct trade instruction. "
-            "When execution_lane is ZONE_AWARE_SCALP, the zone-aligned direction is a "
-            "deterministic constraint; optimize the Nyao scalp runtime around that context "
-            "without mutating the zone system itself. Autonomous Nyao scalp-policy updates "
+            "When execution_lane is ZONE_AWARE_SCALP, classify fresh scalps as zone-aligned "
+            "or counter-zone. Counter-zone entries remain deterministic Nyao decisions with "
+            "a stronger evidence requirement, reduced risk authority, and campaign-proximity "
+            "blocking; optimize scalp policy around that context without mutating the zone system. Autonomous Nyao scalp-policy updates "
             "may continue in this WATCHING state. When execution_lane becomes ZONE_CAMPAIGN, "
             "the campaign has crossed the deterministic commit boundary; new scalp-policy "
             "activation is deferred until the campaign releases execution authority."
@@ -1922,6 +1941,66 @@ _LLM_SCHEDULE_LOOP_TASK: asyncio.Task[Any] | None = None
 _ZONE_DIRECTIVE_LOOP_TASK: asyncio.Task[Any] | None = None
 
 
+def _gemini_cycle_run_record(
+    *,
+    result: dict[str, Any] | None,
+    advisory: dict[str, Any] | None,
+    autonomous: dict[str, Any] | None,
+    baseline_policy_epoch: int | None,
+) -> dict[str, Any]:
+    """Persist every Gemini cycle separately from accepted consensus observations."""
+    result = dict(result or {})
+    advisory = dict(advisory or {})
+    autonomous = dict(autonomous or {})
+    bundle = dict(result.get("bundle") or {})
+    critic = dict(result.get("critic") or {})
+    changes = {}
+    for name, row in dict(advisory.get("changed_controls") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        changes[str(name)] = {
+            "current": row.get("current"),
+            "proposed": row.get("shadow"),
+            "confidence": row.get("confidence"),
+            "rationale": row.get("rationale"),
+        }
+    deferred = list(result.get("deferred_locked_changes") or [])
+    consensus = dict(autonomous.get("consensus") or {})
+    auto_status = str(autonomous.get("status") or "")
+    if autonomous.get("applied"):
+        outcome = "APPLIED"
+    elif deferred:
+        outcome = "DEFERRED"
+    elif auto_status in {"CONSENSUS_NOT_READY", "MINIMUM_DWELL_ACTIVE", "DEFERRED_ACTIVE_ZONE_PLAN"}:
+        outcome = "OBSERVED"
+    elif not changes:
+        outcome = "NO_CHANGE"
+    elif critic.get("verdict") and "ACCEPT" not in str(critic.get("verdict")).upper():
+        outcome = "REJECTED"
+    else:
+        outcome = "GENERATED"
+    return {
+        "baseline_policy_epoch": int(advisory.get("current_policy_epoch") or baseline_policy_epoch or 0),
+        "overall_confidence": float(bundle.get("overall_confidence") or 0.0),
+        "critic_summary": critic.get("summary"),
+        "proposal_state": result.get("state"),
+        "outcome": outcome,
+        "changes": changes,
+        "deferred_locked_changes": deferred,
+        "consensus_observation_recorded": bool(consensus),
+        "consensus_observation_count_after_run": consensus.get("observation_count") if consensus else None,
+        "consensus_minimum_observations": consensus.get("minimum_observations") if consensus else None,
+        "consensus_control_count_after_run": consensus.get("consensus_control_count") if consensus else None,
+        "autonomous_status": auto_status or None,
+        "analysis": {
+            "performance_diagnosis": list(bundle.get("performance_diagnosis") or []),
+            "responsiveness_profile": bundle.get("responsiveness_profile"),
+            "responsiveness_diagnosis": list(bundle.get("responsiveness_diagnosis") or []),
+            "weaknesses_targeted": list(bundle.get("weaknesses_targeted") or []),
+        },
+    }
+
+
 async def _execute_claimed_llm_cycle(symbol: str) -> None:
     """Run Gemini outside the namespace lock, then atomically persist its result."""
     command_file, status_file, _runtime_file = symbol_bridge_paths(
@@ -1952,6 +2031,8 @@ async def _execute_claimed_llm_cycle(symbol: str) -> None:
         )
 
         advisory_id = None
+        advisory: dict[str, Any] | None = None
+        autonomous: dict[str, Any] | None = None
         cycle_status = str(result.get("state") or "COMPLETED")
         critic = result.get("critic") or {}
         critic_verdict = critic.get("verdict")
@@ -2010,6 +2091,12 @@ async def _execute_claimed_llm_cycle(symbol: str) -> None:
                     llm_proposal_id=result.get("proposal_id"),
                     advisory_proposal_id=advisory_id,
                     critic_verdict=critic_verdict,
+                    run_record=_gemini_cycle_run_record(
+                        result=result,
+                        advisory=advisory,
+                        autonomous=autonomous,
+                        baseline_policy_epoch=int(current_command.get("policy_epoch") or 0),
+                    ),
                 )
     except asyncio.CancelledError:
         async with _SYMBOL_REQUEST_LOCK:
@@ -2017,6 +2104,13 @@ async def _execute_claimed_llm_cycle(symbol: str) -> None:
                 complete_llm_cycle(
                     status="CANCELLED",
                     error="Atlas stopped while the policy cycle was running.",
+                    run_record={
+                        "baseline_policy_epoch": int((locals().get("current_command") or {}).get("policy_epoch") or 0),
+                        "outcome": "CANCELLED",
+                        "changes": {},
+                        "deferred_locked_changes": [],
+                        "consensus_observation_recorded": False,
+                    },
                 )
         raise
     except Exception as exc:
@@ -2025,6 +2119,13 @@ async def _execute_claimed_llm_cycle(symbol: str) -> None:
                 complete_llm_cycle(
                     status="FAILED",
                     error=str(exc)[:2000],
+                    run_record={
+                        "baseline_policy_epoch": int((locals().get("current_command") or {}).get("policy_epoch") or 0),
+                        "outcome": "FAILED",
+                        "changes": {},
+                        "deferred_locked_changes": [],
+                        "consensus_observation_recorded": False,
+                    },
                 )
 
 
@@ -2068,6 +2169,13 @@ def get_atlas_autonomous_policy_events(limit: int = 100) -> dict[str, Any]:
 @app.get("/api/v1/atlas/autonomous-policy-consensus")
 def get_atlas_autonomous_policy_consensus() -> dict[str, Any]:
     return get_autonomous_policy_consensus(read_json(COMMANDS_FILE) or {})
+
+
+
+
+@app.get("/api/v1/atlas/autonomous-policy-observations")
+def get_atlas_autonomous_policy_observations(limit: int = 200) -> dict[str, Any]:
+    return get_autonomous_policy_observations(limit=limit)
 
 
 @app.get("/api/v1/atlas/autonomous-policy-applications")
@@ -2130,9 +2238,19 @@ def get_atlas_autonomous_policy_applications(limit: int = 50) -> dict[str, Any]:
             }
             for name, value in patch.items()
         }
+        consensus_obs = int(event.get("consensus_observation_count") or 0)
+        consensus_minimum = 3
+        baseline_epoch = int(event.get("baseline_policy_epoch") or max(0, epoch - 1))
+        consensus_gate_integrity = (
+            "LEGACY_BYPASS"
+            if baseline_epoch > 1 and consensus_obs < consensus_minimum and not bool(event.get("minimum_dwell_overridden"))
+            else "VERIFIED"
+        )
         rows.append({
             **event,
             "reconciliation": reconciliation,
+            "consensus_gate_integrity": consensus_gate_integrity,
+            "consensus_minimum_observations": consensus_minimum,
             "registry_available": registry_available,
             "registry_matches_intent": registry_matches,
             "live_comparable": live_comparable,
@@ -2140,11 +2258,13 @@ def get_atlas_autonomous_policy_applications(limit: int = 50) -> dict[str, Any]:
             "current_command_epoch": current_command_epoch,
             "current_status_epoch": current_status_epoch,
             "changes": changes,
+            "runtime": runtime,
+            "previous_runtime": previous_runtime,
         })
 
     current_active = next(
         (row for row in rows if int(row.get("policy_epoch") or 0) == current_command_epoch),
-        rows[0] if rows else None,
+        None,
     )
     return {
         "version": "atlas-autonomous-application-history-v1",
@@ -2152,6 +2272,8 @@ def get_atlas_autonomous_policy_applications(limit: int = 50) -> dict[str, Any]:
         "current_command_epoch": current_command_epoch,
         "current_status_epoch": current_status_epoch,
         "current_active": current_active,
+        "current_command_runtime": {k: v for k, v in command.items() if k not in {"command_version", "policy_epoch", "updated_at"}},
+        "current_status_runtime": {k.removeprefix("runtime_"): v for k, v in status.items() if k.startswith("runtime_")},
         "applications": rows,
     }
 
@@ -2417,6 +2539,17 @@ table{width:100%;border-collapse:collapse}th{text-align:left;color:var(--muted);
 .btn{border:1px solid var(--border);background:#161f2c;color:var(--text);padding:9px 12px;border-radius:10px;font-weight:700}.btn:hover{filter:brightness(1.12)}.btn.primary{background:#edf3ff;color:#0b111a;border-color:#edf3ff}.btn.danger{color:#ffd6da;border-color:rgba(255,111,125,.35);background:rgba(255,111,125,.08)}.btn:disabled{opacity:.42;cursor:not-allowed}
 .actions{display:flex;gap:8px;flex-wrap:wrap}
 .changes{display:grid;gap:8px}.change{display:grid;grid-template-columns:1fr auto auto;gap:16px;align-items:center;padding:11px 12px;border:1px solid var(--border);background:var(--panel3);border-radius:11px}.arrow{color:var(--muted)}
+
+.policy-hero{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(300px,.7fr);gap:14px}
+.policy-runtime-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:12px}.policy-runtime-item{border:1px solid var(--border);border-radius:11px;padding:10px;background:var(--panel3)}
+.policy-runtime-item .label{margin-bottom:4px}.policy-runtime-item strong{font-size:13px}.policy-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.policy-timeline{display:grid;gap:9px}.policy-record{border:1px solid var(--border);border-radius:12px;background:var(--panel3);padding:12px;cursor:pointer}.policy-record:hover{border-color:#355074}.policy-record.active{border-color:rgba(72,221,164,.32);background:linear-gradient(90deg,rgba(72,221,164,.05),var(--panel3) 35%)}
+.policy-record-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.policy-record-meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:5px;color:var(--muted);font-size:10px}.policy-record-changes{margin-top:7px;color:var(--soft);font-size:11px;line-height:1.45}
+.brain-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}.brain-tab{border:1px solid var(--border);background:var(--panel3);color:var(--muted);padding:7px 10px;border-radius:9px;cursor:pointer;font:inherit;font-size:10px}.brain-tab.active{color:var(--text);border-color:#41628a;background:#111d2c}.brain-tab-panel{display:none;margin-top:12px}.brain-tab-panel.active{display:block}
+.observation-list{display:grid;gap:8px;max-height:460px;overflow:auto}.observation-row{border:1px solid var(--border);border-radius:11px;background:var(--panel3);padding:11px;cursor:pointer}.observation-row:hover{border-color:#355074}.observation-changes{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}.observation-chip{font-size:9px;border:1px solid var(--border);border-radius:999px;padding:3px 7px;color:var(--soft)}
+.policy-modal{position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.62);display:none;align-items:center;justify-content:center;padding:24px}.policy-modal.open{display:flex}.policy-modal-card{width:min(980px,96vw);max-height:88vh;overflow:auto;border:1px solid var(--border);border-radius:18px;background:#0c131e;box-shadow:0 24px 80px rgba(0,0,0,.55);padding:20px}.policy-modal-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;position:sticky;top:-20px;background:#0c131e;padding:4px 0 12px;z-index:2}.policy-control-table{display:grid;gap:5px;margin-top:12px}.policy-control-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(140px,.45fr) minmax(140px,.45fr);gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:10px}.policy-control-row.changed{border-color:rgba(126,174,255,.35);background:rgba(126,174,255,.035)}
+@media(max-width:900px){.policy-hero{grid-template-columns:1fr}.policy-runtime-grid{grid-template-columns:1fr 1fr}.policy-control-row{grid-template-columns:1fr}}
+
 .consensus-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}
 .consensus-table{display:grid;gap:8px;margin-top:12px;max-height:520px;overflow:auto;padding-right:2px}
 .consensus-row{display:grid;grid-template-columns:minmax(190px,1.3fr) minmax(155px,.8fr) minmax(150px,.9fr) minmax(190px,1.2fr) auto;gap:12px;align-items:center;padding:12px 13px;border:1px solid var(--border);background:var(--panel3);border-radius:11px}
@@ -2452,7 +2585,7 @@ details.raw summary{cursor:pointer;color:var(--muted);font-weight:650}pre{white-
 }
 body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transparent 32%),var(--bg)}
 .shell{grid-template-columns:214px 1fr}.sidebar{padding:22px 14px;background:#090d13}.brand{margin-bottom:34px}.logo{box-shadow:0 0 0 1px rgba(126,174,255,.18) inset,0 8px 24px rgba(0,0,0,.24)}.brand small{font-size:10px;letter-spacing:.04em}
-.nav{gap:4px}.nav button{position:relative;padding:10px 12px 10px 38px;font-size:13px}.nav button:before{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:16px;text-align:center;color:#627188;font-size:11px}.nav button[data-view="overview"]:before{content:"●"}.nav button[data-view="market"]:before{content:"∿"}.nav button[data-view="analysis"]:before{content:"◇"}.nav button[data-view="positions"]:before{content:"▤"}.nav button[data-view="atlas"]:before{content:"✦"}.nav button[data-view="control"]:before{content:"⌁"}.nav button[data-view="history"]:before{content:"◷"}.nav button.active:after{content:"";position:absolute;left:0;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--blue)}
+.nav{gap:4px}.nav button{position:relative;padding:10px 12px 10px 38px;font-size:13px}.nav button:before{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:16px;text-align:center;color:#627188;font-size:11px}.nav button[data-view="overview"]:before{content:"●"}.nav button[data-view="market"]:before{content:"∿"}.nav button[data-view="analysis"]:before{content:"◇"}.nav button[data-view="positions"]:before{content:"▤"}.nav button[data-view="performance"]:before{content:"▥"}.nav button[data-view="atlas"]:before{content:"✦"}.nav button[data-view="control"]:before{content:"⌁"}.nav button[data-view="history"]:before{content:"◷"}.nav button.active:after{content:"";position:absolute;left:0;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--blue)}
 .connection{background:linear-gradient(145deg,#0e1721,#0a1017)}.topbar{height:64px;padding:0 28px}.top-meta #epoch-pill,.top-meta #command-pill{display:none}.content{padding:24px 28px 60px;max-width:1480px}.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.page-head h2{font-size:22px;letter-spacing:-.02em}.page-head p{font-size:12px}.card{box-shadow:none;background:linear-gradient(145deg,rgba(17,24,35,.98),rgba(13,19,28,.98))}.section{margin-top:14px}
 .hero{display:block;padding:0;overflow:hidden;border-color:#2b4260;background:linear-gradient(120deg,rgba(31,63,99,.32),rgba(14,21,31,.98) 52%)}
 .command-hero{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(330px,.8fr);min-height:210px}.command-primary{padding:24px 26px;display:flex;flex-direction:column;justify-content:space-between}.command-side{padding:18px;border-left:1px solid rgba(110,168,255,.16);background:rgba(5,10,16,.28)}.mode-line{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.mode-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 5px rgba(72,221,164,.09)}.hero-status{font-size:31px;letter-spacing:-.035em;margin:13px 0 7px}.hero-copy{font-size:13px;max-width:760px}.hero-foot{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-top:20px;color:var(--soft);font-size:12px}.hero-foot strong{color:var(--text)}
@@ -2465,8 +2598,85 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 
 /* Atlas notification center */
 .notify-wrap{position:relative}.notify-bell{position:relative;width:36px;height:36px;border:1px solid var(--border);border-radius:10px;background:#0d141e;color:var(--text);cursor:pointer;font-size:17px}.notify-bell:hover{border-color:rgba(110,168,255,.45)}.notify-count{position:absolute;right:-5px;top:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#ff5c6c;color:white;font-size:10px;font-weight:800;display:none;align-items:center;justify-content:center}.notify-count.show{display:flex}.notify-drawer{position:fixed;z-index:90;right:18px;top:68px;width:min(430px,calc(100vw - 28px));max-height:72vh;background:#0b1119;border:1px solid rgba(110,168,255,.25);border-radius:15px;box-shadow:0 22px 70px rgba(0,0,0,.48);display:none;overflow:hidden}.notify-drawer.open{display:block}.notify-head{display:flex;justify-content:space-between;align-items:center;padding:15px 16px;border-bottom:1px solid var(--border)}.notify-list{max-height:60vh;overflow:auto}.notify-item{padding:13px 16px;border-bottom:1px solid var(--border);cursor:pointer}.notify-item:hover{background:rgba(110,168,255,.045)}.notify-item.unread{background:rgba(110,168,255,.07)}.notify-row{display:flex;justify-content:space-between;gap:12px}.notify-title{font-weight:760;font-size:13px}.notify-time{color:var(--muted);font-size:10px;white-space:nowrap}.notify-body{color:var(--soft);font-size:11px;margin-top:4px;line-height:1.45}.notify-sev{font-size:9px;font-weight:800;letter-spacing:.08em;margin-right:6px}.notify-sev.INFO{color:var(--blue)}.notify-sev.IMPORTANT{color:var(--green)}.notify-sev.WARNING{color:#ffbf69}.notify-sev.CRITICAL{color:#ff6b78}.notify-empty{padding:28px 16px;text-align:center;color:var(--muted);font-size:12px}.notification-settings{display:grid;gap:10px}.notification-setting{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}.notification-setting:last-child{border-bottom:0}.switch{width:42px;height:24px;accent-color:#6ea8ff}.volume{width:150px}
+/* Atlas opportunity observability */
+.observability-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:14px;margin-top:14px}.observability-card{min-height:360px}.observable-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin-bottom:12px}.observable-head h3{margin:0;font-size:16px}.observable-head p{margin:4px 0 0;color:var(--muted);font-size:11px;line-height:1.45}.opportunity-list{display:grid;gap:9px}.opportunity-item{display:grid;grid-template-columns:minmax(145px,.85fr) minmax(210px,1.45fr) auto;gap:12px;align-items:center;padding:12px 13px;border:1px solid var(--border);background:rgba(7,12,18,.46);border-radius:12px;cursor:pointer}.opportunity-item:hover{border-color:rgba(110,168,255,.32);background:rgba(110,168,255,.035)}.opportunity-item.ready{border-color:rgba(72,221,164,.32)}.opportunity-item.active{border-color:rgba(110,168,255,.34)}.opportunity-item.blocked{opacity:.9}.opportunity-name{font-size:12px;font-weight:800}.opportunity-value{font-size:17px;font-weight:830;margin-top:3px;letter-spacing:-.02em}.opportunity-next{font-size:11px;color:var(--soft);line-height:1.45}.opportunity-next strong{color:var(--text)}.opportunity-meta{font-size:10px;color:var(--muted);margin-top:4px}.opportunity-status{white-space:nowrap}.decision-timeline{display:grid;max-height:420px;overflow:auto;padding-right:2px}.decision-event{display:grid;grid-template-columns:9px 1fr auto;gap:10px;padding:11px 3px;border-bottom:1px solid var(--border);cursor:pointer}.decision-event:last-child{border-bottom:0}.decision-event:hover{background:rgba(110,168,255,.025)}.decision-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;background:var(--blue)}.decision-dot.TRADE,.decision-dot.READY{background:var(--green)}.decision-dot.RISK,.decision-dot.BLOCK{background:var(--amber)}.decision-dot.CRITICAL{background:var(--red)}.decision-title{font-size:12px;font-weight:760}.decision-body{font-size:10.5px;color:var(--muted);line-height:1.45;margin-top:3px}.decision-time{font-size:9.5px;color:var(--muted);white-space:nowrap}.observability-empty{padding:24px 10px;text-align:center;color:var(--muted);font-size:11px}.queue-summary{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:10px}.queue-summary strong{color:var(--soft)}
+@media(max-width:1050px){.observability-grid{grid-template-columns:1fr}}@media(max-width:760px){.opportunity-item{grid-template-columns:1fr}.opportunity-status{justify-self:start}}
+
+
+/* Atlas command-center hierarchy v2 */
+.command-focus{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;margin-top:14px;padding:12px 15px;border:1px solid rgba(110,168,255,.18);border-radius:13px;background:linear-gradient(90deg,rgba(110,168,255,.055),rgba(8,13,20,.55))}
+.command-focus-main{min-width:0}.command-focus .decision-state{font-size:15px;margin:3px 0}.command-focus .decision-list{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px}.command-focus .decision-item{display:flex;grid-template-columns:none;gap:6px;font-size:10.5px}.command-focus .actions{white-space:nowrap}
+.command-details{margin-top:12px;border:1px solid var(--border);border-radius:14px;background:rgba(8,13,20,.44);overflow:hidden}.command-details>summary{list-style:none;cursor:pointer;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;font-weight:780;color:var(--soft);user-select:none}.command-details>summary::-webkit-details-marker{display:none}.command-details>summary:after{content:"＋";font-size:16px;color:var(--muted)}.command-details[open]>summary:after{content:"−"}.command-details[open]>summary{border-bottom:1px solid var(--border);color:var(--text)}.command-details-body{padding:14px}.command-details .strategy-authority-grid,.command-details .operator-grid,.command-details .section,.command-details .overview-support{margin-top:0}.command-details .overview-support{margin-top:14px}
+.command-center-primary .observability-grid{margin-top:14px}.command-center-primary .observability-card{min-height:330px}.command-center-primary .decision-timeline{max-height:360px}.command-center-primary .opportunity-list{gap:7px}.command-center-primary .opportunity-item{padding:10px 12px}
+.secondary-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.secondary-grid .card{min-height:0}
+@media(max-width:900px){.command-focus{grid-template-columns:1fr}.secondary-grid{grid-template-columns:1fr}.command-focus .actions{white-space:normal}}
+
+
+
+/* Atlas Brain information architecture — 1.30.43 */
+.brain-section-label{display:flex;align-items:flex-start;gap:12px;margin:24px 0 10px;padding-top:4px}
+.brain-section-label>span{width:28px;height:28px;border-radius:9px;display:grid;place-items:center;background:#111c2a;border:1px solid #2c4058;color:#8bb8ef;font-size:9px;font-weight:800}
+.brain-section-label strong{display:block;font-size:13px}.brain-section-label p{margin:3px 0 0;color:var(--muted);font-size:10px}
+.brain-policy-control-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(420px,.92fr);gap:14px;align-items:start}
+.brain-learning-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+.brain-policy-control-grid>.card,.brain-learning-grid>.card{margin:0}
+.consensus-full{max-height:none!important;overflow:visible!important;padding-right:0!important}
+.consensus-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.consensus-overview>div{padding:9px 10px;border:1px solid var(--border);border-radius:9px;background:#0a111a}
+.consensus-overview strong{display:block;margin-top:3px;font-size:13px}
+.consensus-card{border:1px solid var(--border);border-radius:13px;background:var(--panel3);padding:13px;display:grid;gap:12px}
+.consensus-card.ready{border-color:rgba(72,221,164,.34);background:linear-gradient(90deg,rgba(72,221,164,.045),var(--panel3) 32%)}
+.consensus-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.consensus-card-head strong{display:block;font-size:13px;margin:3px 0}
+.consensus-value-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.consensus-value-grid>div{padding:9px 10px;border:1px solid rgba(255,255,255,.055);border-radius:9px;background:#091018}
+.consensus-value-grid strong{display:block;margin-top:4px;font-size:13px;word-break:break-word}
+.consensus-support-block{display:grid;gap:6px}
+.consensus-gate{display:grid;grid-template-columns:auto 1fr;gap:9px;align-items:start;padding-top:9px;border-top:1px solid rgba(255,255,255,.055);font-size:10px;line-height:1.45}
+.consensus-gate strong{color:var(--soft)}.consensus-gate span{color:var(--muted)}
+@media(max-width:1180px){.brain-policy-control-grid,.brain-learning-grid{grid-template-columns:1fr}.consensus-overview{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:700px){.consensus-overview,.consensus-value-grid{grid-template-columns:1fr}.consensus-card-head{flex-direction:column}.consensus-gate{grid-template-columns:1fr}}
+
+/* Information architecture refresh — Atlas 1.30.43 */
+.global-status-strip{position:sticky;top:64px;z-index:19;display:flex;align-items:stretch;padding:0 26px;background:rgba(7,11,17,.96);border-bottom:1px solid var(--border);backdrop-filter:blur(14px);overflow-x:auto}
+.global-status-strip button{appearance:none;background:transparent;border:0;border-right:1px solid var(--border);padding:10px 15px;color:var(--text);font:inherit;display:flex;align-items:center;gap:8px;white-space:nowrap;cursor:pointer}
+.global-status-strip button:first-child{border-left:1px solid var(--border)}.global-status-strip button:hover{background:rgba(84,140,220,.08)}
+.global-status-strip strong{font-size:11px}.global-label{font-size:8px;letter-spacing:.11em;color:var(--muted)}
+.global-status-strip .dot{width:7px;height:7px}
+.command-workspaces{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.workspace-card{appearance:none;width:100%;display:grid;grid-template-columns:52px 1fr 24px;align-items:center;gap:14px;text-align:left;border:1px solid var(--border);border-radius:16px;background:linear-gradient(145deg,rgba(15,22,33,.94),rgba(9,14,22,.94));color:var(--text);padding:17px 18px;cursor:pointer;transition:.15s ease}
+.workspace-card:hover{transform:translateY(-1px);border-color:#38577b;background:linear-gradient(145deg,rgba(18,29,43,.98),rgba(10,17,27,.98))}
+.workspace-card .workspace-icon{height:44px;border:1px solid #26384e;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;letter-spacing:.08em;background:#0c1521;color:#91b8ea}
+.workspace-card strong{display:block;font-size:14px;margin:3px 0 4px}.workspace-card p{margin:0;color:var(--muted);font-size:11px;line-height:1.45}.workspace-arrow{font-size:19px;color:#7897ba}
+.workspace-card.brain .workspace-icon{color:#bd9cff}.workspace-card.performance .workspace-icon{color:#8fd8aa}.workspace-card.portfolio .workspace-icon{color:#f0c77d}
+.command-footer-note{margin-top:12px;padding:10px 12px;border:1px solid var(--border);border-radius:12px;color:var(--muted);font-size:10px;display:flex;align-items:center;gap:8px;background:rgba(8,13,20,.55)}
+#view-overview .command-details{margin-top:12px}
+#view-overview .observability-grid{margin-top:14px}
+#view-market #live-execution-panel{margin-top:14px}
+@media(max-width:900px){.command-workspaces{grid-template-columns:1fr}}
+@media(max-width:760px){.global-status-strip{position:static;padding:0 12px}}
+
+/* Performance Intelligence */
+.performance-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(420px,1fr);gap:14px}.performance-primary{min-height:310px;display:flex;flex-direction:column}.performance-net{font-size:38px;font-weight:850;letter-spacing:-.04em;margin-top:5px}.performance-sub{color:var(--soft);font-size:12px;margin-top:7px}.performance-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.performance-kpis .card{min-height:92px;padding:16px}.performance-curve{flex:1;min-height:160px;margin-top:18px;border:1px solid var(--border);border-radius:12px;background:rgba(5,10,16,.42);overflow:hidden}.performance-curve svg{display:block;width:100%;height:100%}.performance-unit-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}.performance-unit-summary .mini{padding:10px 11px;border:1px solid var(--border);border-radius:10px;background:rgba(5,10,16,.38)}.performance-unit-summary .mini strong{display:block;font-size:16px;margin-top:3px}.performance-results{display:grid;gap:8px}.performance-result{display:grid;grid-template-columns:minmax(0,1.2fr) .8fr .7fr;gap:10px;align-items:center;padding:11px 12px;border:1px solid var(--border);border-radius:10px;background:rgba(5,10,16,.38)}.performance-bars{display:grid;gap:9px;margin-top:9px}.performance-bar{display:grid;grid-template-columns:110px 1fr 78px;gap:9px;align-items:center;font-size:11px}.performance-bar-track{height:8px;border-radius:5px;background:#192333;overflow:hidden}.performance-bar-fill{height:100%;border-radius:5px;background:var(--blue)}
+@media(max-width:1100px){.performance-hero{grid-template-columns:1fr}.performance-kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:760px){.performance-kpis{grid-template-columns:repeat(2,1fr)}.performance-result{grid-template-columns:1fr auto}.performance-result .muted:last-child{grid-column:1/-1}}
+
 @media(max-width:1100px){.command-hero,.operator-grid{grid-template-columns:1fr}.command-side{border-left:0;border-top:1px solid rgba(110,168,255,.16)}.account-strip{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:760px){.shell{grid-template-columns:1fr}.sidebar{padding:14px}.brand{margin-bottom:14px}.nav{grid-template-columns:repeat(3,1fr)}.nav button{padding:9px 4px}.nav button:before,.nav button.active:after{display:none}.content{padding:18px 12px 45px}.page-head{display:block}.command-primary{padding:20px}.command-hero{min-height:0}.command-side .kpis,.account-strip,.campaign-ladder{grid-template-columns:1fr}.operator-grid{grid-template-columns:1fr}.hero-status{font-size:26px}.topbar{height:58px}}
+
+/* Atlas 1.30.43 portfolio risk allocation */
+.risk-allocation-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin:4px 0 13px}.risk-allocation-total{font-size:26px;font-weight:800;letter-spacing:-.03em;margin:4px 0}.risk-allocation-hard{display:grid;text-align:right;gap:3px}.risk-allocation-hard strong{font-size:18px}.risk-allocation-bar{height:15px;border:1px solid var(--border);border-radius:999px;overflow:hidden;display:flex;background:#081018}.risk-segment{height:100%;transition:width .25s ease}.risk-segment.active{background:rgba(101,161,255,.85)}.risk-segment.zone{background:rgba(241,190,79,.9)}.risk-segment.free{background:rgba(72,221,164,.8)}.risk-allocation-legend{display:flex;flex-wrap:wrap;gap:16px;margin:9px 0 14px;color:var(--muted);font-size:10px}.risk-allocation-legend span{display:flex;align-items:center;gap:6px}.risk-dot{width:8px;height:8px;border-radius:50%;display:inline-block}.risk-dot.active{background:rgba(101,161,255,.9)}.risk-dot.zone{background:rgba(241,190,79,.95)}.risk-dot.free{background:rgba(72,221,164,.9)}.risk-allocation-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.risk-allocation-card{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--panel3);display:grid;gap:8px;min-width:0}.risk-allocation-card .risk-card-head{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.risk-allocation-card .risk-card-head strong{font-size:12px}.risk-allocation-card .risk-amount{font-size:19px;font-weight:800}.risk-allocation-card .risk-detail{display:grid;grid-template-columns:1fr auto;gap:7px;border-top:1px solid rgba(255,255,255,.055);padding-top:7px;font-size:10px}.risk-allocation-card .risk-detail span{color:var(--muted)}.opportunity-item.qualifying{border-color:rgba(241,190,79,.32);background:linear-gradient(90deg,rgba(241,190,79,.035),transparent 45%)}@media(max-width:900px){.risk-allocation-cards{grid-template-columns:1fr}.risk-allocation-hero{align-items:flex-start;flex-direction:column}.risk-allocation-hard{text-align:left}}
+
+/* Atlas Brain policy lifecycle — 1.30.43 */
+.gemini-run-history,.policy-window-list{display:grid;gap:9px}
+.gemini-run-row,.policy-window-row{border:1px solid var(--border);border-radius:12px;background:var(--panel3);padding:12px;cursor:pointer}
+.gemini-run-row:hover{border-color:#355272}.gemini-run-head,.policy-window-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.gemini-run-meta{display:flex;flex-wrap:wrap;gap:10px 16px;margin-top:8px;color:var(--muted);font-size:10px}
+.policy-window-history{margin-top:12px}.policy-window-list{margin-top:8px}.policy-window-row.current{border-color:rgba(101,161,255,.35);background:linear-gradient(90deg,rgba(101,161,255,.045),var(--panel3) 32%)}
+
+
+.zone-card.invalidated{opacity:.82;border-color:rgba(255,91,116,.28);background:linear-gradient(90deg,rgba(255,91,116,.045),var(--panel3) 36%)}
+.zone-plan.invalidated{border-color:rgba(255,91,116,.35);background:linear-gradient(90deg,rgba(255,91,116,.05),var(--panel2) 45%)}
 </style>
 </head>
 <body>
@@ -2475,12 +2685,13 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
     <div class="brand"><img class="logo" src="/assets/atlas-sidebar-icon.png" alt="Atlas"><div><h1>Atlas</h1><small>Adaptive Trading Intelligence</small></div></div>
     <nav class="nav">
       <button class="active" data-view="overview">Command Center</button>
-      <button data-view="market">Market Analysis</button>
+      <button data-view="market">Market</button>
       <button data-view="analysis">Zone Analysis</button>
       <button data-view="positions">Portfolio</button>
+      <button data-view="performance">Performance</button>
       <button data-view="atlas">Atlas Brain</button>
       <button data-view="control">Settings</button>
-      <button data-view="history">Audit Log</button>
+      <button data-view="history">System & Audit</button>
     </nav>
     <div class="sidebar-bottom">
       <div class="connection">
@@ -2491,9 +2702,17 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
     </div>
   </aside>
 
+
+  <div id="policy-inspector-modal" class="policy-modal" onclick="if(event.target===this)closePolicyInspector()">
+    <div class="policy-modal-card">
+      <div class="policy-modal-head"><div><div class="label" id="policy-inspector-kicker">POLICY</div><h2 id="policy-inspector-title" style="margin:3px 0 0">Policy inspector</h2><p id="policy-inspector-subtitle" class="muted" style="margin:5px 0 0">—</p></div><button class="btn" onclick="closePolicyInspector()">Close</button></div>
+      <div id="policy-inspector-body"></div>
+    </div>
+  </div>
+
   <main class="main">
     <header class="topbar">
-      <div><div class="title" id="top-title">Command Center</div><div class="subtitle" id="top-subtitle">Live intent, exposure and operator attention</div></div>
+      <div><div class="title" id="top-title">Command Center</div><div class="subtitle" id="top-subtitle">What Atlas is watching now</div></div>
       <div class="top-meta">
         <div class="notify-wrap"><button class="notify-bell" id="notify-bell" onclick="toggleNotifications()" title="Notifications">♢<span id="notify-count" class="notify-count">0</span></button></div>
         <select id="symbol-select" class="symbol-select" onchange="switchSymbol(this.value)"><option value="">Symbol —</option></select>
@@ -2503,6 +2722,55 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
       </div>
     </header>
 
+    <div class="global-status-strip" id="global-status-strip">
+      <button onclick="go('market')"><span class="dot" id="global-status-dot"></span><strong id="global-status-symbol">—</strong></button>
+      <button onclick="go('overview')"><span class="global-label">MODE</span><strong id="global-status-mode">CONNECTING</strong></button>
+      <button onclick="go('positions')"><span class="global-label">AVAILABLE RISK</span><strong id="global-status-risk">—</strong></button>
+      <button onclick="go('positions')"><span class="global-label">POSITIONS</span><strong id="global-status-positions">—</strong></button>
+      <button onclick="go('atlas')"><span class="global-label">BRAIN</span><strong id="global-status-brain">—</strong></button>
+      <button onclick="go('history')"><span class="global-label">SYSTEM</span><strong id="global-status-health">CHECKING</strong></button>
+    </div>
+
+
+    <div id="ui-compatibility-sink" aria-hidden="true" style="display:none!important;">
+      <span id="authority-lane"></span>
+      <span id="authority-lane-badge"></span>
+      <span id="context-zone-badge"></span>
+      <span id="capital-regime-badge"></span>
+      <span id="brain-mode-badge"></span>
+      <span id="proposal-badge"></span>
+      <span id="authority-lane-copy"></span>
+      <span id="authority-scalp"></span>
+      <span id="authority-zone"></span>
+      <span id="brain-epoch"></span>
+      <span id="brain-next"></span>
+      <span id="brain-policy-copy"></span>
+      <span id="brain-policy-state"></span>
+      <span id="capital-risk-base"></span>
+      <span id="capital-risk-copy"></span>
+      <span id="capital-scalp-budget"></span>
+      <span id="capital-zone-budget"></span>
+      <span id="context-alignment"></span>
+      <span id="context-bias"></span>
+      <span id="context-zone"></span>
+      <span id="context-zone-copy"></span>
+      <span id="overview-proposal-note"></span>
+      <div id="overview-changes"></div>
+      <span id="protect-basket"></span>
+      <span id="protect-chain-ceiling"></span>
+      <span id="protect-composite-active"></span>
+      <span id="protect-composite-latest"></span>
+      <span id="protect-duplicate"></span>
+      <span id="protect-portfolio-available"></span>
+      <span id="protect-portfolio-reserved"></span>
+      <span id="protect-positions"></span>
+      <span id="protect-recovery"></span>
+      <span id="protect-recovery-copy"></span>
+      <span id="protect-recovery-sizing"></span>
+      <span id="protect-risk-streak"></span>
+      <span id="protect-unit-risk"></span>
+    </div>
+
     <div id="notify-drawer" class="notify-drawer">
       <div class="notify-head"><div><strong>Atlas Notifications</strong><div class="muted" style="font-size:10px;margin-top:2px">Material state changes and execution events</div></div><div class="actions"><button class="btn" onclick="markAllNotificationsRead()">Mark read</button><button class="btn" onclick="toggleNotifications()">Close</button></div></div>
       <div id="notify-list" class="notify-list"></div>
@@ -2510,7 +2778,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 
     <div class="content">
       <section id="view-overview" class="view active">
-        <div class="page-head"><div><h2>Command Center</h2><p>Live trading intent, capital exposure, and anything that needs your attention.</p></div><span id="overview-live-badge" class="badge ok">LIVE</span></div>
+        <div class="page-head"><div><h2>Command Center</h2><p>What Atlas is watching, what changed, and what needs your attention.</p></div><span id="overview-live-badge" class="badge ok">LIVE</span></div>
 
         <div class="card hero">
           <div class="command-hero">
@@ -2538,44 +2806,77 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
           <div class="card"><div class="label">System health</div><div class="value small" id="ack-state">—</div><div class="muted" id="ack-detail">Checking execution bridge</div></div>
         </div>
 
-        <div class="strategy-authority-grid">
-          <div class="card authority-card active">
-            <div class="row"><div class="label">Execution authority</div><span id="authority-lane-badge" class="badge info">—</span></div>
-            <div id="authority-lane" class="authority-main">Connecting…</div>
-            <div id="authority-lane-copy" class="authority-sub">Resolving which strategy owns fresh entries.</div>
-            <div class="authority-mini"><div><span class="label">Scalping</span><strong id="authority-scalp">—</strong></div><div><span class="label">Zone campaign</span><strong id="authority-zone">—</strong></div></div>
+
+        <div class="observability-grid command-center-primary">
+          <div class="card observability-card">
+            <div class="observable-head"><div><h3>Opportunity Queue</h3><p>Live opportunities Atlas is evaluating, their current gate and the next condition required for execution.</p></div><span id="opportunity-queue-badge" class="badge info">SCANNING</span></div>
+            <div id="opportunity-queue" class="opportunity-list"><div class="observability-empty">Waiting for live Atlas state.</div></div>
+            <div id="opportunity-queue-summary" class="queue-summary"></div>
           </div>
-          <div class="card authority-card context">
-            <div class="row"><div class="label">Market context</div><span id="context-zone-badge" class="badge">—</span></div>
-            <div id="context-zone" class="authority-main">No priority zone</div>
-            <div id="context-zone-copy" class="authority-sub">Atlas deterministic structure is loading.</div>
-            <div class="authority-mini"><div><span class="label">HTF structure</span><strong id="context-bias">—</strong></div><div><span class="label">Relation to live thesis</span><strong id="context-alignment">—</strong></div></div>
-          </div>
-          <div class="card authority-card capital">
-            <div class="row"><div class="label">Capital & risk</div><span id="capital-regime-badge" class="badge">—</span></div>
-            <div id="capital-risk-base" class="authority-main">—</div>
-            <div id="capital-risk-copy" class="authority-sub">Atlas hard risk envelope.</div>
-            <div class="authority-mini"><div><span class="label">Scalp budget</span><strong id="capital-scalp-budget">—</strong></div><div><span class="label">Zone budget</span><strong id="capital-zone-budget">—</strong></div></div>
-          </div>
-          <div class="card authority-card brain">
-            <div class="row"><div class="label">Gemini scalp policy</div><span id="brain-mode-badge" class="badge">—</span></div>
-            <div id="brain-policy-state" class="authority-main">Waiting for policy cycle</div>
-            <div id="brain-policy-copy" class="authority-sub">Gemini may tune Nyao; zones and hard risk remain Atlas-owned.</div>
-            <div class="authority-mini"><div><span class="label">Policy epoch</span><strong id="brain-epoch">—</strong></div><div><span class="label">Next review</span><strong id="brain-next">—</strong></div></div>
+          <div class="card observability-card">
+            <div class="observable-head"><div><h3>Decision Timeline</h3><p>Material decision transitions only — signal gates, execution economics, zones, capital, policy and trade lifecycle.</p></div><div class="actions"><button class="btn" onclick="clearDecisionTimeline()">Clear</button><span class="badge info">EVENT LOG</span></div></div>
+            <div id="decision-timeline" class="decision-timeline"><div class="observability-empty">Atlas will record the next material decision change.</div></div>
           </div>
         </div>
 
-        <div class="operator-grid section">
-          <div class="card campaign-card">
+        <div class="command-focus">
+          <div class="command-focus-main">
+            <div class="label">Operator attention</div>
+            <div id="overview-attention-title" class="decision-state">Checking…</div>
+            <div id="overview-attention-copy" class="muted">Atlas is reconciling the live state.</div>
+            <div id="overview-decision-list" class="decision-list"></div>
+          </div>
+          <div class="actions"><button class="btn primary" onclick="go('analysis')">Open zone analysis</button></div>
+        </div>
+
+        <details class="command-details">
+          <summary><span>Active trade plan</span><span class="muted">Expand plan details</span></summary>
+          <div class="command-details-body">
+<div class="card campaign-card">
             <div class="campaign-head"><div><div class="label">Active trade plan</div><div id="overview-campaign-title" class="campaign-title">Waiting for Atlas</div><div id="overview-campaign-copy" class="muted">No active campaign has been loaded.</div></div><span id="overview-campaign-badge" class="badge">—</span></div>
             <div id="overview-campaign" class="campaign-ladder"></div>
           </div>
-          <div class="card decision-card">
-            <div><div class="label">Operator attention</div><div id="overview-attention-title" class="decision-state">Checking…</div><div id="overview-attention-copy" class="muted">Atlas is reconciling the live state.</div><div id="overview-decision-list" class="decision-list"></div></div>
-            <div class="actions" style="margin-top:14px"><button class="btn primary" onclick="go('analysis')">Open zone analysis</button></div>
           </div>
+        </details>
+
+
+
+        <div class="command-workspaces section">
+          <button class="workspace-card market" onclick="go('market')">
+            <div class="workspace-icon">MKT</div>
+            <div><span class="label">Market</span><strong>Signals & execution economics</strong><p>Live BUY/SELL gates, regime, volatility, spread economics and the current market thesis.</p></div>
+            <span class="workspace-arrow">→</span>
+          </button>
+          <button class="workspace-card portfolio" onclick="go('positions')">
+            <div class="workspace-icon">RISK</div>
+            <div><span class="label">Portfolio</span><strong>Exposure & capital</strong><p>Open positions, concurrent risk allocation, reservations, recovery and capital capacity.</p></div>
+            <span class="workspace-arrow">→</span>
+          </button>
+          <button class="workspace-card brain" onclick="go('atlas')">
+            <div class="workspace-icon">AI</div>
+            <div><span class="label">Atlas Brain</span><strong>Policy & reasoning</strong><p>Gemini reviews, policy epochs, evidence, deferred activation and autonomous adaptation.</p></div>
+            <span class="workspace-arrow">→</span>
+          </button>
+          <button class="workspace-card performance" onclick="go('performance')">
+            <div class="workspace-icon">P/L</div>
+            <div><span class="label">Performance</span><strong>Evidence & learning</strong><p>Expectancy, composite outcomes, strategy breakdowns, execution quality and learning readiness.</p></div>
+            <span class="workspace-arrow">→</span>
+          </button>
         </div>
 
+        <div class="command-footer-note">
+          <span class="dot ok"></span>
+          <span>Command Center is intentionally concise. Detailed analysis lives in the dedicated workspaces above.</span>
+        </div>
+      </section>
+
+      <section id="view-market" class="view">
+        <div class="page-head"><div><h2>Market</h2><p>Why Atlas sees the market the way it does: live signals, regime, volatility and execution economics.</p></div><span class="badge info">LIVE MARKET WORKSPACE</span></div>
+        <div class="workspace-intro"><strong>How to use this page:</strong> read Atlas’s live market view and Nyao’s signal state here. Trade-location planning and zone campaigns remain on the separate Zone Analysis page.</div>
+        <div id="scalp-context-banner" class="workspace-intro" style="display:none">
+          <strong id="scalp-context-title">Scalp context</strong>
+          <span id="scalp-context-copy">Waiting for Nyao context telemetry.</span>
+        </div>
         <div id="live-execution-panel" class="section">
           <div class="section-head">
             <div><h3>Live Market & Entry Analysis</h3><p>Atlas bias and Nyao's live BUY / SELL state for the selected instrument.</p></div>
@@ -2627,39 +2928,6 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
           </div>
         </div>
 
-        <div class="grid g2 section overview-support">
-          <div class="card">
-            <div class="section-head"><div><h3>Current Atlas proposal</h3><p>Only the material change and decision state.</p></div><span id="proposal-badge" class="badge">—</span></div>
-            <div id="overview-changes" class="changes"></div>
-            <div class="callout" style="margin-top:12px" id="overview-proposal-note">No proposal loaded.</div>
-            <div class="actions" style="margin-top:12px"><button class="btn primary" onclick="go('atlas')">Open Atlas decision</button></div>
-          </div>
-          <div class="card">
-            <div class="section-head"><div><h3>Protection status</h3><p>Position policy lock and account-level safety.</p></div></div>
-            <div class="grid g2">
-              <div class="kpi"><div class="label">Existing positions</div><div class="value small" id="protect-positions">—</div></div>
-              <div class="kpi"><div class="label">Active recovery</div><div class="value small" id="protect-recovery">—</div></div>
-              <div class="kpi"><div class="label">Basket loss</div><div class="value small" id="protect-basket">—</div></div>
-              <div class="kpi"><div class="label">Duplicate guard</div><div class="value small" id="protect-duplicate">—</div></div>
-              <div class="kpi"><div class="label">Risk-unit streak</div><div class="value small" id="protect-risk-streak">—</div></div>
-              <div class="kpi"><div class="label">Recovery sizing</div><div class="value small" id="protect-recovery-sizing">—</div></div>
-              <div class="kpi"><div class="label">Original unit risk</div><div class="value small" id="protect-unit-risk">—</div></div>
-              <div class="kpi"><div class="label">Chain risk ceiling</div><div class="value small" id="protect-chain-ceiling">—</div></div>
-              <div class="kpi"><div class="label">Reserved portfolio risk</div><div class="value small" id="protect-portfolio-reserved">—</div></div>
-              <div class="kpi"><div class="label">Available operating risk</div><div class="value small" id="protect-portfolio-available">—</div></div>
-              <div class="kpi"><div class="label">Active composite</div><div class="value small" id="protect-composite-active">—</div></div>
-              <div class="kpi"><div class="label">Latest composite</div><div class="value small" id="protect-composite-latest">—</div></div>
-            </div>
-            <div class="callout" style="margin-top:12px" id="protect-recovery-copy">Recovery-chain members are scored as one composite outcome after the entire chain is flat.</div>
-          </div>
-        </div>
-      </section>
-
-      <section id="view-market" class="view">
-        <div class="page-head"><div><h2>Market Analysis</h2><p>Live regime, direction, signal eligibility, volatility, and trading costs.</p></div><span class="badge info">LIVE MARKET WORKSPACE</span></div>
-        <div class="workspace-intro"><strong>How to use this page:</strong> read Atlas’s live market view and Nyao’s signal state here. Trade-location planning and zone campaigns remain on the separate Zone Analysis page.</div>
-        <div id="market-live-slot"></div>
-
         <div class="grid g4">
           <div class="card"><div class="label">Market bias</div><div class="value small" id="an-bias">—</div><div class="muted" id="an-regime">Waiting for Atlas</div></div>
           <div class="card"><div class="label">Volatility</div><div class="value small" id="an-volatility">—</div><div class="muted" id="an-vol-ratio">Ratio —</div></div>
@@ -2700,9 +2968,12 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
             <svg id="an-zone-chart" class="zone-chart-frame" viewBox="0 0 1200 520" role="img" aria-label="Atlas M30 candlestick chart with prioritized supply and demand zones"></svg>
           </div>
           <div id="an-zone-execution"></div>
+          <div id="an-zone-lifecycle" class="callout" style="margin-top:12px">Zone lifecycle is waiting for validated candles.</div>
           <details class="raw" style="margin-top:12px"><summary>Zone evidence and engine diagnostics</summary>
             <div id="an-zone-stats" class="grid g4" style="margin-top:12px"></div>
             <div id="an-zone-list" class="zone-map-list"></div>
+            <div class="section-head" style="margin-top:16px"><div><h3 style="font-size:13px">Invalidated zone history</h3><p>Closed-candle failures retained for audit. Invalidated zones cannot influence scalp context or new campaigns.</p></div><span id="an-invalidated-count" class="badge">0 INVALIDATED</span></div>
+            <div id="an-invalidated-zone-list" class="zone-map-list"></div>
             <div id="an-zone-scenario-list" class="analysis-list" style="margin-top:12px"></div>
             <div id="an-mtf-grid" class="grid g3" style="margin-top:12px"></div>
             <div class="grid g4" style="margin-top:12px">
@@ -2728,39 +2999,175 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
       </section>
 
       <section id="view-positions" class="view">
-        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><span class="badge info">NYAO EXECUTION</span></div>
-        <div class="grid g4">
+        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><div class="row"><span class="badge info">NYAO EXECUTION</span><span class="badge ok">RISK UI · 1.30.43</span></div></div>
+        <div class="grid g3">
           <div class="card"><div class="label">Strategy positions</div><div class="value" id="p-count">0</div></div>
-          <div class="card"><div class="label">Total lots</div><div class="value" id="p-lots">0.00</div></div>
-          <div class="card"><div class="label">Floating P/L</div><div class="value" id="p-pl">—</div></div>
+          <div class="card"><div class="label">Total lots remaining</div><div class="value" id="p-lots">0.00</div></div>
           <div class="card"><div class="label">Recovery chains</div><div class="value" id="p-chains">0</div></div>
+          <div class="card"><div class="label">Realized while active</div><div class="value" id="p-realized">—</div><div class="muted">Partial exits only</div></div>
+          <div class="card"><div class="label">Floating P/L</div><div class="value" id="p-pl">—</div></div>
+          <div class="card"><div class="label">Active lifecycle P/L</div><div class="value" id="p-lifecycle">—</div><div class="muted">Realized + floating</div></div>
+        </div>
+        <div class="card section">
+          <div class="section-head"><div><h3>Risk allocation · live capital usage</h3><p>Where Atlas's current operating risk is reserved and what remains available for new opportunities.</p></div><span id="portfolio-risk-badge" class="badge info">RECONCILING</span></div>
+          <div class="risk-allocation-hero"><div><div class="label">Operating risk ceiling</div><div class="risk-allocation-total" id="portfolio-operating-ceiling">—</div><div class="muted" id="portfolio-risk-reconcile">Waiting for capital telemetry.</div></div><div class="risk-allocation-hard"><span class="label">Portfolio hard ceiling</span><strong id="portfolio-hard-ceiling">—</strong><span class="muted" id="portfolio-hard-headroom">— headroom</span></div></div>
+          <div class="risk-allocation-bar" id="portfolio-risk-bar"><span class="risk-segment active" style="width:0%"></span><span class="risk-segment zone" style="width:0%"></span><span class="risk-segment free" style="width:100%"></span></div>
+          <div class="risk-allocation-legend"><span><i class="risk-dot active"></i>Active reservations</span><span><i class="risk-dot zone"></i>Prospective zone</span><span><i class="risk-dot free"></i>Free operating risk</span></div>
+          <div id="portfolio-risk-cards" class="risk-allocation-cards"><div class="observability-empty">Risk reservations will appear when capital telemetry is available.</div></div>
         </div>
         <div class="card section">
           <div class="section-head"><div><h3>Open positions</h3><p>The trading facts first. Policy lineage remains available in the audit log.</p></div></div>
-          <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Side</th><th>Lots</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th><th>Origin</th><th>Age</th></tr></thead><tbody id="positions-body"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Side</th><th>Volume</th><th>Entry</th><th>Current</th><th>Realized</th><th>Floating</th><th>Lifecycle</th><th>Stop</th><th>Target</th><th>Context / Origin</th><th>Age</th></tr></thead><tbody id="positions-body"></tbody></table></div>
         </div>
         <div class="card section">
           <div class="section-head"><div><h3>Recent closed trades</h3><p>Authoritative ticket-level executions for the selected MT5 account. Recovery/zone members may appear as separate rows here, but strategic win/loss streaks and policy learning score the completed composite risk unit only.</p></div><span id="closed-trades-badge" class="badge">CURRENT ACCOUNT</span></div>
           <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Side</th><th>Lots</th><th>Entry</th><th>Exit</th><th>Realized P/L</th><th>Origin</th><th>Policy epoch</th><th>Mode</th><th>Closed</th><th>Quality</th></tr></thead><tbody id="closed-trades-body"></tbody></table></div>
         </div>
+
+      </section>
+
+      <section id="view-performance" class="view">
+        <div class="page-head"><div><h2>Performance Intelligence</h2><p>Strategic outcomes, execution quality, policy evidence, and whether Atlas has enough data to learn responsibly.</p></div><span id="performance-page-badge" class="badge info">CURRENT ACCOUNT</span></div>
+        <div class="workspace-intro"><strong>How to use this page:</strong> strategic performance is scored by completed risk unit, not raw MT5 ticket. Standalone trades score individually; recovery chains and zone campaigns score once when the whole composite is flat. Ticket-level evidence below is diagnostic only.</div>
+
+        <div class="performance-hero">
+          <div class="card performance-primary">
+            <div class="row"><div><div class="label">Strategic net P/L</div><div class="performance-net" id="perf-net">—</div></div><span id="perf-quality" class="badge">COLLECTING</span></div>
+            <div class="performance-sub" id="performance-headline">Waiting for completed Atlas risk units.</div>
+            <div id="performance-equity-curve" class="performance-curve"><div class="observability-empty">Equity curve will appear after completed risk units.</div></div>
+          </div>
+          <div class="performance-kpis">
+            <div class="card"><div class="label">Completed risk units</div><div class="value" id="perf-count">0</div><div class="muted" id="perf-sample">Sample —</div></div>
+            <div class="card"><div class="label">Expectancy / unit</div><div class="value" id="perf-expectancy">—</div><div class="muted">Strategic outcome basis</div></div>
+            <div class="card"><div class="label">Win rate</div><div class="value" id="perf-win-rate">—</div><div class="muted">Completed units only</div></div>
+            <div class="card"><div class="label">Profit factor</div><div class="value" id="perf-factor">—</div><div class="muted">Gross wins / gross losses</div></div>
+            <div class="card"><div class="label">Max closed drawdown</div><div class="value" id="perf-drawdown">—</div><div class="muted">Composite equity sequence</div></div>
+            <div class="card"><div class="label">Data quality</div><div class="value small" id="perf-data-quality">—</div><div class="muted" id="perf-data-quality-copy">Waiting for outcomes</div></div>
+          </div>
+        </div>
+
+        <div class="grid g3 section">
+          <div class="card"><div class="section-head"><div><h3>Standalone scalps</h3><p>Independent risk units.</p></div><span id="perf-standalone-badge" class="badge">—</span></div><div id="perf-standalone" class="performance-unit-summary"></div></div>
+          <div class="card"><div class="section-head"><div><h3>Recovery chains</h3><p>Root + hedge children scored once.</p></div><span id="perf-recovery-badge" class="badge">—</span></div><div id="perf-recovery" class="performance-unit-summary"></div></div>
+          <div class="card"><div class="section-head"><div><h3>Zone campaigns</h3><p>All campaign layers scored once.</p></div><span id="perf-zone-badge" class="badge">—</span></div><div id="perf-zone" class="performance-unit-summary"></div></div>
+        </div>
+
+        <div class="grid g2 section">
+          <div class="card">
+            <div class="section-head"><div><h3>Performance by policy epoch</h3><p>Use this to see whether later Nyao policies are actually improving completed strategic outcomes.</p></div><span class="badge info">ATTRIBUTED AT ENTRY</span></div>
+            <div class="table-wrap"><table><thead><tr><th>Epoch</th><th>Units</th><th>Net P/L</th><th>Expectancy</th><th>Win rate</th><th>Evidence</th></tr></thead><tbody id="perf-epochs"></tbody></table></div>
+          </div>
+          <div class="card">
+            <div class="section-head"><div><h3>Performance by trading mode</h3><p>Separates scalp and zone strategy evidence.</p></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Mode</th><th>Units</th><th>Net P/L</th><th>Expectancy</th><th>Profit factor</th></tr></thead><tbody id="perf-modes"></tbody></table></div>
+          </div>
+        </div>
+
+        <div class="grid g2 section">
+          <div class="card">
+            <div class="section-head"><div><h3>Recent strategic outcomes</h3><p>Composite risk-unit truth used by loss streaks and policy performance.</p></div><span id="perf-units-badge" class="badge">—</span></div>
+            <div id="perf-recent-units" class="performance-results"></div>
+          </div>
+          <div class="card">
+            <div class="section-head"><div><h3>Execution quality</h3><p>Ticket-level MFE / MAE and entry-context evidence. Diagnostic only; hedge and zone member tickets are not independent strategy wins or losses.</p></div><span class="badge warn">DIAGNOSTIC</span></div>
+            <div class="grid g2">
+              <div class="kpi"><div class="label">Median MFE</div><div class="value small" id="perf-mfe">—</div></div>
+              <div class="kpi"><div class="label">Median MAE</div><div class="value small" id="perf-mae">—</div></div>
+              <div class="kpi"><div class="label">Average realised ticket</div><div class="value small" id="perf-ticket-average">—</div></div>
+              <div class="kpi"><div class="label">MT5-confirmed tickets</div><div class="value small" id="perf-exact-tickets">—</div></div>
+            </div>
+            <div class="label" style="margin-top:16px">Entry regime evidence</div><div id="perf-regimes" class="performance-bars"></div>
+          </div>
+        </div>
+
         <div class="card section">
-          <div class="section-head"><div><h3>Learning scorecard</h3><p>Closed-trade evidence attributed to the policy epoch and mode active at entry.</p></div><span id="perf-quality" class="badge">COLLECTING</span></div>
+          <div class="section-head"><div><h3>Learning readiness</h3><p>Atlas should not mistake a tiny sample for proof. This panel makes evidence maturity explicit.</p></div><span id="perf-learning-badge" class="badge warn">EARLY</span></div>
           <div class="grid g4">
-            <div class="kpi"><div class="label">Closed trades</div><div class="value small" id="perf-count">0</div></div>
-            <div class="kpi"><div class="label">Net P/L</div><div class="value small" id="perf-net">—</div></div>
-            <div class="kpi"><div class="label">Expectancy / trade</div><div class="value small" id="perf-expectancy">—</div></div>
-            <div class="kpi"><div class="label">Profit factor</div><div class="value small" id="perf-factor">—</div></div>
+            <div class="kpi"><div class="label">Exact strategic outcomes</div><div class="value small" id="perf-exact-units">—</div></div>
+            <div class="kpi"><div class="label">Inferred strategic outcomes</div><div class="value small" id="perf-inferred-units">—</div></div>
+            <div class="kpi"><div class="label">Active unscored units</div><div class="value small" id="perf-active-units">—</div></div>
+            <div class="kpi"><div class="label">Completed loss streak</div><div class="value small" id="perf-loss-streak">—</div></div>
           </div>
-          <div class="grid g2" style="margin-top:12px">
-            <div><div class="label" style="margin-bottom:8px">By policy epoch</div><div class="table-wrap"><table><thead><tr><th>Epoch</th><th>Risk units</th><th>Net P/L</th><th>Expectancy</th><th>Win rate</th><th>Evidence</th></tr></thead><tbody id="perf-epochs"></tbody></table></div></div>
-            <div><div class="label" style="margin-bottom:8px">By trading mode</div><div class="table-wrap"><table><thead><tr><th>Mode</th><th>Risk units</th><th>Net P/L</th><th>Expectancy</th><th>Profit factor</th></tr></thead><tbody id="perf-modes"></tbody></table></div></div>
-          </div>
-          <div id="perf-note" class="callout" style="margin-top:12px">Waiting for closed trades.</div>
+          <div id="perf-note" class="callout" style="margin-top:12px">Waiting for closed strategic risk units.</div>
         </div>
       </section>
 
       <section id="view-atlas" class="view">
-        <div class="page-head"><div><h2>Atlas Brain</h2><p>Model review cadence, proposed adaptations, evidence, and decision authority.</p></div><span class="badge info">GEMINI + DETERMINISTIC LAYER</span></div>
+        <div class="page-head"><div><h2>Atlas Brain</h2><p>See what policy is active, what Gemini is learning, how consensus is forming, and how policy evolves over time.</p></div><span class="badge info">GEMINI + DETERMINISTIC LAYER</span></div>
+        <div class="brain-section-label"><span>01</span><div><strong>Policy Control Center</strong><p>Active runtime authority and the next candidate policy window belong together.</p></div></div>
+        <div class="brain-policy-control-grid">
+          <div class="card">
+            <div class="section-head"><div><h3>Runtime policy</h3><p>Authoritative Nyao policy actually active now. This card never displays reasoning from a newer Gemini observation.</p></div><span id="runtime-policy-badge" class="badge">—</span></div>
+            <div class="grid g4">
+              <div class="kpi"><div class="label">Policy epoch</div><div class="value small" id="runtime-policy-epoch">—</div></div>
+              <div class="kpi"><div class="label">Command</div><div class="value small" id="runtime-policy-command">—</div></div>
+              <div class="kpi"><div class="label">Runtime controls</div><div class="value small" id="runtime-policy-count">—</div></div>
+              <div class="kpi"><div class="label">Reconciliation</div><div class="value small" id="runtime-policy-reconciliation">—</div></div>
+            </div>
+            <div id="runtime-policy-changes" class="changes" style="margin-top:12px"></div>
+            <div id="runtime-policy-rationale" class="callout" style="margin-top:12px">Loading active runtime policy lineage.</div>
+            <div class="policy-actions"><button class="btn primary" onclick="openActivePolicyInspector()">Inspect all runtime controls</button><button class="btn" onclick="brainTab('history')">Policy history</button></div>
+          </div>
+          <div class="card">
+            <div class="section-head">
+              <div><h3>Candidate consensus</h3><p>Accepted Gemini observations for the active policy baseline. Gemini runs and accepted observations are tracked separately.</p></div>
+              <span class="badge info">LEARNING WINDOW</span>
+            </div>
+            <div id="policy-consensus-summary" class="callout">Consensus window is loading.</div>
+            <div id="policy-consensus-controls" class="consensus-table consensus-full"></div>
+            <div id="policy-window-history" class="policy-window-history"></div>
+          </div>
+        </div>
+        <div class="card section">
+          <div class="section-head"><div><h3>Policy lineage</h3><p>Inspect every applied policy epoch and the accepted Gemini observations that fed policy learning.</p></div><span class="badge info">AUDITABLE LINEAGE</span></div>
+          <div class="brain-tabs">
+            <button id="brain-tab-runs" class="brain-tab active" onclick="brainTab('runs')">Gemini run history</button>
+            <button id="brain-tab-observations" class="brain-tab" onclick="brainTab('observations')">Accepted observations</button>
+            <button id="brain-tab-history" class="brain-tab" onclick="brainTab('history')">Applied policy epochs</button>
+          </div>
+          <div id="brain-panel-runs" class="brain-tab-panel active"><div id="gemini-run-history" class="gemini-run-history"></div></div>
+          <div id="brain-panel-observations" class="brain-tab-panel"><div id="policy-observation-list" class="observation-list"></div></div>
+          <div id="brain-panel-history" class="brain-tab-panel"><div id="policy-registry-list" class="policy-timeline"></div></div>
+        </div>
+
+        <div class="brain-section-label"><span>02</span><div><strong>Learning & Market Evidence</strong><p>What Gemini currently sees and whether scalp execution is responsive enough.</p></div></div>
+        <div class="brain-learning-grid">
+          <div class="card">
+            <div class="section-head"><div><h3>Latest Gemini analysis</h3><p>Newest proposal/observation. This may be newer than the active runtime policy and is not treated as active evidence.</p></div><span id="latest-analysis-badge" class="badge info">LATEST</span></div>
+            <div class="grid g2">
+              <div class="kpi"><div class="label">Candidate</div><div class="value small" id="a-candidate">—</div></div>
+              <div class="kpi"><div class="label">Recommendation</div><div class="value small" id="a-readiness">—</div></div>
+              <div class="kpi"><div class="label">Baseline epoch</div><div class="value small" id="a-epoch">—</div></div>
+              <div class="kpi"><div class="label">Confidence</div><div class="value small" id="a-confidence">—</div></div>
+            </div>
+            <div id="atlas-llm-evidence" class="callout" style="margin-top:12px">No Gemini analysis attached.</div>
+            <div id="a-blockers" class="callout" style="margin-top:10px">—</div>
+          </div>
+          <div class="card">
+          <div class="section-head"><div><h3>Scalping responsiveness</h3><p>Measures entry opportunity, blocking pressure, holding time and profit capture. Speed is judged by net outcomes, not trade count.</p></div><span id="resp-badge" class="badge">—</span></div>
+          <div class="grid g4">
+            <div class="kpi"><div class="label">Latency pressure</div><div class="value small" id="resp-pressure">—</div></div>
+            <div class="kpi"><div class="label">Entry eligible</div><div class="value small" id="resp-eligible">—</div></div>
+            <div class="kpi"><div class="label">Median hold</div><div class="value small" id="resp-hold">—</div></div>
+            <div class="kpi"><div class="label">MFE captured</div><div class="value small" id="resp-capture">—</div></div>
+          </div>
+          <div class="grid g2" style="margin-top:12px">
+            <div><div class="label">Dominant entry blockers</div><div id="resp-blockers" class="changes" style="margin-top:8px"></div></div>
+            <div><div class="label">Candidate responsiveness levers</div><div id="resp-levers" class="changes" style="margin-top:8px"></div></div>
+          </div>
+          <div id="resp-detail" class="callout" style="margin-top:12px">Responsiveness evidence is loading.</div>
+        </div>
+        
+        </div>
+        <div class="grid g4 section">
+          <div class="card"><div class="label">Risk</div><div class="value small" id="a-risk">—</div></div>
+          <div class="card"><div class="label">Evidence</div><div class="value small" id="a-evidence">—</div></div>
+          <div class="card"><div class="label">Stability</div><div class="value small" id="a-stability">—</div></div>
+          <div class="card"><div class="label">Review state</div><div class="value small" id="a-review-state">—</div></div>
+        </div>
+        
+
+        <div class="brain-section-label"><span>03</span><div><strong>Policy Automation & Intelligence</strong><p>Control review cadence and inspect the evidence Atlas uses to investigate parameter changes.</p></div></div>
         <div class="card">
           <div class="section-head"><div><h3>Gemini policy cycle</h3><p>Optimizes the full Nyao scalp runtime policy using live state, performance, responsiveness and deterministic zone context. Zone policy remains read-only.</p></div><span id="cycle-badge" class="badge">—</span></div>
           <div class="grid g4">
@@ -2779,58 +3186,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
           </div>
           <div id="cycle-detail" class="callout" style="margin-top:12px">Schedule is loading. Application authority remains manual.</div>
         </div>
-        <div class="card section" id="consensus-card">
-          <div class="section-head"><div><h3>Autonomous policy consensus</h3><p>Accepted Gemini observations accumulated across the current policy dwell window. Controls qualify individually; the latest proposal never wins by itself.</p></div><span id="consensus-badge" class="badge">COLLECTING</span></div>
-          <div class="consensus-summary">
-            <div class="kpi"><div class="label">Current-window observations</div><div class="value small" id="consensus-observations">0</div><div class="muted" id="consensus-observation-rule">Need 3 minimum</div></div>
-            <div class="kpi"><div class="label">Controls qualifying</div><div class="value small" id="consensus-qualified">0</div><div class="muted">Eligible for next policy epoch</div></div>
-            <div class="kpi"><div class="label">Support threshold</div><div class="value small" id="consensus-threshold">60%</div><div class="muted">Of all accepted observations</div></div>
-            <div class="kpi"><div class="label">Baseline epoch</div><div class="value small" id="consensus-epoch">—</div><div class="muted" id="consensus-window-age">Window not started</div></div>
-            <div class="kpi"><div class="label">Lifetime observations</div><div class="value small" id="consensus-lifetime">0</div><div class="muted" id="consensus-history-note">No archived windows yet</div></div>
-          </div>
-          <div class="row" style="margin-top:14px"><div><strong id="consensus-headline">Waiting for Gemini observations.</strong><div class="muted" id="consensus-detail" style="margin-top:4px">Per-control support will appear here.</div></div></div>
-          <div id="consensus-controls" class="consensus-table"></div>
-          <div class="label" style="margin-top:16px;margin-bottom:8px">Recent policy windows</div><div id="consensus-history" class="analysis-list"></div>
-        </div>
-        <div class="card section">
-          <div class="section-head"><div><h3>Scalping responsiveness</h3><p>Measures entry opportunity, blocking pressure, holding time and profit capture. Speed is judged by net outcomes, not trade count.</p></div><span id="resp-badge" class="badge">—</span></div>
-          <div class="grid g4">
-            <div class="kpi"><div class="label">Latency pressure</div><div class="value small" id="resp-pressure">—</div></div>
-            <div class="kpi"><div class="label">Entry eligible</div><div class="value small" id="resp-eligible">—</div></div>
-            <div class="kpi"><div class="label">Median hold</div><div class="value small" id="resp-hold">—</div></div>
-            <div class="kpi"><div class="label">MFE captured</div><div class="value small" id="resp-capture">—</div></div>
-          </div>
-          <div class="grid g2" style="margin-top:12px">
-            <div><div class="label">Dominant entry blockers</div><div id="resp-blockers" class="changes" style="margin-top:8px"></div></div>
-            <div><div class="label">Candidate responsiveness levers</div><div id="resp-levers" class="changes" style="margin-top:8px"></div></div>
-          </div>
-          <div id="resp-detail" class="callout" style="margin-top:12px">Responsiveness evidence is loading.</div>
-        </div>
-        <div class="grid g3 section">
-          <div class="card"><div class="label">Selected candidate</div><div class="value small" id="a-candidate">—</div></div>
-          <div class="card"><div class="label">Recommendation</div><div class="value small" id="a-readiness">—</div></div>
-          <div class="card"><div class="label">Policy epoch</div><div class="value small" id="a-epoch">—</div></div>
-        </div>
-        <div class="grid g2 section">
-          <div class="card">
-            <div class="section-head"><div><h3 id="atlas-policy-title">Current active policy</h3><p id="atlas-policy-subtitle">Consensus application is reconciled against Nyao's registered/live runtime.</p></div><span id="a-review-state" class="badge">—</span></div>
-            <div id="atlas-changes" class="changes"></div>
-            <div style="margin-top:14px" class="callout" id="atlas-rationale">—</div>
-            <div style="margin-top:12px" class="callout" id="atlas-llm-evidence">No Gemini evidence attached to this proposal.</div>
-            <div class="label" style="margin-top:16px;margin-bottom:8px">Applied policy history</div>
-            <div id="applied-policy-history" class="analysis-list"></div>
-          </div>
-          <div class="card">
-            <div class="section-head"><div><h3>Readiness</h3><p>Natural evidence gates remain visible even when test overrides are active.</p></div></div>
-            <div class="grid g2">
-              <div class="kpi"><div class="label">Risk</div><div class="value small" id="a-risk">—</div></div>
-              <div class="kpi"><div class="label">Confidence</div><div class="value small" id="a-confidence">—</div></div>
-              <div class="kpi"><div class="label">Evidence</div><div class="value small" id="a-evidence">—</div></div>
-              <div class="kpi"><div class="label">Stability</div><div class="value small" id="a-stability">—</div></div>
-            </div>
-            <div class="callout" style="margin-top:12px" id="a-blockers">—</div>
-          </div>
-        </div>
+        
         <div class="card section">
           <div class="section-head"><div><h3>Parameter Intelligence</h3><p>P2.2 ranks all 157 controls using parameter-specific evidence, observed runtime variation and descriptive outcome associations.</p></div><span id="pi-mode" class="badge info">P2.2</span></div>
           <div class="grid g4">
@@ -2848,6 +3204,9 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
           <div class="callout" style="margin-top:12px" id="pi-authority-note">Historical value/outcome differences are descriptive associations, not causal proof.</div>
         </div>
 
+        
+
+        <div class="brain-section-label"><span>04</span><div><strong>Human Review & Application</strong><p>Manual approval workflow when Atlas is operating in supervised mode.</p></div></div>
         <div class="card section">
           <div class="section-head"><div><h3>Human review workflow</h3><p>The backend still validates exact fingerprint, epoch and review snapshot. The UI carries them automatically.</p></div></div>
           <div id="review-workflow" class="workflow"></div>
@@ -2858,6 +3217,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
             <button id="btn-build-command" class="btn" onclick="buildSupervisedCommand()">Build command package</button>
           </div>
         </div>
+      
       </section>
 
       <section id="view-control" class="view">
@@ -2939,7 +3299,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
       </section>
 
       <section id="view-history" class="view">
-        <div class="page-head"><div><h2>Audit Log</h2><p>Policy decisions, execution lifecycle, tracked outcomes, and integrity checks.</p></div><span class="badge">READ ONLY</span></div>
+        <div class="page-head"><div><h2>System & Audit</h2><p>System integrity, execution lifecycle, policy history and authoritative audit evidence.</p></div><span class="badge">READ ONLY</span></div>
         <div class="grid g3">
           <div class="card"><div class="label">Execution audit</div><div class="value small" id="h-audit">—</div><div class="muted" id="h-audit-count">—</div></div>
           <div class="card"><div class="label">Policy epochs</div><div class="value small" id="h-epochs">—</div></div>
@@ -2972,17 +3332,18 @@ const CONTROL_CONFIG = __CONTROL_CONFIG__;
 const state = {
   status:null, command:null, intelligence:null, parameterIntel:null, proposal:null, review:null,
   supervised:null, preflight:null, execution:null, ack:null, arm:null, llmCycle:null, llmStatus:null, autoConsensus:null, responsiveness:null, candles:null, zoneMap:null, zonePlan:null,
-  executionEvents:null, epochs:null, outcomes:null, performance:null, riskUnits:null, recoveryAttribution:null, recoveryRisk:null, riskAppetite:null, audit:null, autoApplications:null, dirty:{}, symbols:[], selectedSymbol:null, notificationBaseline:null
+  executionEvents:null, epochs:null, outcomes:null, performance:null, riskUnits:null, recoveryAttribution:null, recoveryRisk:null, riskAppetite:null, audit:null, autoApplications:null, dirty:{}, symbols:[], selectedSymbol:null, notificationBaseline:null, decisionBaseline:null
 };
 
 const viewMeta={
-  overview:["Command Center","Live intent, exposure and operator attention"],
-  market:["Market Analysis","Regime, signal eligibility and trading costs"],
+  overview:["Command Center","What Atlas is watching now"],
+  market:["Market","Signals, regime, volatility and execution economics"],
   analysis:["Zone Analysis","Daily trade locations and live zone execution"],
   positions:["Portfolio","Exposure and position management"],
+  performance:["Performance","Strategic outcomes, execution quality and learning readiness"],
   atlas:["Atlas Brain","Adaptation, evidence and model authority"],
   control:["Settings","Execution authority and advanced controls"],
-  history:["Audit Log","Policy, execution and outcome history"]
+  history:["System & Audit","System integrity, execution history and audit evidence"]
 };
 
 function go(name){
@@ -2993,9 +3354,7 @@ function go(name){
   document.getElementById("top-subtitle").textContent=viewMeta[name][1];
 }
 document.querySelectorAll(".nav button").forEach(b=>b.onclick=()=>go(b.dataset.view));
-const liveExecutionPanel=document.getElementById("live-execution-panel");
-const marketLiveSlot=document.getElementById("market-live-slot");
-if(liveExecutionPanel&&marketLiveSlot)marketLiveSlot.appendChild(liveExecutionPanel);
+// Live Market & Entry Analysis has one canonical home in Market.
 const fmt=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):"—";
 const money=v=>Number.isFinite(Number(v))?new Intl.NumberFormat(undefined,{style:"currency",currency:"USD",maximumFractionDigits:2}).format(Number(v)):"—";
 const text=(v,f="—")=>(v===null||v===undefined||v==="")?f:String(v);
@@ -3038,6 +3397,110 @@ function scopedUrl(url){
 }
 async function api(url,opts={}){const r=await fetch(scopedUrl(url),{cache:"no-store",...opts});let data=null;try{data=await r.json()}catch{}if(!r.ok){const detail=data?.detail;throw new Error(typeof detail==="string"?detail:(detail?.code?detail.code+": "+detail.message:`HTTP ${r.status}`))}return data}
 function jsonPost(url,body){return api(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})}
+
+
+function decisionStoreKey(){return `atlasDecisionTimeline:${state.selectedSymbol||"default"}`}
+function getDecisionTimeline(){try{return JSON.parse(localStorage.getItem(decisionStoreKey())||"[]")}catch{return[]}}
+function setDecisionTimeline(v){localStorage.setItem(decisionStoreKey(),JSON.stringify(v.slice(0,240)));renderDecisionTimeline()}
+function clearDecisionTimeline(){setDecisionTimeline([]);state.decisionBaseline=decisionSnapshot()}
+function addDecisionEvent(kind,title,body,action="overview",key=""){
+  const now=Date.now(),events=getDecisionTimeline();
+  if(key&&events.some(e=>e.key===key&&now-new Date(e.at).getTime()<60000))return;
+  setDecisionTimeline([{id:`${now}-${Math.random().toString(16).slice(2)}`,kind,title,body,action,key,at:new Date(now).toISOString()},...events]);
+}
+function decisionSnapshot(){
+  const s=state.status||{},zp=state.zonePlan||{},cap=zp.capital_sizing||{},lp=cap.loss_protection||{},plan=zp.zone_plan||{};
+  return {
+    connected:!!s.connected,
+    buyEligible:!!s.buy_entry_eligible,sellEligible:!!s.sell_entry_eligible,
+    buyReason:String(s.buy_block_reason||""),sellReason:String(s.sell_block_reason||""),
+    buyScore:Number(s.buy_adjusted_score??s.buy_score??0),sellScore:Number(s.sell_adjusted_score??s.sell_score??0),
+    buyThreshold:Number(s.buy_effective_threshold??s.runtime_min_buy_signal_score??0),sellThreshold:Number(s.sell_effective_threshold??s.runtime_min_sell_signal_score??0),
+    scalpCost:!!s.scalp_cost_feasible,scalpStructure:String(s.scalp_structure_reason||""),
+    zoneState:String(s.zone_directive_state||zp.execution_lane||""),zoneSide:String(s.zone_side||plan.side||"NONE"),zonePlan:String(s.zone_plan_id||plan.plan_id||""),
+    zoneConfirm:Number(s.zone_confirmation_score??plan.confirmation?.zone_confirmation?.combined_score??0),zoneConfirmThreshold:Number(s.zone_confirmation_threshold??plan.confirmation?.zone_confirmation?.threshold??0),
+    zoneDirectional:Number(s.zone_directional_score??0),zoneDirectionalThreshold:Number(s.zone_minimum_directional_score??0),zoneSpreadOk:s.zone_spread_within_limit!==false,
+    capitalVeto:!!s.capital_veto_new_risk,scalpRisk:Number(cap.approved_scalp_risk_amount||0),zoneRisk:Number(cap.approved_zone_risk_amount||0),reserved:Number(cap.portfolio_allocation?.reserved_active_risk_amount||0),available:Number(cap.portfolio_allocation?.remaining_operating_risk_amount||0),
+    lossState:String(lp.state||"INACTIVE"),policyEpoch:Number(s.policy_epoch||0),open:Number(s.strategy_open_positions??s.open_positions??0),lastTicket:Number(s.last_order_ticket||0),lastSuccess:!!s.last_order_success,recovery:Number(s.active_hedge_chains||0)
+  }
+}
+function crossedUp(a,b,t){return Number.isFinite(t)&&t>0&&a<t&&b>=t}
+function crossedDown(a,b,t){return Number.isFinite(t)&&t>0&&a>=t&&b<t}
+function materiallyChanged(a,b){const base=Math.max(Math.abs(a),1);return Math.abs(b-a)/base>=.15}
+function evaluateDecisionTimeline(){
+  const cur=decisionSnapshot(),prev=state.decisionBaseline;state.decisionBaseline=cur;if(!prev)return;
+  if(prev.connected!==cur.connected)addDecisionEvent(cur.connected?"SYSTEM":"CRITICAL",cur.connected?"Nyao connection restored":"Nyao connection lost",cur.connected?"Atlas can evaluate execution authority again.":"Execution decisions are suspended until live Nyao telemetry returns.","overview",`connected-${cur.connected}`);
+  if(prev.zoneState!==cur.zoneState||prev.zonePlan!==cur.zonePlan){
+    const title=cur.zoneState==="ZONE_AWARE_SCALP"?`${cur.zoneSide} zone entered WATCHING`:cur.zoneState.includes("ZONE_CAMPAIGN")?`${cur.zoneSide} zone committed`:cur.zoneState==="OUTSIDE_PRIORITY_ZONE"?"Priority zone released":`Zone state → ${pretty(cur.zoneState||"NONE")}`;
+    const body=cur.zoneState==="ZONE_AWARE_SCALP"?"Aligned scalping remains active while Atlas waits for campaign commit gates.":cur.zoneState.includes("ZONE_CAMPAIGN")?"The zone campaign owns fresh-entry priority; policy activation is deferred to the campaign boundary.":cur.zoneState==="OUTSIDE_PRIORITY_ZONE"?"Normal scalp authority is restored.":`Current zone side ${cur.zoneSide}.`;
+    addDecisionEvent(cur.zoneState.includes("ZONE_CAMPAIGN")?"READY":"ZONE",title,body,"analysis",`zone-${cur.zoneState}-${cur.zonePlan}`)
+  }
+  if(!prev.zoneSpreadOk&&cur.zoneSpreadOk)addDecisionEvent("READY","Zone execution cost became feasible",`Current spread is now inside the adaptive campaign limit for the ${cur.zoneSide} zone.`,"analysis","zone-spread-pass");
+  if(prev.zoneSpreadOk&&!cur.zoneSpreadOk&&cur.zoneState&&cur.zoneState!=="OUTSIDE_PRIORITY_ZONE")addDecisionEvent("BLOCK","Zone execution cost became too expensive",`Spread moved outside the adaptive campaign limit; the zone remains context but cannot commit on cost.`,"analysis","zone-spread-block");
+  if(crossedUp(prev.zoneConfirm,cur.zoneConfirm,cur.zoneConfirmThreshold))addDecisionEvent("READY","Zone confirmation threshold reached",`${fmt(cur.zoneConfirm,1)} ≥ ${fmt(cur.zoneConfirmThreshold,1)}. Directional and execution gates still remain authoritative.`,"analysis","zone-confirm-pass");
+  if(crossedDown(prev.zoneConfirm,cur.zoneConfirm,cur.zoneConfirmThreshold))addDecisionEvent("BLOCK","Zone confirmation fell below threshold",`${fmt(cur.zoneConfirm,1)} < ${fmt(cur.zoneConfirmThreshold,1)}.`,"analysis","zone-confirm-fail");
+  if(crossedUp(prev.zoneDirectional,cur.zoneDirectional,cur.zoneDirectionalThreshold))addDecisionEvent("READY","Zone directional evidence qualified",`${fmt(cur.zoneDirectional,2)} ≥ ${fmt(cur.zoneDirectionalThreshold,2)}.`,"analysis","zone-direction-pass");
+  if(!prev.scalpCost&&cur.scalpCost)addDecisionEvent("READY","Scalp execution economics recovered","The current scalp structure can absorb transaction cost without excessive geometry expansion.","market","scalp-cost-pass");
+  if(prev.scalpCost&&!cur.scalpCost)addDecisionEvent("BLOCK","Scalp execution economics blocked",pretty(cur.scalpStructure||"COST_STRUCTURE_MISMATCH"),"market","scalp-cost-block");
+  for(const side of ["buy","sell"]){const S=side.toUpperCase(),pe=prev[`${side}Eligible`],ce=cur[`${side}Eligible`],pr=prev[`${side}Reason`],cr=cur[`${side}Reason`];if(!pe&&ce)addDecisionEvent("READY",`${S} scalp became eligible`,`${S} score ${fmt(cur[`${side}Score`],2)} / ${fmt(cur[`${side}Threshold`],2)} and all current Nyao entry gates passed.`,"market",`${side}-eligible`);else if(pe&&!ce)addDecisionEvent("BLOCK",`${S} scalp eligibility lost`,pretty(cr||"BLOCKED"),"market",`${side}-blocked-${cr}`);else if(pr!==cr&&cr)addDecisionEvent("GATE",`${S} blocker changed`,`${pretty(pr||"NONE")} → ${pretty(cr)}`,"market",`${side}-reason-${cr}`)}
+  if(!prev.capitalVeto&&cur.capitalVeto)addDecisionEvent("RISK","Fresh-risk capital veto activated","Atlas has temporarily closed new independent risk authority.","overview","capital-veto-on");
+  if(prev.capitalVeto&&!cur.capitalVeto)addDecisionEvent("READY","Fresh-risk capital authority restored",`${money(cur.available)} operating capacity is currently available.`,"overview","capital-veto-off");
+  if(prev.lossState!==cur.lossState)addDecisionEvent(cur.lossState==="HARD_VETO"?"CRITICAL":"RISK",`Loss protection → ${pretty(cur.lossState)}`,`Previous state: ${pretty(prev.lossState)}.`,"overview",`loss-${cur.lossState}`);
+  if(cur.policyEpoch&&prev.policyEpoch&&cur.policyEpoch!==prev.policyEpoch)addDecisionEvent("POLICY",`Nyao policy epoch ${cur.policyEpoch} active`,`Atlas/Nyao moved from policy epoch ${prev.policyEpoch} to ${cur.policyEpoch}.`,"atlas",`epoch-${cur.policyEpoch}`);
+  if(cur.lastSuccess&&cur.lastTicket&&cur.lastTicket!==prev.lastTicket)addDecisionEvent("TRADE","Order execution confirmed",`Ticket ${cur.lastTicket} opened on ${state.selectedSymbol||"the selected symbol"}.`,"positions",`trade-${cur.lastTicket}`);
+  if(cur.open<prev.open)addDecisionEvent("TRADE","Position lifecycle changed",`${prev.open-cur.open} strategy position${prev.open-cur.open===1?"":"s"} closed; Atlas will reconcile the authoritative outcome ledger.`,"positions",`close-${Date.now()}`);
+  if(prev.recovery===0&&cur.recovery>0)addDecisionEvent("RISK","Recovery chain activated",`${cur.recovery} active recovery chain${cur.recovery===1?"":"s"}; composite risk accounting is authoritative.`,"positions","recovery-on");
+  if(prev.recovery>0&&cur.recovery===0)addDecisionEvent("TRADE","Recovery chain resolved","The active recovery chain is flat; Atlas will score the completed composite result.","positions","recovery-off");
+  if(materiallyChanged(prev.scalpRisk,cur.scalpRisk)||materiallyChanged(prev.zoneRisk,cur.zoneRisk))addDecisionEvent("RISK","Opportunity risk allocation updated",`Scalp ${money(cur.scalpRisk)} · zone ${money(cur.zoneRisk)} · available operating risk ${money(cur.available)}.`,"overview",`risk-${Math.round(cur.scalpRisk)}-${Math.round(cur.zoneRisk)}`)
+}
+function renderDecisionTimeline(){const el=document.getElementById("decision-timeline");if(!el)return;const events=getDecisionTimeline();el.innerHTML=events.length?events.slice(0,40).map(e=>`<div class="decision-event" onclick="go('${esc(e.action||"overview")}')"><span class="decision-dot ${esc(e.kind)}"></span><div><div class="decision-title">${esc(e.title)}</div><div class="decision-body">${esc(e.body)}</div></div><span class="decision-time">${new Date(e.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span></div>`).join(""):'<div class="observability-empty">Atlas will record the next material decision change.</div>'}
+function opportunityStatusClass(status){return status==="READY"?"ready":status==="ACTIVE"?"active":status==="BLOCKED"?"blocked":status==="QUALIFYING"?"qualifying":""}
+function opportunityBadgeClass(status){return status==="READY"||status==="ACTIVE"?"ok":status==="BLOCKED"?"bad":"warn"}
+function opportunityRow(name,value,status,next,meta,view){return `<div class="opportunity-item ${opportunityStatusClass(status)}" onclick="go('${view}')"><div><div class="opportunity-name">${esc(name)}</div><div class="opportunity-value">${esc(value)}</div></div><div class="opportunity-next"><strong>Next:</strong> ${esc(next)}<div class="opportunity-meta">${esc(meta)}</div></div><span class="badge ${opportunityBadgeClass(status)} opportunity-status">${esc(status)}</span></div>`}
+function scalpOpportunity(side){
+  const s=state.status||{},cap=state.zonePlan?.capital_sizing||{},upper=side.toUpperCase();
+  const score=Number(s[`${side}_adjusted_score`]??s[`${side}_score`]??0);
+  const threshold=Number(s[`${side}_effective_threshold`]??s[`runtime_min_${side}_signal_score`]??0);
+  const eligible=!!s[`${side}_entry_eligible`];
+  const reason=String(s[`${side}_block_reason`]||"").toUpperCase();
+  const risk=Number(cap.approved_scalp_risk_amount||0);
+  const zoneState=String(s.zone_directive_state||"").toUpperCase();
+  const zoneSide=String(s.zone_side||"NONE").toUpperCase();
+  const zoneAware=Boolean(s.zone_aware_scalping_active||(zoneState==="ZONE_AWARE_SCALP"&&!s.zone_scalp_suspended));
+  const contextual=zoneAware&&zoneSide!=="NONE";
+  const counter=contextual&&zoneSide!==upper;
+  const aligned=contextual&&zoneSide===upper;
+  const label=contextual?`${upper} SCALP · ${counter?"COUNTER-ZONE":"ZONE-ALIGNED"}`:`${upper} SCALP`;
+  let status=eligible?"READY":"WATCHING";
+  let next=eligible?"All deterministic entry gates currently pass.":"Waiting for the next eligible scalp condition.";
+  if(reason==="SCORE_BELOW_THRESHOLD"||score<threshold){
+    next=`Score must first reach ${fmt(threshold,2)}; currently ${fmt(score,2)}.${counter?" Counter-zone evidence requirements apply after the base signal gate.":""}`;
+  }else if(reason==="COUNTER_ZONE_EVIDENCE_INSUFFICIENT"){
+    status="QUALIFYING";next="Base signal qualifies, but the additional counter-zone evidence premium has not cleared yet.";
+  }else if(reason==="COUNTER_ZONE_COMMIT_PROXIMITY"){
+    status="BLOCKED";next=`The ${zoneSide} zone campaign is too close to commitment for a fresh ${upper} counter-zone scalp.`;
+  }else if(reason==="COUNTER_ZONE_SIGNAL_READY"){
+    status=eligible?"READY":"QUALIFYING";next=eligible?"Counter-zone evidence is qualified and all remaining Nyao gates pass.":"Counter-zone evidence is qualified; another execution gate is still pending.";
+  }else if(reason.includes("COST")||s.scalp_cost_feasible===false){
+    next=`Execution economics must recover (${pretty(s.scalp_structure_reason||reason||"cost gate")}).`;
+  }else if(reason.includes("CAPITAL")||s.capital_veto_new_risk){
+    status="BLOCKED";next="Atlas capital authority must reopen fresh risk.";
+  }else if(reason==="ATLAS_ZONE_MODE"){
+    status="BLOCKED";next="The committed zone campaign currently owns fresh-entry authority.";
+  }else if(reason&&reason!=="NONE"&&reason!=="INITIALIZED"){
+    status="BLOCKED";next=pretty(reason);
+  }
+  const contextMeta=counter?`${zoneSide} zone · counter-zone rules`:aligned?`${zoneSide} zone · aligned rules`:"normal scalp rules";
+  return opportunityRow(label,`${fmt(score,2)} / ${fmt(threshold,2)}`,status,next,`Current opportunity limit ${money(risk)} · ${contextMeta} · ${pretty(reason||"NO BLOCK")}`,"market");
+}
+function zoneOpportunity(){
+  const s=state.status||{},zp=state.zonePlan||{},plan=zp.zone_plan||null,cap=zp.capital_sizing||{};if(!plan&&!s.zone_plan_id)return opportunityRow("ZONE CAMPAIGN","NO PRIORITY ZONE","WATCHING","Wait for Atlas to detect and qualify higher-timeframe structure.",`Current zone opportunity limit ${money(cap.approved_zone_risk_amount||0)}`,"analysis");
+  const side=String(plan?.side||s.zone_side||"ZONE"),confirm=Number(s.zone_confirmation_score??plan?.confirmation?.zone_confirmation?.combined_score??0),ct=Number(s.zone_confirmation_threshold??plan?.confirmation?.zone_confirmation?.threshold??0),dir=Number(s.zone_directional_score||0),dt=Number(s.zone_minimum_directional_score||0),spreadOk=s.zone_spread_within_limit!==false,stateName=String(s.zone_directive_state||zp.execution_lane||""),committed=stateName.includes("ZONE_CAMPAIGN")&&s.zone_scalp_suspended;
+  let status=committed?"ACTIVE":"WATCHING",needs=[];if(ct>0&&confirm<ct)needs.push(`confirmation ${fmt(confirm,1)} → ${fmt(ct,1)}`);if(dt>0&&dir<dt)needs.push(`directional ${fmt(dir,2)} → ${fmt(dt,2)}`);if(!spreadOk)needs.push(`spread must return inside adaptive cap`);if(s.capital_veto_new_risk)needs.push("capital authority");if(!needs.length&&!committed){status="READY";needs.push("Atlas/Nyao commit boundary")}
+  return opportunityRow(`${side} ZONE CAMPAIGN`,ct>0?`${fmt(confirm,1)} / ${fmt(ct,1)}`:pretty(stateName||"DETECTED"),status,committed?"Campaign has committed execution priority.":needs.join(" · "),`Directional ${fmt(dir,2)} / ${fmt(dt,2)} · ${spreadOk?"cost PASS":"cost BLOCK"} · limit ${money(cap.approved_zone_risk_amount||0)}`,"analysis")
+}
+function recoveryOpportunity(){const s=state.status||{},rr=state.recoveryRisk||{},chains=rr.active_chains||[];if(!chains.length&&!Number(s.active_hedge_chains||0))return opportunityRow("RECOVERY","STANDBY","WATCHING","No active recovery chain; Atlas will create recovery authority only from an eligible root lifecycle.","Composite-chain risk remains isolated from fresh opportunity budgets.","positions");const c=chains[0]||{},remaining=Number(c.hard_loss_budget_remaining_usd),ceiling=Number(c.hard_loss_budget_usd);return opportunityRow("RECOVERY CHAIN",money(c.mark_to_market||s.hedge_chain_floating_pl||0),"ACTIVE",Number.isFinite(remaining)?`${money(remaining)} chain risk remains inside the frozen ceiling.`:"Manage the active chain inside its frozen Atlas authority.",`Ceiling ${money(ceiling||0)} · ${Number(c.member_count||0)} member(s)`,"positions")}
+function renderOpportunityQueue(){const el=document.getElementById("opportunity-queue"),badge=document.getElementById("opportunity-queue-badge"),summary=document.getElementById("opportunity-queue-summary");if(!el)return;const s=state.status||{},cap=state.zonePlan?.capital_sizing||{};el.innerHTML=[scalpOpportunity("buy"),scalpOpportunity("sell"),zoneOpportunity(),recoveryOpportunity()].join("");const anyReady=!!s.buy_entry_eligible||!!s.sell_entry_eligible||String(s.zone_directive_state||"").includes("ZONE_CAMPAIGN");badge.textContent=anyReady?"ACTIONABLE":"SCANNING";badge.className="badge "+(anyReady?"ok":"info");const alloc=cap.portfolio_allocation||{};summary.innerHTML=`<span><strong>${money(alloc.remaining_operating_risk_amount||0)}</strong> operating capacity</span><span>·</span><span><strong>${money(alloc.reserved_active_risk_amount||0)}</strong> reserved</span><span>·</span><span>Hard ceiling <strong>${money(alloc.portfolio_hard_ceiling_amount||0)}</strong></span>`}
 
 async function loadSymbols(){
   try{
@@ -3139,7 +3602,15 @@ function renderOverview(){
   const connected=!!state.status && s.connected!==false;
   const applied=s.applied_command_version;
   const synchronized=applied==null || c.command_version==null ? connected : Number(applied)===Number(c.command_version);
-  const zoneAware=Boolean(zp.zone_aware_scalping_active||((s.zone_directive_state==="ZONE_CAPITAL_INFEASIBLE")&&!s.zone_scalp_suspended));
+  const zoneAwarePlanned=Boolean(zp.zone_aware_scalping_active);
+  const zoneAware=Boolean(
+    s.zone_aware_scalping_active ||
+    (
+      s.zone_directive_fresh!==false &&
+      !s.zone_scalp_suspended &&
+      ["ZONE_AWARE_SCALP","ZONE_CAPITAL_INFEASIBLE"].includes(String(s.zone_directive_state||"").toUpperCase())
+    )
+  );
   const zoneMode=Boolean(s.zone_mode_active&&!zoneAware), side=text(activePlan?.side||s.zone_side,"ZONE");
   const executionLane=zoneAware?"ZONE-AWARE SCALP":zoneMode?"ZONE CAMPAIGN":"NORMAL SCALP";
   const liveCount=Number(s.strategy_open_positions??s.open_positions??0), stagedCount=Number(s.working_limit_orders||0);
@@ -3147,6 +3618,15 @@ function renderOverview(){
   const confirmed=Boolean((zp.directive_preview||{}).zone_entry_allowed);
   const campaignRisk=Number(activePlan?.risk?.account_risk_pct||capital.approved_zone_risk_pct||0);
   const modeName=zoneAware?`${side} ZONE-AWARE SCALP`:zoneMode?`${side} ZONE CAMPAIGN`:"NORMAL SCALP";
+  const setGlobal=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value};
+  setGlobal("global-status-symbol",text(s.symbol||state.selectedSymbol));
+  setGlobal("global-status-mode",modeName);
+  setGlobal("global-status-positions",`${liveCount} live`);
+  const alloc=capital.portfolio_allocation||{};
+  setGlobal("global-status-risk",Number.isFinite(Number(alloc.remaining_operating_risk_amount))?`${money(alloc.remaining_operating_risk_amount)} free`:"—");
+  setGlobal("global-status-brain",cycle.running?"REVIEWING":cycle.enabled&&Number.isFinite(Number(cycle.seconds_until_next_run))?`REVIEW ${age(cycle.seconds_until_next_run)}`:"IDLE");
+  setGlobal("global-status-health",connected&&permissionsOk&&s.zone_directive_fresh!==false?"HEALTHY":connected?"DEGRADED":"OFFLINE");
+  const gsd=document.getElementById("global-status-dot");if(gsd)gsd.className="dot "+(connected?"ok":"bad");
   document.getElementById("hero-state").textContent=!connected?"Nyao is offline":zoneAware?`${side} zone context guiding scalps`:zoneMode?`${side} zone campaign owns execution`:"Atlas is scanning for scalps";
   document.getElementById("hero-copy").textContent=!connected
     ?"Atlas cannot verify market state or execution authority."
@@ -3157,7 +3637,7 @@ function renderOverview(){
         :"No priority zone currently owns execution. Nyao may scalp when Atlas direction, cost, signal and capital gates agree.";
   const modeBadge=document.getElementById("hero-mode-badge");modeBadge.textContent=connected?modeName:"OFFLINE";modeBadge.className="badge "+(connected?(zoneMode?"info":"ok"):"bad");
   document.getElementById("hero-symbol").textContent=text(s.symbol||state.selectedSymbol);
-  document.getElementById("hero-market-state").textContent=zoneAware?`${side} aligned scalps only`:zoneMode?(confirmed?"zone confirmed":"awaiting confirmation"):(s.spread_within_limit===false?"cost blocked":"scalp scan active");
+  document.getElementById("hero-market-state").textContent=zoneAware?`${side} aligned preferred · counter-zone conditional`:zoneMode?(confirmed?"zone confirmed":"awaiting confirmation"):(s.spread_within_limit===false?"cost blocked":"scalp scan active");
   document.getElementById("hero-bridge").textContent=s.zone_directive_fresh===false?"stale":"live";
   document.getElementById("hero-risk").textContent=modeName;
   document.getElementById("hero-policy").textContent=campaignRisk>0?`${fmt(campaignRisk,3)}% equity`:capital.approved_scalp_risk_pct>0?`${fmt(capital.approved_scalp_risk_pct,3)}% equity`:"No new risk";
@@ -3216,7 +3696,7 @@ function renderOverview(){
   document.getElementById("authority-lane-copy").textContent=zoneMode
     ?"A broker-feasible zone campaign owns fresh-entry authority; ordinary scalp entries are suspended."
     :zoneAware
-      ?`The ${side} zone remains read-only structural context. ${side} scalps may qualify; counter-direction scalps remain blocked by deterministic arbitration.`
+      ?`The ${side} zone remains read-only structural context. ${side} scalps may qualify; counter-zone scalps remain conditional: they require stronger evidence, reduced risk authority, and remain subject to campaign-proximity blocking.`
       :"Ordinary Nyao scalping owns fresh-entry authority. Zone analysis continues in the background.";
   document.getElementById("authority-scalp").textContent=zoneMode?"SUSPENDED":zoneAware?`${side} ALIGNED ONLY`:"ACTIVE";
   document.getElementById("authority-zone").textContent=zoneMode?"ACTIVE":activePlan?(Number(activePlan.entries?.length||0)>0?"ARMED / WAITING":"CONTEXT ONLY"):"MONITORING";
@@ -3318,7 +3798,7 @@ function renderOverview(){
   if(activePlan&&zoneAware){
     const ideal=Array.isArray(activePlan.ideal_entries)?activePlan.ideal_entries:[], admitted=Array.isArray(activePlan.entries)?activePlan.entries:[];
     document.getElementById("overview-campaign-title").textContent=`${side} zone context → scalp fallback`;
-    document.getElementById("overview-campaign-copy").textContent=`The technical zone remains valid context, but its executable campaign structure is ${admitted.length} leg${admitted.length===1?"":"s"}. Atlas returned fresh-entry authority to aligned scalping.`;
+    document.getElementById("overview-campaign-copy").textContent=`The technical zone remains valid context, but its executable campaign structure is ${admitted.length} leg${admitted.length===1?"":"s"}. Atlas returned fresh-entry authority to context-aware scalping: aligned entries use normal gates while counter-zone entries require stronger evidence and reduced risk.`;
     campaignBadge.textContent="ZONE-AWARE SCALP";campaignBadge.className="badge warn";
     const rows=(ideal.length?ideal:[{leg:1,entry_price:activePlan.source_zone?.low},{leg:2,entry_price:(Number(activePlan.source_zone?.low||0)+Number(activePlan.source_zone?.high||0))/2},{leg:3,entry_price:activePlan.source_zone?.high}]);
     document.getElementById("overview-campaign").innerHTML=rows.map((entry,index)=>`<div class="campaign-leg"><div class="row"><span class="label">IDEAL ENTRY ${entry.leg||index+1}</span><span class="badge ${index<admitted.length?"info":"bad"}">${index<admitted.length?"ADMITTED":"NOT EXECUTABLE"}</span></div><div class="campaign-price">${fmt(entry.entry_price,3)}</div><div class="muted">Zone geometry preserved · scalp fallback does not convert this into a zone order</div></div>`).join("");
@@ -3374,6 +3854,45 @@ function renderLiveAnalysis(){
   document.getElementById("signal-risk").textContent=pretty(risk.state||currentRisk());
   document.getElementById("signal-summary").textContent=i.summary||((regime.reasons||[])[0])||"Atlas intelligence has not produced a current assessment yet.";
 
+  const contextBanner=document.getElementById("scalp-context-banner");
+  const contextTitle=document.getElementById("scalp-context-title");
+  const contextCopy=document.getElementById("scalp-context-copy");
+  const livePlan=state.zonePlan||{};
+  const liveActivePlan=livePlan.zone_plan||{};
+  const plannedZoneAware=Boolean(livePlan.zone_aware_scalping_active);
+  const appliedZoneAware=Boolean(
+    s.zone_aware_scalping_active ||
+    (
+      s.zone_directive_fresh!==false &&
+      !s.zone_scalp_suspended &&
+      ["ZONE_AWARE_SCALP","ZONE_CAPITAL_INFEASIBLE"].includes(String(s.zone_directive_state||"").toUpperCase())
+    )
+  );
+  const contextSide=String(
+    s.zone_side ||
+    livePlan.zone_aware_scalping_side ||
+    liveActivePlan.side ||
+    "NONE"
+  ).toUpperCase();
+
+  if(contextBanner){
+    contextBanner.style.display=(plannedZoneAware||appliedZoneAware)?"block":"none";
+
+    if(appliedZoneAware && ["BUY","SELL"].includes(contextSide)){
+      const pressure=Math.max(
+        Number(s.zone_confirmation_threshold||0)>0
+          ? Number(s.zone_confirmation_score||0)/Number(s.zone_confirmation_threshold) : 0,
+        Number(s.zone_minimum_directional_score||0)>0
+          ? Number(s.zone_directional_score||0)/Number(s.zone_minimum_directional_score) : 0
+      );
+      contextTitle.textContent=`${contextSide} ZONE CONTEXT · LIVE IN NYAO`;
+      contextCopy.textContent=`Context-aware scalping is applied. ${contextSide} entries are zone-aligned and use normal gates. ${contextSide==="SELL"?"BUY":"SELL"} entries are counter-zone: stronger evidence, reduced risk, and campaign-proximity blocking apply. Commit pressure ${fmt(Math.min(1,Math.max(0,pressure))*100,0)}%.`;
+    }else if(plannedZoneAware){
+      contextTitle.textContent=`${contextSide} ZONE CONTEXT · AWAITING NYAO SYNC`;
+      contextCopy.textContent=`Atlas has planned zone-aware scalping, but Nyao has not yet confirmed that its scalp lane is released. Applied directive: ${pretty(s.zone_directive_state||"UNKNOWN")} · scalp suspended ${s.zone_scalp_suspended?"YES":"NO"}.`;
+    }
+  }
+
   const buy=Number(s.buy_score||0), sell=Number(s.sell_score||0);
   const buyAdj=Number(s.buy_adjusted_score||0), sellAdj=Number(s.sell_adjusted_score||0);
   const buyTh=Number(s.buy_effective_threshold??s.runtime_min_buy_signal_score??0), sellTh=Number(s.sell_effective_threshold??s.runtime_min_sell_signal_score??0);
@@ -3393,6 +3912,16 @@ function renderLiveAnalysis(){
     const code=Number(s.last_order_retcode||0), direction=String(s.last_order_direction||"").toLowerCase();
     if(direction!==side || !String(reason||"").includes("ORDER"))return pretty(text(reason,"NONE"));
     const descriptions={10026:"Algo trading disabled by broker/server",10027:"Algo trading disabled in MT5 terminal",10018:"Market closed",10019:"Insufficient funds",10030:"Unsupported order filling mode",10016:"Invalid stops"};
+    const reasonMap={
+      ATLAS_ZONE_MODE:"ZONE CAMPAIGN OWNS FRESH ENTRIES",
+      ZONE_CONTEXT_COUNTER_DIRECTION:"COUNTER-ZONE DIRECTION BLOCKED (LEGACY 44.4)",
+      COUNTER_ZONE_EVIDENCE_INSUFFICIENT:"COUNTER-ZONE · STRONGER EVIDENCE REQUIRED",
+      COUNTER_ZONE_COMMIT_PROXIMITY:"COUNTER-ZONE · ZONE CAMPAIGN NEAR COMMIT",
+      COUNTER_ZONE_SIGNAL_READY:"COUNTER-ZONE · QUALIFIED",
+      ZONE_CONTEXT_ALIGNED:"ZONE-ALIGNED SCALP"
+    };
+    const raw=String(reason||"NONE").toUpperCase();
+    if(reasonMap[raw])return reasonMap[raw];
     return descriptions[code]?`${descriptions[code]} (MT5 ${code})`:`${pretty(text(reason,"NONE"))}${code?` (MT5 ${code})`:""}`;
   };
   [["buy",Boolean(s.buy_entry_eligible),s.buy_block_reason],["sell",Boolean(s.sell_entry_eligible),s.sell_block_reason]].forEach(([side,ready,reason])=>{
@@ -3577,7 +4106,15 @@ function renderAnalysis(){
   const liveBid=Number(s.bid),liveAsk=Number(s.ask);
   const liveChartPrice=liveBid>0?liveBid:liveAsk>0?liveAsk:Number(zoneMap.current_price||0);
   const zoneExecutorInstalled=Boolean(s.zone_execution_supported),zoneExecutorEnabled=Boolean(s.zone_execution_enabled);
-  const analysisZoneAware=Boolean(zonePlan?.zone_aware_scalping_active||((s.zone_directive_state==="ZONE_CAPITAL_INFEASIBLE")&&!s.zone_scalp_suspended));
+  const analysisZoneAwarePlanned=Boolean(zonePlan?.zone_aware_scalping_active);
+  const analysisZoneAware=Boolean(
+    s.zone_aware_scalping_active ||
+    (
+      s.zone_directive_fresh!==false &&
+      !s.zone_scalp_suspended &&
+      ["ZONE_AWARE_SCALP","ZONE_CAPITAL_INFEASIBLE"].includes(String(s.zone_directive_state||"").toUpperCase())
+    )
+  );
   const zoneModeLive=Boolean(s.zone_mode_active&&!analysisZoneAware);
   const candleState=text(candles.state,"WAITING_FOR_NYAO_EXPORT");
   const zoneBadge=document.getElementById("an-zone-status");
@@ -3596,7 +4133,7 @@ function renderAnalysis(){
     : "No approved internal zone map yet";
   const candleMessages=[...(candles.blockers||[]),...(candles.warnings||[])];
   document.getElementById("an-candle-detail").textContent=zonesDetected
-    ? `${text(zoneMap.zone_count,0)} ranked supply/demand zones · ${pretty(zoneMap.composite_bias)} composite structure · map ${text(zoneMap.map_id)}. ${zoneModeLive?`${pretty(s.zone_side||"ZONE")} zone execution is currently active in Nyao.`:"The map is available; execution authority activates only when a qualified zone campaign is live."}`
+    ? `${text(zoneMap.zone_count,0)} active zones · ${text(zoneMap.invalidated_zone_count,0)} invalidated archived · ${pretty(zoneMap.composite_bias)} composite structure · map ${text(zoneMap.map_id)}. ${zoneModeLive?`${pretty(s.zone_side||"ZONE")} zone execution is currently active in Nyao.`:"The map is available; execution authority activates only when a qualified zone campaign is live."}`
     : candleReady
       ? `Validated closed M30/H1/H4 history for ${text(candles.symbol)}. Export age ${age(candles.export_age_seconds)}. The deterministic zone engine is now the next authority layer.`
     : candleMessages[0]||"Atlas is waiting for Nyao's validated, closed-bar multi-timeframe export. It will not invent price zones from live ticks alone.";
@@ -3615,7 +4152,9 @@ function renderAnalysis(){
     const entries=Array.isArray(activePlan.entries)?activePlan.entries:[], targets=Array.isArray(activePlan.take_profits)?activePlan.take_profits:[],zc=activePlan.confirmation?.zone_confirmation||{};
     const quoteLabel=zonePlan.price_basis==="BID_SELL_EXECUTION"?"live bid":zonePlan.price_basis==="ASK_BUY_EXECUTION"?"live ask":pretty(zonePlan.price_basis||"execution quote");
   const zoneSpread=activePlan.confirmation?.spread_assessment||{};
-  zoneExecution.innerHTML=`<div class="zone-plan"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE · ${esc(text(activePlan.plan_id))}</div><div class="zone-price" style="margin-top:5px">${esc(activePlan.side)} ${zonePlan.zone_aware_scalping_active?"ZONE-AWARE SCALP":"ZONE CAMPAIGN"} · ${zonePlan.zone_aware_scalping_active?"zone context retained; ordinary scalp engine released":"ordinary scalping suspended"}</div><div class="muted" style="margin-top:5px">${esc(quoteLabel)} ${fmt(zonePlan.live_price,3)} is inside ${esc(activePlan.source_zone?.timeframe||"")} ${esc(pretty(activePlan.source_zone?.kind||"ZONE"))}. MT5 bid ${fmt(zonePlan.live_bid,3)} · ask ${fmt(zonePlan.live_ask,3)} · closed M30 reference ${fmt(zonePlan.closed_m30_reference,3)}. Zone spread ${fmt(zoneSpread.spread_price,3)} / adaptive cap ${fmt(zoneSpread.effective_cap_price,3)}${zoneSpread.limiting_factor?` · ${esc(pretty(zoneSpread.limiting_factor))} limited`:""}; scalp cost gate is separate. ${zoneExecutorInstalled?`Nyao executor: ${esc(pretty(s.zone_last_execution_reason||"READY"))}.`:"Install the newly compiled Nyao build to enforce this directive."}</div></div><span class="badge ${zoneModeLive?"ok":"warn"}">${esc(zoneModeLive?"LIVE IN NYAO":pretty(zonePlan.state))}</span></div><div class="zone-plan-grid">${entries.map((entry,index)=>`<div class="zone-plan-leg"><div class="label">ENTRY ${entry.leg} · ${fmt(entry.risk_allocation_pct,0)}% · ${esc(pretty(entry.order_type))}</div><strong>${entry.order_type==="MARKET_ON_CONFIRMATION"?`LIVE (ref ${fmt(entry.entry_price,3)})`:fmt(entry.entry_price,3)}</strong><div class="muted">${targets[index]?`TP${targets[index].target} ${fmt(targets[index].price,3)} · close ${fmt(targets[index].close_allocation_pct,0)}%`:"Target pending"}</div></div>`).join("")}</div><div class="grid g4" style="margin-top:9px"><div class="kpi"><div class="label">Shared stop</div><div class="value small neg">${fmt(activePlan.stop_loss,3)}</div></div><div class="kpi"><div class="label">Total account risk</div><div class="value small">${fmt(activePlan.risk?.account_risk_pct,2)}%</div></div><div class="kpi"><div class="label">Zone confirmation</div><div class="value small ${zc.eligible?"pos":""}">${fmt(zc.combined_score,1)} / ${fmt(zc.threshold,1)}</div><div class="muted">Directional ${fmt(zc.directional_score,2)} / ${fmt(zc.minimum_directional_score,2)} · policy ${text(zc.policy_epoch)}</div></div><div class="kpi"><div class="label">Execution authority</div><div class="value small ${zoneModeLive?"pos":"neg"}">${zoneModeLive?"ACTIVE":"NOT ACTIVE"}</div></div></div>${(zonePlan.blockers||[]).length?`<div class="callout" style="margin-top:9px">${esc(zonePlan.blockers.join(" "))}</div>`:""}</div>`;
+  const sourceInvalidated=Boolean(zonePlan.source_zone_invalidated||zonePlan.campaign_lock?.source_zone_invalidated);
+  const zoneLifecycleLabel=sourceInvalidated?"INVALIDATED · MANAGEMENT ONLY":(zonePlan.zone_aware_scalping_active?"ZONE-AWARE SCALP":"ZONE CAMPAIGN");
+  zoneExecution.innerHTML=`<div class="zone-plan ${sourceInvalidated?"invalidated":""}"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE · ${esc(text(activePlan.plan_id))}</div><div class="zone-price" style="margin-top:5px">${esc(activePlan.side)} ${esc(zoneLifecycleLabel)} · ${sourceInvalidated?"source thesis failed; new campaign layers disabled while existing exposure remains managed":zonePlan.zone_aware_scalping_active?"zone context retained; ordinary scalp engine released":"ordinary scalping suspended"}</div><div class="muted" style="margin-top:5px">${esc(quoteLabel)} ${fmt(zonePlan.live_price,3)} is inside ${esc(activePlan.source_zone?.timeframe||"")} ${esc(pretty(activePlan.source_zone?.kind||"ZONE"))}. MT5 bid ${fmt(zonePlan.live_bid,3)} · ask ${fmt(zonePlan.live_ask,3)} · closed M30 reference ${fmt(zonePlan.closed_m30_reference,3)}. Zone spread ${fmt(zoneSpread.spread_price,3)} / adaptive cap ${fmt(zoneSpread.effective_cap_price,3)}${zoneSpread.limiting_factor?` · ${esc(pretty(zoneSpread.limiting_factor))} limited`:""}; scalp cost gate is separate. ${zoneExecutorInstalled?`Nyao executor: ${esc(pretty(s.zone_last_execution_reason||"READY"))}.`:"Install the newly compiled Nyao build to enforce this directive."}</div></div><span class="badge ${sourceInvalidated?"bad":zoneModeLive?"ok":"warn"}">${esc(sourceInvalidated?"ZONE INVALIDATED":zoneModeLive?"LIVE IN NYAO":pretty(zonePlan.state))}</span></div><div class="zone-plan-grid">${entries.map((entry,index)=>`<div class="zone-plan-leg"><div class="label">ENTRY ${entry.leg} · ${fmt(entry.risk_allocation_pct,0)}% · ${esc(pretty(entry.order_type))}</div><strong>${entry.order_type==="MARKET_ON_CONFIRMATION"?`LIVE (ref ${fmt(entry.entry_price,3)})`:fmt(entry.entry_price,3)}</strong><div class="muted">${targets[index]?`TP${targets[index].target} ${fmt(targets[index].price,3)} · close ${fmt(targets[index].close_allocation_pct,0)}%`:"Target pending"}</div></div>`).join("")}</div><div class="grid g4" style="margin-top:9px"><div class="kpi"><div class="label">Shared stop</div><div class="value small neg">${fmt(activePlan.stop_loss,3)}</div></div><div class="kpi"><div class="label">Total account risk</div><div class="value small">${fmt(activePlan.risk?.account_risk_pct,2)}%</div></div><div class="kpi"><div class="label">Zone confirmation</div><div class="value small ${zc.eligible?"pos":""}">${fmt(zc.combined_score,1)} / ${fmt(zc.threshold,1)}</div><div class="muted">Directional ${fmt(zc.directional_score,2)} / ${fmt(zc.minimum_directional_score,2)} · policy ${text(zc.policy_epoch)}</div></div><div class="kpi"><div class="label">Execution authority</div><div class="value small ${zoneModeLive?"pos":"neg"}">${zoneModeLive?"ACTIVE":"NOT ACTIVE"}</div></div></div>${(zonePlan.blockers||[]).length?`<div class="callout" style="margin-top:9px">${esc(zonePlan.blockers.join(" "))}</div>`:""}</div>`;
   }else{
     const sizingNote=capital.version?` Atlas capital budget: ${fmt(capital.approved_scalp_risk_pct,3)}% equity per qualified scalp (${esc(pretty(capital.decision))}); current-account loss streak ${text(capital.consecutive_losses,0)}.`:"";
     zoneExecution.innerHTML=`<div class="zone-plan"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE</div><div class="zone-price" style="margin-top:5px">${esc(pretty(zonePlan.mode||"WAITING"))}</div><div class="muted" style="margin-top:5px">${zonePlan.mode==="SCALP_MODE"?"Live price is outside the priority zones, so the ordinary scalp strategy remains the proposed mode.":esc((zonePlan.blockers||[])[0]||"Waiting for the live zone execution plan.")}${sizingNote}</div></div><span class="badge ${capital.veto_new_risk?"bad":zonePlan.mode==="SCALP_MODE"?"info":"warn"}">${esc(capital.veto_new_risk?"CAPITAL VETO":pretty(zonePlan.state||"PENDING"))}</span></div></div>`;
@@ -3627,6 +4166,18 @@ function renderAnalysis(){
     return {decisionPrice,relation,basis};
   };
   document.getElementById("an-zone-list").innerHTML=zoneRows.map(zone=>{const live=liveZoneRelation(zone);return `<div class="zone-card ${zone.side==="DEMAND"?"demand":"supply"}"><div><span class="badge ${zone.side==="DEMAND"?"ok":"bad"}">${esc(zone.side)}</span><div class="muted" style="margin-top:5px">${esc(zone.timeframe)} · ${esc(pretty(zone.kind))}</div></div><div><div class="zone-price">${fmt(zone.low,3)} – ${fmt(zone.high,3)}</div><div class="muted zone-evidence">${esc((zone.evidence||[])[0]||"Closed-candle structure zone")}</div></div><div><span class="badge ${live.relation==="INSIDE"?"ok":zone.status==="FRESH"?"info":"warn"}">LIVE ${esc(live.relation)}</span><div class="muted" style="margin-top:5px">${live.basis} ${fmt(live.decisionPrice,3)} · ${esc(text((zone.confluence||[]).length,0))} confluence</div></div><div class="zone-score"><strong>${fmt(zone.score,1)}</strong><div class="muted">score</div></div></div>`}).join("");
+  const invalidatedRows=Array.isArray(zoneMap.invalidated_zones)?zoneMap.invalidated_zones:[];
+  const lifecycleRoot=document.getElementById("an-zone-lifecycle");
+  if(lifecycleRoot){
+    const latestInvalid=invalidatedRows[0]||null;
+    lifecycleRoot.innerHTML=zonesDetected
+      ?`<strong>ZONE LIFECYCLE</strong> · ${text(zoneMap.zone_count,0)} active · ${text(zoneMap.invalidated_zone_count,0)} invalidated archived. <span class="muted">Invalidation requires a later closed candle beyond the technical boundary; wick-only penetration is retained as mitigation.</span>${latestInvalid?`<div style="margin-top:6px"><span class="badge bad">LATEST INVALIDATION</span> ${esc(latestInvalid.timeframe)} ${esc(pretty(latestInvalid.kind))} ${esc(latestInvalid.side)} · ${esc(latestInvalid.invalidation_reason||"")}</div>`:""}`
+      :"Zone lifecycle is waiting for a validated deterministic map.";
+  }
+  const invalidatedCount=document.getElementById("an-invalidated-count");
+  if(invalidatedCount){invalidatedCount.textContent=`${invalidatedRows.length} INVALIDATED`;invalidatedCount.className="badge "+(invalidatedRows.length?"bad":"info");}
+  const invalidatedRoot=document.getElementById("an-invalidated-zone-list");
+  if(invalidatedRoot){invalidatedRoot.innerHTML=invalidatedRows.length?invalidatedRows.map(zone=>`<div class="zone-card invalidated"><div><span class="badge bad">INVALIDATED</span><div class="muted" style="margin-top:5px">${esc(zone.timeframe)} · ${esc(pretty(zone.kind))} · ${esc(zone.side)}</div></div><div><div class="zone-price">${fmt(zone.low,3)} – ${fmt(zone.high,3)}</div><div class="muted zone-evidence">${esc(zone.invalidation_reason||"Closed candle invalidated the technical boundary.")}</div></div><div><span class="badge bad">${esc(pretty(zone.invalidation_rule||"CLOSED_CANDLE_BREAK"))}</span><div class="muted" style="margin-top:5px">Close ${fmt(zone.invalidating_close,3)} · boundary ${fmt(zone.invalidation_boundary,3)} · penetration ${fmt(zone.invalidation_penetration_atr,2)} ATR</div></div><div class="zone-score"><strong>${zone.invalidated_at_epoch?age(Math.max(0,Date.now()/1000-Number(zone.invalidated_at_epoch))):"—"}</strong><div class="muted">ago</div></div></div>`).join(""):`<div class="callout">No invalidated zones in the current validated candle history.</div>`;}
   const zoneScenarios=Array.isArray(zoneMap.scenarios)?zoneMap.scenarios:[];
   document.getElementById("an-zone-scenario-list").innerHTML=zoneScenarios.map(item=>`<div class="analysis-item ${item.side==="BUY"?"buy":"sell"}"><div class="row"><strong>${esc(item.side)} CLOSED-CANDLE MAP SCENARIO</strong><span class="badge warn">${esc(pretty(item.state))}</span></div><div class="muted" style="margin-top:5px">Closed M30 reference ${fmt(item.reference_price,3)} · ${item.zone_id?`${fmt(item.zone_low,3)} – ${fmt(item.zone_high,3)} · `:""}${esc((item.conditions||[])[0]||"No qualified zone available.")} Live authority is shown in the mode directive above.</div></div>`).join("");
   renderZoneChart(zoneMap,liveChartPrice);
@@ -3658,7 +4209,7 @@ function renderAnalysis(){
     const authority=zoneModeLive?`ACTIVE · ${activeZoneSide} CAMPAIGN`:analysisZoneAware?`ZONE-AWARE SCALP · ${activeZoneSide} ALIGNED`:zoneExecutorInstalled&&zoneExecutorEnabled?"SCALP ACTIVE · ZONE ENGINE ARMED":"SCALP ACTIVE";
     let explanation="";
     if(zoneModeLive) explanation=`Active ${activeZoneSide} zone campaign owns execution authority; this ${x.side} score is informational and cannot launch an ordinary scalp.`;
-    else if(counterDirection) explanation=`${x.side} is counter-direction to the active ${activeZoneSide} zone context and is deterministically blocked regardless of raw score.`;
+    else if(counterDirection) explanation=`${x.side} is counter-zone to the active ${activeZoneSide} zone context; it requires the additional counter-zone evidence premium and may be blocked near campaign commitment.`;
     else if(executionError) explanation=`Execution did not complete: ${pretty(x.reason)}${lastOrderDirection===x.side&&lastOrderRetcode?` · MT5 ${lastOrderRetcode}`:""}. Nyao will re-evaluate on the next eligible cycle; it does not fall back into the opposite direction.`;
     else if(lostArbitration) explanation=`Signal passed its own threshold, but ${strongestQualified.side} won this cycle's directional arbitration (${fmt(strongestQualified.score,2)} vs ${fmt(x.score,2)}). No opposite-direction fallback is attempted if the selected side later fails execution.`;
     else if(x.ready) explanation=`Signal passed its threshold and won the currently qualified directional arbitration. Normal capital, spread, sizing, stop preflight and broker checks still apply before an order is accepted.`;
@@ -3680,25 +4231,96 @@ function latestAckState(){
   return e?String(e.action).replace("NYAO_ACK_",""):"—";
 }
 function renderProposalChanges(id,changes){
-  const root=document.getElementById(id);const rows=Object.entries(changes||{});
+  const root=document.getElementById(id);
+  if(!root)return;
+  const rows=Object.entries(changes||{});
   root.innerHTML=rows.length?rows.map(([k,v])=>`<div class="change"><strong>${esc(pretty(k))}</strong><span>${esc(text(v.current))}</span><span><span class="arrow">→</span> ${esc(text(v.shadow))}</span></div>`).join(""):`<div class="callout">No material runtime changes.</div>`;
+}
+
+function renderPortfolioRiskAllocation(){
+  const capital=state.zonePlan?.capital_sizing||{},alloc=capital.portfolio_allocation||{},priority=capital.zone_priority_reservation||{};
+  const operating=Math.max(0,Number(alloc.operating_risk_ceiling_amount||0)),active=Math.max(0,Number(alloc.reserved_active_risk_amount||0));
+  const remainingBefore=Math.max(0,Number(priority.remaining_operating_before_priority??alloc.remaining_operating_risk_amount??Math.max(0,operating-active)));
+  const zone=priority.active?Math.max(0,Math.min(remainingBefore,Number(priority.zone_priority_amount||0))):0,free=Math.max(0,remainingBefore-zone);
+  const hard=Math.max(0,Number(alloc.portfolio_hard_ceiling_amount||0)),hardFree=Math.max(0,Number(alloc.remaining_hard_risk_amount||Math.max(0,hard-active)));
+  const delta=operating-(active+zone+free),ok=Math.abs(delta)<=Math.max(.02,operating*.001);
+  const badge=document.getElementById('portfolio-risk-badge');if(badge){badge.textContent=ok?'RECONCILED':'CHECK ALLOCATION';badge.className='badge '+(ok?'ok':'bad')}
+  const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};set('portfolio-operating-ceiling',money(operating));set('portfolio-hard-ceiling',money(hard));set('portfolio-hard-headroom',`${money(hardFree)} hard headroom`);set('portfolio-risk-reconcile',ok?`${money(active)} active + ${money(zone)} zone priority + ${money(free)} free = ${money(operating)}`:`Allocation differs by ${money(delta)}.`);
+  const bar=document.getElementById('portfolio-risk-bar');if(bar){const pct=x=>operating?Math.max(0,Math.min(100,x/operating*100)):0,segs=bar.querySelectorAll('.risk-segment');if(segs[0])segs[0].style.width=`${pct(active)}%`;if(segs[1])segs[1].style.width=`${pct(zone)}%`;if(segs[2])segs[2].style.width=`${pct(free)}%`}
+  const cards=[];for(const r of (Array.isArray(alloc.reservations)?alloc.reservations:[])){const mtm=Number(r.current_mark_to_market||0);cards.push(`<div class="risk-allocation-card"><div class="risk-card-head"><div><span class="label">ACTIVE RESERVATION</span><strong>${esc(pretty(r.unit_type||'ACTIVE_RISK'))}</strong></div><span class="badge info">${esc(text(r.member_count,1))} MEMBER${Number(r.member_count||1)===1?'':'S'}</span></div><div class="risk-amount">${money(r.reserved_risk_amount||0)}</div><div class="risk-detail"><span>Unit</span><strong class="mono">${esc(text(r.unit_id,'—'))}</strong><span>Basis</span><strong>${esc(pretty(r.reservation_basis||'RESERVED'))}</strong><span>Current MTM</span><strong class="${mtm>0?'pos':mtm<0?'neg':''}">${money(mtm)}</strong></div></div>`)}
+  if(zone>0){const plan=state.zonePlan?.zone_plan||{},side=String(state.zonePlan?.zone_aware_scalping_side||plan.side||state.status?.zone_side||'ZONE').toUpperCase();cards.push(`<div class="risk-allocation-card"><div class="risk-card-head"><div><span class="label">PROSPECTIVE RESERVATION</span><strong>${esc(side)} zone priority</strong></div><span class="badge warn">PRESERVED</span></div><div class="risk-amount">${money(zone)}</div><div class="risk-detail"><span>Basis</span><strong>${esc(pretty(priority.basis||'ZONE_PRIORITY'))}</strong><span>Plan</span><strong class="mono">${esc(text(plan.plan_id||state.status?.zone_plan_id||'—'))}</strong><span>Zone budget</span><strong>${money(capital.approved_zone_risk_amount||zone)}</strong></div></div>`)}
+  cards.push(`<div class="risk-allocation-card"><div class="risk-card-head"><div><span class="label">FREE OPERATING RISK</span><strong>Fresh opportunity capacity</strong></div><span class="badge ${free>0?'ok':'bad'}">${free>0?'AVAILABLE':'FULLY ALLOCATED'}</span></div><div class="risk-amount">${money(free)}</div><div class="risk-detail"><span>Current scalp budget</span><strong>${money(capital.approved_scalp_risk_amount||0)}</strong><span>Remaining hard capacity</span><strong>${money(hardFree)}</strong><span>Operating utilization</span><strong>${operating?fmt((active+zone)/operating*100,1):'0.0'}%</strong></div></div>`);
+  const root=document.getElementById('portfolio-risk-cards');if(root)root.innerHTML=cards.join('');
 }
 
 function renderPositions(){
   const s=state.status||{}, ps=Array.isArray(s.positions)?s.positions:[];
+  const activePayload=state.outcomes?.active||{};
+  const activeRows=Array.isArray(activePayload)
+    ? activePayload
+    : Object.values(activePayload||{});
+  const lifecycleByTicket=new Map(
+    activeRows.map(t=>[String(t.ticket),t])
+  );
+
   document.getElementById("p-count").textContent=ps.length;
   document.getElementById("p-lots").textContent=fmt(s.total_lots,2);
-  const pl=s.strategy_floating_pl??s.floating_profit;const el=document.getElementById("p-pl");el.textContent=money(pl);el.className="value "+(Number(pl)>0?"pos":Number(pl)<0?"neg":"");
+
+  let activeRealized=0;
+  let activeFloating=0;
+
+  for(const p of ps){
+    const life=lifecycleByTicket.get(String(p.ticket))||{};
+    activeRealized+=Number(life.realized_net_pl||0);
+    activeFloating+=Number(p.net_pl||0);
+  }
+
+  const realizedEl=document.getElementById("p-realized");
+  realizedEl.textContent=money(activeRealized);
+  realizedEl.className="value "+(activeRealized>0?"pos":activeRealized<0?"neg":"");
+
+  const pl=s.strategy_floating_pl??s.floating_profit;
+  const el=document.getElementById("p-pl");
+  el.textContent=money(pl);
+  el.className="value "+(Number(pl)>0?"pos":Number(pl)<0?"neg":"");
+
+  const lifecycleTotal=activeRealized+Number(pl||0);
+  const lifeEl=document.getElementById("p-lifecycle");
+  lifeEl.textContent=money(lifecycleTotal);
+  lifeEl.className="value "+(lifecycleTotal>0?"pos":lifecycleTotal<0?"neg":"");
+
   document.getElementById("p-chains").textContent=text(s.active_hedge_chains,0);
+  renderPortfolioRiskAllocation();
+
   document.getElementById("positions-body").innerHTML=ps.length?ps.map(p=>{
-    const pln=Number(p.net_pl||0);
+    const life=lifecycleByTicket.get(String(p.ticket))||{};
+    const floating=Number(p.net_pl||0);
+    const realized=Number(life.realized_net_pl||0);
+    const lifecycle=realized+floating;
+    const initialVolume=Number(life.initial_volume??p.volume??0);
+    const remaining=Number(p.volume||0);
+    const closed=Number(life.closed_volume||Math.max(0,initialVolume-remaining));
+    const volumeLabel=closed>0.0000001
+      ? `${fmt(remaining,2)} / ${fmt(initialVolume,2)}`
+      : fmt(remaining,2);
+    const context=p.scalp_context_class&&p.scalp_context_class!=="NEUTRAL_SCALP"
+      ? p.scalp_context_class
+      : (p.order_origin||p.origin);
     return `<tr>
-      <td class="mono">${esc(text(p.ticket))}</td><td>${esc(text(p.type))}</td><td>${fmt(p.volume,2)}</td>
-      <td>${fmt(p.entry_price,3)}</td><td>${fmt(p.current_price,3)}</td>
-      <td class="${pln>0?"pos":pln<0?"neg":""}">${money(pln)}</td>
-      <td class="neg">${fmt(p.sl,3)}</td><td class="pos">${fmt(p.tp,3)}</td>
-      <td>${esc(pretty(p.order_origin||p.origin))}</td><td>${age(p.age_seconds)}</td>
-    </tr>`}).join(""):`<tr><td colspan="10" class="muted">No strategy positions.</td></tr>`;
+      <td class="mono">${esc(text(p.ticket))}</td>
+      <td>${esc(text(p.type))}</td>
+      <td title="${closed>0?`${fmt(closed,2)} lots already closed`:"Current open volume"}">${esc(volumeLabel)}</td>
+      <td>${fmt(p.entry_price,3)}</td>
+      <td>${fmt(p.current_price,3)}</td>
+      <td class="${realized>0?"pos":realized<0?"neg":""}">${money(realized)}</td>
+      <td class="${floating>0?"pos":floating<0?"neg":""}">${money(floating)}</td>
+      <td class="${lifecycle>0?"pos":lifecycle<0?"neg":""}"><strong>${money(lifecycle)}</strong></td>
+      <td class="neg">${fmt(p.sl,3)}</td>
+      <td class="pos">${fmt(p.tp,3)}</td>
+      <td>${esc(pretty(context))}${p.scalp_context_zone_side&&p.scalp_context_zone_side!=="NONE"?`<div class="muted">${esc(p.scalp_context_zone_side)} zone · pressure ${fmt(Number(p.scalp_context_pressure||0)*100,0)}%</div>`:""}</td>
+      <td>${age(p.age_seconds)}</td>
+    </tr>`}).join(""):`<tr><td colspan="12" class="muted">No strategy positions.</td></tr>`;
+
   renderClosedTrades();
   renderPerformance();
 }
@@ -3724,7 +4346,11 @@ function renderClosedTrades(){
       <td>${fmt(t.entry_price??initial.entry_price,3)}</td>
       <td>${fmt(t.close_price??latest.current_price,3)}</td>
       <td class="${pl>0?"pos":pl<0?"neg":""}">${money(pl)}</td>
-      <td>${esc(pretty(t.order_origin||initial.order_origin||t.origin_guess))}</td>
+      <td>${esc(pretty(
+  t.scalp_context_class&&t.scalp_context_class!=="NEUTRAL_SCALP"
+    ? t.scalp_context_class
+    : (t.order_origin||initial.order_origin||t.origin_guess)
+))}</td>
       <td>${esc(text(t.entry_policy_epoch??initial.entry_policy_epoch,"—"))}</td>
       <td>${esc(pretty(t.trading_mode||"UNKNOWN"))}</td>
       <td>${closedAt&&!Number.isNaN(closedAt.getTime())?esc(closedAt.toLocaleString()):"—"}</td>
@@ -3733,18 +4359,104 @@ function renderClosedTrades(){
   }).join(""):`<tr><td colspan="11" class="muted">No closed trades recorded for the selected MT5 account yet.</td></tr>`;
 }
 
-function renderPerformance(){
-  const p=state.performance||{}, o=p.overall||{};
-  document.getElementById("perf-count").textContent=text(o.closed_risk_units??o.closed_trades,0);
-  const net=document.getElementById("perf-net");net.textContent=money(o.net_pl);net.className="value small "+(Number(o.net_pl)>0?"pos":Number(o.net_pl)<0?"neg":"");
-  const exp=document.getElementById("perf-expectancy");exp.textContent=money(o.expectancy);exp.className="value small "+(Number(o.expectancy)>0?"pos":Number(o.expectancy)<0?"neg":"");
-  document.getElementById("perf-factor").textContent=o.profit_factor==null?"—":fmt(o.profit_factor,2);
-  const quality=document.getElementById("perf-quality");quality.textContent=p.quality?.exact_realized_pl_available?"MT5 REALIZED DATA":"INFERRED DATA";quality.className="badge "+(p.quality?.exact_realized_pl_available?"ok":"warn");
-  document.getElementById("perf-epochs").innerHTML=(p.by_policy_epoch||[]).slice(0,10).map(r=>`<tr><td>${esc(text(r.policy_epoch))}</td><td>${esc(text(r.closed_risk_units??r.closed_trades))}</td><td class="${Number(r.net_pl)>0?"pos":Number(r.net_pl)<0?"neg":""}">${money(r.net_pl)}</td><td>${money(r.expectancy)}</td><td>${fmt(r.win_rate_pct,1)}%</td><td><span class="badge ${r.sample_state==="EVIDENCE_AVAILABLE"?"ok":"warn"}">${esc(pretty(r.sample_state))}</span></td></tr>`).join("")||`<tr><td colspan="6" class="muted">No closed policy outcomes yet.</td></tr>`;
-  document.getElementById("perf-modes").innerHTML=(p.by_trading_mode||[]).map(r=>`<tr><td>${esc(pretty(r.trading_mode))}</td><td>${esc(text(r.closed_risk_units??r.closed_trades))}</td><td class="${Number(r.net_pl)>0?"pos":Number(r.net_pl)<0?"neg":""}">${money(r.net_pl)}</td><td>${money(r.expectancy)}</td><td>${r.profit_factor==null?"—":fmt(r.profit_factor,2)}</td></tr>`).join("")||`<tr><td colspan="5" class="muted">No closed mode outcomes yet.</td></tr>`;
-  document.getElementById("perf-note").textContent=p.interpretation||"Waiting for closed trades. Results below 20 trades are preliminary.";
+function performanceUnitRow(label,row){
+  row=row||{};const n=Number(row.closed_risk_units||0), net=Number(row.net_pl||0), exp=Number(row.expectancy||0), wr=Number(row.win_rate_pct||0);
+  return `<div class="mini"><span class="label">Units</span><strong>${n}</strong></div><div class="mini"><span class="label">Net P/L</span><strong class="${net>0?"pos":net<0?"neg":""}">${money(net)}</strong></div><div class="mini"><span class="label">Expectancy</span><strong class="${exp>0?"pos":exp<0?"neg":""}">${money(exp)}</strong></div><div class="mini"><span class="label">Win rate</span><strong>${fmt(wr,1)}%</strong></div>`;
 }
+function median(values){const a=values.map(Number).filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return null;const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2}
+function renderPerformanceCurve(units){
+  const root=document.getElementById("performance-equity-curve");if(!root)return;
+  const ordered=[...units].sort((a,b)=>new Date(a.closed_at||0)-new Date(b.closed_at||0));if(!ordered.length){root.innerHTML='<div class="observability-empty">Equity curve will appear after completed risk units.</div>';return}
+  let run=0;const vals=[0,...ordered.map(u=>(run+=Number(u.realized_net_pl||0)))];const lo=Math.min(...vals),hi=Math.max(...vals),span=Math.max(1,hi-lo),w=760,h=170,pad=18;
+  const pts=vals.map((v,i)=>`${pad+(w-2*pad)*(i/Math.max(1,vals.length-1))},${pad+(h-2*pad)*(1-(v-lo)/span)}`).join(' ');
+  const zeroY=pad+(h-2*pad)*(1-(0-lo)/span);
+  root.innerHTML=`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-label="Cumulative strategic realised P/L"><line x1="${pad}" y1="${zeroY}" x2="${w-pad}" y2="${zeroY}" stroke="rgba(142,160,184,.22)" stroke-width="1"/><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="2.5" vector-effect="non-scaling-stroke"/><text x="${pad}" y="15" fill="currentColor" font-size="10">${esc(money(hi))}</text><text x="${pad}" y="${h-5}" fill="currentColor" font-size="10">${esc(money(lo))}</text></svg>`;
+}
+function renderPerformance(){
+  const p=state.performance||{},o=p.overall||{},risk=state.riskUnits||{};
+  const allUnits=Array.isArray(risk.units)?risk.units:[], completed=allUnits.filter(u=>u.state==="COMPLETE");
+  const byType=Object.fromEntries((p.by_risk_unit_type||[]).map(r=>[String(r.risk_unit_type||""),r]));
+  const netEl=document.getElementById("perf-net");if(!netEl)return;
+  netEl.textContent=money(o.net_pl);netEl.className="performance-net "+(Number(o.net_pl)>0?"pos":Number(o.net_pl)<0?"neg":"");
+  document.getElementById("perf-count").textContent=text(o.closed_risk_units,0);
+  const exp=document.getElementById("perf-expectancy");exp.textContent=money(o.expectancy);exp.className="value "+(Number(o.expectancy)>0?"pos":Number(o.expectancy)<0?"neg":"");
+  document.getElementById("perf-win-rate").textContent=`${fmt(o.win_rate_pct,1)}%`;
+  document.getElementById("perf-factor").textContent=o.profit_factor==null?"—":fmt(o.profit_factor,2);
+  document.getElementById("perf-drawdown").textContent=money(o.maximum_closed_unit_drawdown);
+  document.getElementById("perf-sample").textContent=`Sample ${pretty(o.sample_state||"INSUFFICIENT")}`;
+  const quality=document.getElementById("perf-quality"), exact=Number(p.quality?.exact_realized_count||0), inferred=Number(p.quality?.inferred_count||0);
+  quality.textContent=exact?"MT5 REALIZED":"INFERRED";quality.className="badge "+(exact&&inferred===0?"ok":exact?"info":"warn");
+  document.getElementById("perf-data-quality").textContent=exact&&inferred===0?"AUTHORITATIVE":exact?"MIXED":"INFERRED";
+  document.getElementById("perf-data-quality-copy").textContent=`${exact} exact · ${inferred} inferred risk units`;
+  const headline=document.getElementById("performance-headline");
+  headline.textContent=!Number(o.closed_risk_units)?"Atlas is collecting its first completed strategic outcomes.":Number(o.closed_risk_units)<20?"Early evidence only — useful for observation, not causal policy conclusions.":"Strategic performance evidence is accumulating; compare policy epochs and risk-unit types before adapting.";
+  document.getElementById("performance-page-badge").textContent=`${text(state.selectedSymbol,"CURRENT")} · ${text(o.sample_state,"INSUFFICIENT")}`;
+  renderPerformanceCurve(completed);
 
+  const typeMap=[['STANDALONE_TRADE','perf-standalone','perf-standalone-badge'],['RECOVERY_CHAIN','perf-recovery','perf-recovery-badge'],['ZONE_CAMPAIGN','perf-zone','perf-zone-badge']];
+  for(const [key,id,bid] of typeMap){const row=byType[key]||{};document.getElementById(id).innerHTML=performanceUnitRow(key,row);const b=document.getElementById(bid);b.textContent=text(row.sample_state,'NO DATA');b.className='badge '+(Number(row.closed_risk_units)>=20?'ok':Number(row.closed_risk_units)>0?'warn':'');}
+
+  document.getElementById("perf-epochs").innerHTML=(p.by_policy_epoch||[]).slice(0,14).map(r=>`<tr><td>${esc(text(r.policy_epoch))}</td><td>${esc(text(r.closed_risk_units))}</td><td class="${Number(r.net_pl)>0?"pos":Number(r.net_pl)<0?"neg":""}">${money(r.net_pl)}</td><td>${money(r.expectancy)}</td><td>${fmt(r.win_rate_pct,1)}%</td><td><span class="badge ${Number(r.closed_risk_units)>=20?"ok":"warn"}">${esc(pretty(r.sample_state))}</span></td></tr>`).join("")||`<tr><td colspan="6" class="muted">No completed policy outcomes yet.</td></tr>`;
+  document.getElementById("perf-modes").innerHTML=(p.by_trading_mode||[]).map(r=>`<tr><td>${esc(pretty(r.trading_mode))}</td><td>${esc(text(r.closed_risk_units))}</td><td class="${Number(r.net_pl)>0?"pos":Number(r.net_pl)<0?"neg":""}">${money(r.net_pl)}</td><td>${money(r.expectancy)}</td><td>${r.profit_factor==null?"—":fmt(r.profit_factor,2)}</td></tr>`).join("")||`<tr><td colspan="5" class="muted">No completed mode outcomes yet.</td></tr>`;
+
+  const recent=[...completed].sort((a,b)=>new Date(b.closed_at||0)-new Date(a.closed_at||0)).slice(0,10);document.getElementById("perf-units-badge").textContent=`${completed.length} COMPLETE`;
+  document.getElementById("perf-recent-units").innerHTML=recent.length?recent.map(u=>{const pl=Number(u.realized_net_pl||0);return `<div class="performance-result"><div><strong>${esc(pretty(u.unit_type))}</strong><div class="muted">${esc(text(u.unit_id))} · epoch ${esc(text(u.policy_epoch,'—'))}</div></div><strong class="${pl>0?'pos':pl<0?'neg':''}">${money(pl)}</strong><div class="muted">${u.closed_at?new Date(u.closed_at).toLocaleString():'—'}</div></div>`}).join(''):'<div class="observability-empty">No completed strategic risk units yet.</div>';
+
+  const payload=state.outcomes||{}, tickets=Array.isArray(payload.closed)?payload.closed:[];const mfe=tickets.map(t=>t.max_favorable_net_pl_observed).filter(v=>Number.isFinite(Number(v))),mae=tickets.map(t=>t.max_adverse_net_pl_observed).filter(v=>Number.isFinite(Number(v)));const pls=tickets.map(t=>t.exact_realized_pl_available?Number(t.realized_net_pl||0):Number(t.final_observed_net_pl_before_disappearance||0)).filter(Number.isFinite);
+  document.getElementById("perf-mfe").textContent=median(mfe)==null?'—':money(median(mfe));document.getElementById("perf-mae").textContent=median(mae)==null?'—':money(median(mae));document.getElementById("perf-ticket-average").textContent=pls.length?money(pls.reduce((a,b)=>a+b,0)/pls.length):'—';document.getElementById("perf-exact-tickets").textContent=`${tickets.filter(t=>t.exact_realized_pl_available).length} / ${tickets.length}`;
+  const contextRoot=document.getElementById("perf-scalp-context");
+  if(contextRoot){
+    const ctx={};
+
+    for(const t of tickets){
+      const key=text(
+        t.scalp_context_class || "NEUTRAL_SCALP"
+      );
+
+      const pl=t.exact_realized_pl_available
+        ? Number(t.realized_net_pl||0)
+        : Number(t.final_observed_net_pl_before_disappearance||0);
+
+      if(!ctx[key])
+        ctx[key]={n:0,w:0,pl:0};
+
+      ctx[key].n++;
+
+      if(Number.isFinite(pl)){
+        ctx[key].pl+=pl;
+        if(pl>0)ctx[key].w++;
+      }
+    }
+
+    const rows=Object.entries(ctx)
+      .sort((a,b)=>b[1].n-a[1].n);
+
+    const maxN=Math.max(
+      1,
+      ...rows.map(x=>x[1].n)
+    );
+
+    contextRoot.innerHTML=rows.length
+      ? rows.map(([k,v])=>`
+        <div class="performance-bar">
+          <span>${esc(pretty(k))}</span>
+          <div class="performance-bar-track">
+            <div class="performance-bar-fill"
+              style="width:${Math.min(100,100*v.n/maxN)}%">
+            </div>
+          </div>
+          <span class="${v.pl>0?'pos':v.pl<0?'neg':''}">
+            ${v.n} · ${money(v.pl)} · ${fmt(100*v.w/Math.max(1,v.n),0)}% win
+          </span>
+        </div>
+      `).join("")
+      : '<div class="muted">No contextual scalp outcomes yet.</div>';
+  }
+
+  const reg={};for(const t of tickets){const key=text(t.entry_context?.regime,'UNKNOWN');const pl=t.exact_realized_pl_available?Number(t.realized_net_pl||0):Number(t.final_observed_net_pl_before_disappearance||0);if(!reg[key])reg[key]={n:0,pl:0};reg[key].n++;reg[key].pl+=Number.isFinite(pl)?pl:0}const rr=Object.entries(reg).sort((a,b)=>b[1].n-a[1].n),maxN=Math.max(1,...rr.map(x=>x[1].n));document.getElementById("perf-regimes").innerHTML=rr.length?rr.map(([k,v])=>`<div class="performance-bar"><span>${esc(pretty(k))}</span><div class="performance-bar-track"><div class="performance-bar-fill" style="width:${100*v.n/maxN}%"></div></div><span class="${v.pl>0?'pos':v.pl<0?'neg':''}">${v.n} · ${money(v.pl)}</span></div>`).join(''):'<div class="muted">No entry-context evidence yet.</div>';
+  document.getElementById("perf-exact-units").textContent=exact;document.getElementById("perf-inferred-units").textContent=inferred;document.getElementById("perf-active-units").textContent=text(p.active_risk_unit_count??risk.active_unit_count,0);document.getElementById("perf-loss-streak").textContent=text(p.consecutive_completed_loss_units??risk.consecutive_completed_loss_units,0);
+  const lb=document.getElementById("perf-learning-badge");lb.textContent=pretty(o.sample_state||'INSUFFICIENT');lb.className='badge '+(Number(o.closed_risk_units)>=100?'ok':Number(o.closed_risk_units)>=20?'info':'warn');document.getElementById("perf-note").textContent=p.interpretation||"Strategic performance requires completed risk units; small samples are preliminary and not causal proof.";
+}
 function renderLlmCycle(){
   const c=state.llmCycle||{};
   const models=state.llmStatus?.model_chain||[];
@@ -3868,75 +4580,146 @@ function renderResponsiveness(){
   document.getElementById("resp-detail").textContent=`${pretty(r.evidence_quality||"LIMITED")} evidence · ${text(entry.history_snapshot_count,0)} market snapshots · ${text(exit.closed_trade_count,0)} closed trades. Gemini receives this analysis on every policy cycle.`;
 }
 
+
+function brainTab(name){
+  ["runs","observations","history"].forEach(k=>{
+    document.getElementById(`brain-tab-${k}`)?.classList.toggle("active",k===name);
+    document.getElementById(`brain-panel-${k}`)?.classList.toggle("active",k===name);
+  });
+}
+function closePolicyInspector(){document.getElementById("policy-inspector-modal")?.classList.remove("open")}
+function policyRuntimeRows(runtime,before={}){
+  const entries=Object.entries(runtime||{}).sort(([a],[b])=>a.localeCompare(b));
+  return entries.map(([name,value])=>{const prior=before?.[name];const changed=prior!==undefined&&JSON.stringify(prior)!==JSON.stringify(value);return `<div class="policy-control-row ${changed?"changed":""}"><strong>${esc(pretty(name))}</strong><span>${esc(text(prior,changed?"—":""))}</span><span>${esc(text(value))}</span></div>`}).join("")||`<div class="callout">No runtime controls captured for this epoch.</div>`;
+}
+function openPolicyInspector(epoch){
+  const apps=state.autoApplications?.applications||[];const app=apps.find(x=>Number(x.policy_epoch)===Number(epoch));if(!app)return;
+  const modal=document.getElementById("policy-inspector-modal");if(!modal)return;
+  document.getElementById("policy-inspector-kicker").textContent=Number(epoch)===Number(state.autoApplications?.current_command_epoch)?"ACTIVE RUNTIME POLICY":"HISTORICAL POLICY";
+  document.getElementById("policy-inspector-title").textContent=`Policy Epoch ${text(epoch)}`;
+  document.getElementById("policy-inspector-subtitle").textContent=`Command ${text(app.command_version)} · ${pretty(app.reconciliation)} · applied ${(app.timestamp||"").replace("T"," ").slice(0,19)}`;
+  const obs=(state.policyObservations?.observations||[]).filter(o=>Number(o.baseline_policy_epoch)===Number(app.baseline_policy_epoch));
+  const changes=Object.entries(app.changes||{}).map(([name,row])=>`<div class="change"><strong>${esc(pretty(name))}</strong><span>${esc(text(row?.before))}</span><span>→ ${esc(text(row?.intended))}</span></div>`).join("")||`<div class="callout">No material control patch recorded.</div>`;
+  const evidence=obs.length?obs.map((o,i)=>`<div class="analysis-item"><div class="row"><strong>Observation ${esc(text(o.proposal_id||`#${i+1}`))}</strong><span class="badge info">${esc(fmt(o.overall_confidence||0,0))}%</span></div><div class="muted" style="margin-top:4px">${esc((o.observed_at||"").replace("T"," ").slice(0,19))}</div><div class="observation-changes">${Object.entries(o.changes||{}).map(([n,r])=>`<span class="observation-chip">${esc(pretty(n))}: ${esc(text(r.current))} → ${esc(text(r.proposed))}</span>`).join("")||`<span class="muted">No control mutation proposed</span>`}</div></div>`).join(""):`<div class="callout">No durable per-observation detail exists for this historical window. Atlas does not reconstruct missing Gemini prose.</div>`;
+  document.getElementById("policy-inspector-body").innerHTML=`<div class="grid g3"><div class="kpi"><div class="label">Consensus observations</div><div class="value small">${esc(text(app.consensus_observation_count,0))}</div></div><div class="kpi"><div class="label">Changed controls</div><div class="value small">${Object.keys(app.changes||{}).length}</div></div><div class="kpi"><div class="label">Runtime controls captured</div><div class="value small">${Object.keys(app.runtime||{}).length}</div></div></div><div class="label" style="margin-top:16px">Applied changes</div><div class="changes" style="margin-top:8px">${changes}</div><div class="label" style="margin-top:16px">Supporting consensus observations</div><div class="analysis-list" style="margin-top:8px">${evidence}</div><div class="label" style="margin-top:16px">Full registered runtime</div><div class="policy-control-table"><div class="policy-control-row"><strong>CONTROL</strong><span>PREVIOUS</span><span>THIS EPOCH</span></div>${policyRuntimeRows(app.runtime||{},app.previous_runtime||{})}</div>`;
+  modal.classList.add("open");
+}
+function openActivePolicyInspector(){const epoch=state.autoApplications?.current_active?.policy_epoch||state.autoApplications?.current_command_epoch;openPolicyInspector(epoch)}
+function openObservationInspector(index){
+  const obs=(state.policyObservations?.observations||[])[index];if(!obs)return;const modal=document.getElementById("policy-inspector-modal");if(!modal)return;
+  document.getElementById("policy-inspector-kicker").textContent="GEMINI OBSERVATION";document.getElementById("policy-inspector-title").textContent=text(obs.proposal_id,"Accepted observation");document.getElementById("policy-inspector-subtitle").textContent=`Baseline epoch ${text(obs.baseline_policy_epoch)} · ${(obs.observed_at||"").replace("T"," ").slice(0,19)} · confidence ${fmt(obs.overall_confidence||0,0)}%`;
+  const rows=Object.entries(obs.changes||{}).map(([name,r])=>`<div class="change"><div><strong>${esc(pretty(name))}</strong>${r?.rationale?`<div class="muted">${esc(r.rationale)}</div>`:""}</div><span>${esc(text(r?.current))}</span><span>→ ${esc(text(r?.proposed))}</span></div>`).join("")||`<div class="callout">This accepted observation recommended holding the current runtime controls.</div>`;
+  const analysis=obs.analysis||{};const analysisParts=[];if((analysis.performance_diagnosis||[]).length)analysisParts.push(`<strong>Performance diagnosis</strong><br>${esc(analysis.performance_diagnosis.join(" · "))}`);if((analysis.responsiveness_diagnosis||[]).length)analysisParts.push(`<strong>Responsiveness</strong><br>${esc(analysis.responsiveness_diagnosis.join(" · "))}`);if((analysis.weaknesses_targeted||[]).length)analysisParts.push(`<strong>Targets</strong><br>${esc(analysis.weaknesses_targeted.join(" · "))}`);if(analysis.critic_verdict||analysis.critic_summary)analysisParts.push(`<strong>Critic</strong><br>${esc(text(analysis.critic_verdict))} — ${esc(text(analysis.critic_summary))}`);
+  document.getElementById("policy-inspector-body").innerHTML=`${analysisParts.length?`<div class="callout">${analysisParts.join("<br><br>")}</div>`:`<div class="callout">This legacy observation predates durable Gemini-analysis storage. Atlas shows the confidence and proposed controls that were actually preserved and does not reconstruct missing prose.</div>`}<div class="label" style="margin-top:16px">Observed control recommendations</div><div class="changes" style="margin-top:8px">${rows}</div>`;modal.classList.add("open");
+}
+
+function openGeminiRunInspector(index){
+  const runs=Array.isArray(state.llmCycle?.run_history)?[...state.llmCycle.run_history].reverse():[];
+  const run=runs[index];if(!run)return;
+  const modal=document.getElementById("policy-inspector-modal");if(!modal)return;
+  document.getElementById("policy-inspector-kicker").textContent="GEMINI POLICY RUN";
+  document.getElementById("policy-inspector-title").textContent=`Run #${text(run.run_number)} · ${pretty(run.outcome||run.status)}`;
+  document.getElementById("policy-inspector-subtitle").textContent=`Baseline epoch ${text(run.baseline_policy_epoch)} · ${(run.completed_at||"").replace("T"," ").slice(0,19)} · ${fmt(run.overall_confidence||0,0)}% confidence`;
+  const changes=Object.entries(run.changes||{}).map(([name,row])=>`<div class="change"><div><strong>${esc(pretty(name))}</strong>${row?.rationale?`<div class="muted">${esc(row.rationale)}</div>`:""}</div><span>${esc(text(row?.current))}</span><span>→ ${esc(text(row?.proposed))}</span></div>`).join("")||`<div class="callout">No material runtime mutation was proposed by this run.</div>`;
+  const deferred=(run.deferred_locked_changes||[]).map(row=>{const name=row?.name||row?.control||row?.parameter||"position-sensitive control";return `<div class="change"><div><strong>${esc(pretty(name))}</strong><div class="muted">Deferred while existing-position policy locks remain authoritative.</div></div><span>${esc(text(row?.current))}</span><span>DEFERRED</span></div>`}).join("");
+  const a=run.analysis||{};const parts=[];if((a.performance_diagnosis||[]).length)parts.push(`<strong>Performance</strong><br>${esc(a.performance_diagnosis.join(" · "))}`);if((a.responsiveness_diagnosis||[]).length)parts.push(`<strong>Responsiveness</strong><br>${esc(a.responsiveness_diagnosis.join(" · "))}`);if((a.weaknesses_targeted||[]).length)parts.push(`<strong>Targets</strong><br>${esc(a.weaknesses_targeted.join(" · "))}`);
+  const consensus=run.consensus_observation_recorded?`Accepted consensus observation recorded · window became ${text(run.consensus_observation_count_after_run,0)} of ${text(run.consensus_minimum_observations,3)} minimum · ${text(run.consensus_control_count_after_run,0)} qualifying controls.`:"This run did not create an accepted consensus observation.";
+  document.getElementById("policy-inspector-body").innerHTML=`<div class="callout"><strong>Outcome</strong> ${esc(pretty(run.outcome||run.status))}${run.autonomous_status?` · ${esc(pretty(run.autonomous_status))}`:""}<br><strong>Consensus</strong> ${esc(consensus)}${run.critic_verdict?`<br><strong>Critic</strong> ${esc(pretty(run.critic_verdict))}${run.critic_summary?` — ${esc(run.critic_summary)}`:""}`:""}</div>${parts.length?`<div class="callout" style="margin-top:10px">${parts.join("<br><br>")}</div>`:""}<div class="label" style="margin-top:16px">Proposed runtime changes</div><div class="changes" style="margin-top:8px">${changes}</div>${deferred?`<div class="label" style="margin-top:16px">Deferred locked changes</div><div class="changes" style="margin-top:8px">${deferred}</div>`:""}`;
+  modal.classList.add("open");
+}
+
 function renderAtlas(){
   const p=state.proposal||{}, rs=p.review_summary||{}, ev=rs.shadow_evidence||{}, st=rs.stability||{};
-  const lifecycle=p.lifecycle?.state||p.review_state;
-  const applied=["APPLIED","AWAITING_NYAO_ACK"].includes(String(lifecycle));
-  document.getElementById("a-candidate").textContent=text(p.selected_candidate);
-  const autonomous=state.llmCycle?.execution_mode==="AUTONOMOUS";
-  document.getElementById("a-readiness").textContent=applied?lifecycle:autonomous?pretty(lifecycle):p.recommendation_ready?"READY FOR REVIEW":"NOT READY";
-  const activeEpoch=state.autoApplications?.current_active?.policy_epoch;
-  document.getElementById("a-epoch").textContent=autonomous&&activeEpoch!=null?text(activeEpoch):text(p.proposed_policy_epoch);
-  const b=document.getElementById("a-review-state");b.textContent=text(lifecycle);b.className="badge "+badgeClass(b.textContent);
-  const consensus=state.autoConsensus||{};
-  const applications=state.autoApplications||{};
-  const activeApplication=applications.current_active||null;
-  const title=document.getElementById("atlas-policy-title");
-  const subtitle=document.getElementById("atlas-policy-subtitle");
-  const historyRoot=document.getElementById("applied-policy-history");
-  if(autonomous&&activeApplication){
-    title.textContent="Current active policy";
-    subtitle.textContent=`Epoch ${text(activeApplication.policy_epoch)} · command ${text(activeApplication.command_version)} · autonomous Gemini consensus`;
-    const appliedChanges={};
-    Object.entries(activeApplication.changes||{}).forEach(([name,row])=>{
-      appliedChanges[name]={current:row?.before,shadow:row?.intended};
-    });
-    renderProposalChanges("atlas-changes",appliedChanges);
-    document.getElementById("atlas-rationale").textContent=`Applied from ${text(activeApplication.consensus_observation_count,0)} accepted observations. Reconciliation: ${pretty(activeApplication.reconciliation)}. Intended changes are shown only as confirmed when the policy registry or current Nyao runtime agrees.`;
-    b.textContent=pretty(activeApplication.reconciliation);b.className="badge "+(String(activeApplication.reconciliation).includes("CONFIRMED")?"ok":String(activeApplication.reconciliation).includes("MISMATCH")?"bad":"warn");
-  }else{
-    title.textContent=autonomous?"Current active policy":"Proposed policy change";
-    subtitle.textContent=autonomous?"No autonomous application has been recorded for this symbol yet.":"Runtime IDs and hashes stay underneath the UI.";
-    renderProposalChanges("atlas-changes",p.changed_controls);
-    document.getElementById("atlas-rationale").textContent=p.transition_plan?.rationale||"No additional rationale.";
+  const lifecycle=p.lifecycle?.state||p.review_state;const applications=state.autoApplications||{};const active=applications.current_active||null;const consensus=state.autoConsensus||{};
+  const runtime=applications.current_status_runtime&&Object.keys(applications.current_status_runtime).length?applications.current_status_runtime:(active?.runtime||applications.current_command_runtime||{});
+  document.getElementById("runtime-policy-epoch").textContent=text(applications.current_status_epoch||active?.policy_epoch||applications.current_command_epoch);
+  document.getElementById("runtime-policy-command").textContent=text(active?.command_version||state.command?.command_version);
+  document.getElementById("runtime-policy-count").textContent=text(Object.keys(runtime||{}).length,0);
+  const reconciliation=active?.reconciliation||((applications.current_status_epoch===applications.current_command_epoch)?"RUNTIME_CONFIRMED":"AWAITING_RUNTIME");
+  document.getElementById("runtime-policy-reconciliation").textContent=pretty(reconciliation);const rb=document.getElementById("runtime-policy-badge");rb.textContent=pretty(reconciliation);rb.className="badge "+(String(reconciliation).includes("CONFIRMED")?"ok":String(reconciliation).includes("MISMATCH")?"bad":"warn");
+  const activeChanges={};Object.entries(active?.changes||{}).forEach(([name,row])=>activeChanges[name]={current:row?.before,shadow:row?.registered??row?.intended});renderProposalChanges("runtime-policy-changes",activeChanges);
+  const supporting=(state.policyObservations?.observations||[]).filter(o=>Number(o.baseline_policy_epoch)===Number(active?.baseline_policy_epoch));
+  const integrity=String(active?.consensus_gate_integrity||"VERIFIED");
+  document.getElementById("runtime-policy-rationale").textContent=active
+    ? integrity==="LEGACY_BYPASS"
+      ? `Epoch ${text(active.policy_epoch)} was applied from baseline epoch ${text(active.baseline_policy_epoch)} with only ${text(active.consensus_observation_count,0)} / ${text(active.consensus_minimum_observations,3)} accepted observations under the pre-1.30.43 autonomous-bootstrap bug. Atlas preserves this active runtime but will not permit the next mature-epoch mutation to bypass consensus.`
+      : `Epoch ${text(active.policy_epoch)} was produced from baseline epoch ${text(active.baseline_policy_epoch)} using ${text(active.consensus_observation_count,0)} accepted observations. ${supporting.length?`${supporting.length} supporting observation records are available to inspect.`:"Older full Gemini prose is not reconstructed when it was not durably stored."}`
+    : "No autonomous policy application is currently registered.";
+
+  document.getElementById("a-candidate").textContent=text(p.selected_candidate);document.getElementById("a-readiness").textContent=pretty(lifecycle||"—");document.getElementById("a-epoch").textContent=text(p.current_policy_epoch??state.command?.policy_epoch);document.getElementById("a-confidence").textContent=rs.confidence==null?"—":fmt(rs.confidence,1)+"%";
+  const llm=p.llm_policy||{},bundle=llm.bundle||{},critic=llm.critic||{};const diagnoses=bundle.performance_diagnosis||rs.performance_diagnosis||[];const weaknesses=bundle.weaknesses_targeted||rs.weaknesses_targeted||[];const speed=bundle.responsiveness_diagnosis||rs.responsiveness_diagnosis||[];
+  document.getElementById("atlas-llm-evidence").innerHTML=llm.proposal_id?`<strong>Latest Gemini + critic analysis</strong><br>${esc((diagnoses.length?diagnoses:["No performance diagnosis supplied."]).join(" · "))}${speed.length?`<br><span class="muted">Responsiveness (${esc(text(bundle.responsiveness_profile||rs.responsiveness_profile))}): ${esc(speed.join(" · "))}</span>`:""}<br><span class="muted">Targets: ${esc((weaknesses.length?weaknesses:["not specified"]).join(" · "))} · Critic: ${esc(text(critic.verdict||rs.critic_verdict))} — ${esc(text(critic.summary||rs.critic_summary,"No summary"))}</span>`:"No Gemini analysis attached to the latest proposal.";
+  const blockers=p.recommendation_blockers||[];document.getElementById("a-blockers").textContent=blockers.length?`Latest candidate blockers: ${blockers.map(pretty).join(" · ")}`:"Latest candidate has no recommendation blockers.";
+  document.getElementById("a-risk").textContent=text(p.risk?.state||rs.risk_state);document.getElementById("a-evidence").textContent=text(ev.quality);document.getElementById("a-stability").textContent=st.stable?"STABLE":"NOT STABLE";document.getElementById("a-review-state").textContent=pretty(lifecycle||"—");
+
+  const registry=document.getElementById("policy-registry-list");const apps=Array.isArray(applications.applications)?applications.applications:[];if(registry)registry.innerHTML=apps.length?apps.map(app=>{const isActive=Number(app.policy_epoch)===Number(applications.current_command_epoch);const changes=Object.entries(app.changes||{});const detail=changes.length?changes.slice(0,4).map(([n,r])=>`${pretty(n)} ${text(r?.before)} → ${text(r?.intended)}`).join(" · ")+(changes.length>4?` · +${changes.length-4} more`:""):"No material control patch recorded";const cls=String(app.reconciliation||"").includes("MISMATCH")?"bad":String(app.reconciliation||"").includes("CONFIRMED")?"ok":"warn";const integrity=String(app.consensus_gate_integrity||"VERIFIED");return `<div class="policy-record ${isActive?"active":""}" onclick="openPolicyInspector(${Number(app.policy_epoch)||0})"><div class="policy-record-head"><div><strong>Epoch ${esc(text(app.policy_epoch))}</strong>${isActive?` <span class="badge ok">ACTIVE</span>`:""}${integrity==="LEGACY_BYPASS"?` <span class="badge bad">PRE-FIX CONSENSUS BYPASS</span>`:""}</div><span class="badge ${cls}">${esc(pretty(app.reconciliation))}</span></div><div class="policy-record-meta"><span>Command ${esc(text(app.command_version))}</span><span>${esc((app.timestamp||"").replace("T"," ").slice(0,19))}</span><span>${esc(text(app.consensus_observation_count,0))} / ${esc(text(app.consensus_minimum_observations,3))} accepted observations</span></div><div class="policy-record-changes">${esc(detail)}</div></div>`}).join(""):`<div class="callout">No autonomous policy applications recorded yet.</div>`;
+
+  const pc=document.getElementById("policy-consensus-summary");
+  const consensusRows=Array.isArray(consensus.controls)
+    ? consensus.controls
+    : Object.entries(consensus.controls||{}).map(([name,row])=>({name,...(row||{})}));
+  const consensusTotal=Number(consensus.observation_count||0);
+  const consensusSupportThreshold=Number(consensus.minimum_support_ratio||.6);
+  const consensusMinObservations=Number(consensus.minimum_observations||consensus.minimum_observation_count||0);
+  if(pc){
+    const readiness=Number(consensus.consensus_control_count||0)>0
+      ?"One or more candidate controls have reached consensus."
+      :"Atlas is still accumulating support; the runtime policy remains unchanged.";
+    pc.innerHTML=`<div class="consensus-overview">
+      <div><span class="label">Baseline policy</span><strong>Epoch ${esc(text(consensus.baseline_policy_epoch))}</strong></div>
+      <div><span class="label">Accepted observations</span><strong>${esc(text(consensusTotal,0))}${consensusMinObservations?` of ${esc(text(consensusMinObservations))} minimum`:""}</strong></div>
+      <div><span class="label">Support threshold</span><strong>${fmt(consensusSupportThreshold*100,0)}%</strong></div>
+      <div><span class="label">Qualified controls</span><strong>${esc(text(consensus.consensus_control_count,0))}</strong></div>
+    </div><div class="muted" style="margin-top:9px">${esc(readiness)}</div>`;
   }
-  if(historyRoot){
-    const apps=Array.isArray(applications.applications)?applications.applications:[];
-    historyRoot.innerHTML=apps.length?apps.slice(0,12).map(app=>{
-      const changes=Object.entries(app.changes||{});
-      const detail=changes.length?changes.map(([name,row])=>`${pretty(name)}: ${text(row?.before)} → ${text(row?.intended)}${row?.confirmed===false?" ⚠ mismatch":""}`).join(" · "):"No material controls recorded";
-      const cls=String(app.reconciliation||"").includes("MISMATCH")?"bad":String(app.reconciliation||"").includes("CONFIRMED")?"ok":"warn";
-      return `<div class="analysis-item"><div class="row"><strong>Epoch ${esc(text(app.policy_epoch))}</strong><span class="badge ${cls}">${esc(pretty(app.reconciliation))}</span></div><div class="muted" style="margin-top:5px">${esc((app.timestamp||"").replace("T"," ").slice(0,19))} · ${esc(text(app.consensus_observation_count,0))} consensus observations</div><div style="margin-top:5px">${esc(detail)}</div></div>`;
-    }).join(""):`<div class="analysis-item">No autonomous policy applications recorded yet.</div>`;
+  const pcr=document.getElementById("policy-consensus-controls");
+  if(pcr){
+    pcr.innerHTML=consensusRows.length?consensusRows.map((row,index)=>{
+      const support=Number(row.support_count||0);
+      const pct=consensusTotal?support/consensusTotal*100:0;
+      const ready=Boolean(row.consensus_ready);
+      const required=Math.max(1,Math.ceil(consensusTotal*consensusSupportThreshold));
+      const supportGap=Math.max(0,required-support);
+      const status=ready?"QUALIFIED":supportGap===0?"AWAITING WINDOW":"BUILDING SUPPORT";
+      const gate=ready
+        ?"Support and observation requirements are satisfied for this control."
+        : supportGap===0
+          ?"Support ratio is sufficient; another consensus requirement is still pending."
+          : `${supportGap} more supporting observation${supportGap===1?"":"s"} needed at the current window size.`;
+      const method=pretty(row.method||row.selection_method||"EXACT_TARGET");
+      return `<article class="consensus-card ${ready?"ready":""}">
+        <div class="consensus-card-head">
+          <div><span class="label">Candidate control ${index+1}</span><strong>${esc(pretty(row.name||row.control||"Unnamed control"))}</strong><div class="muted">${esc(method)}</div></div>
+          <span class="badge ${ready?"ok":"warn"}">${esc(status)}</span>
+        </div>
+        <div class="consensus-value-grid">
+          <div><span class="label">Active runtime</span><strong>${esc(text(row.baseline??row.current))}</strong></div>
+          <div><span class="label">Consensus candidate</span><strong>${esc(text(row.selected??row.proposed))}</strong></div>
+        </div>
+        <div class="consensus-support-block">
+          <div class="consensus-support-line"><span>${support} / ${consensusTotal} observations support this value</span><strong>${fmt(pct,0)}%</strong></div>
+          <div class="consensus-meter"><span style="width:${Math.min(100,pct)}%"></span></div>
+        </div>
+        <div class="consensus-gate"><strong>Gate</strong><span>${esc(gate)}</span></div>
+      </article>`;
+    }).join(""):`<div class="consensus-empty">No control mutations are currently accumulating consensus. The active runtime policy remains unchanged.</div>`;
   }
-  const llm=p.llm_policy||{}, bundle=llm.bundle||{}, critic=llm.critic||{};
-  const diagnoses=bundle.performance_diagnosis||rs.performance_diagnosis||[];
-  const weaknesses=bundle.weaknesses_targeted||rs.weaknesses_targeted||[];
-  const speed=bundle.responsiveness_diagnosis||rs.responsiveness_diagnosis||[];
-  document.getElementById("atlas-llm-evidence").innerHTML=llm.proposal_id
-    ? `<strong>Gemini + critic evidence</strong><br>${esc((diagnoses.length?diagnoses:["No performance diagnosis supplied."]).join(" · "))}${speed.length?`<br><span class="muted">Responsiveness (${esc(text(bundle.responsiveness_profile||rs.responsiveness_profile))}): ${esc(speed.join(" · "))}</span>`:""}<br><span class="muted">Targets: ${esc((weaknesses.length?weaknesses:["not specified"]).join(" · "))} · Critic: ${esc(text(critic.verdict||rs.critic_verdict))} — ${esc(text(critic.summary||rs.critic_summary,"No summary"))}</span>`
-    : "Deterministic Atlas proposal; no Gemini evidence attached.";
-  document.getElementById("a-risk").textContent=text(p.risk?.state||rs.risk_state);
-  document.getElementById("a-confidence").textContent=rs.confidence==null?"—":fmt(rs.confidence,1)+"%";
-  document.getElementById("a-evidence").textContent=text(ev.quality);
-  document.getElementById("a-stability").textContent=st.stable?"STABLE":"NOT STABLE";
-  const blockers=p.recommendation_blockers||[];const natural=p.natural_recommendation_blockers||[];
-  document.getElementById("a-blockers").textContent=lifecycle==="AUTO_APPLY_DEFERRED_ZONE"
-    ? `Queued, not applied. Atlas will reconsider proposed epoch ${text(p.proposed_policy_epoch)} when the active zone campaign ends; current Nyao policy remains epoch ${text(state.command?.policy_epoch)}.`
-    : blockers.length?blockers.map(pretty).join(" · "):(p.test_override_active&&natural.length?`Test override active. Natural blockers: ${natural.map(pretty).join(" · ")}`:"No recommendation blockers.");
-  const approval=state.review?.approval||p.approval||{};
-  const status=approval.status||"NOT_REQUESTED";
-  const steps=[
-    ["Proposal",p.proposal_id?"READY":"WAITING"],
-    ["Review",status==="NOT_REQUESTED"?"WAITING":"DONE"],
-    ["Approval",status],
-    ["Command package",applied?lifecycle:state.supervised?"READY":"WAITING"]
-  ];
-  document.getElementById("review-workflow").innerHTML=steps.map((x,i)=>`<div class="step ${["DONE","APPROVED","READY"].some(v=>String(x[1]).includes(v))?"done":""}"><div class="step-num">${i+1}</div><div><strong>${x[0]}</strong></div><span class="badge ${badgeClass(x[1])}">${esc(x[1])}</span></div>`).join("");
-  document.getElementById("btn-request-review").disabled=autonomous||applied||!p.proposal_id || p.review_state!=="READY_FOR_HUMAN_REVIEW" || status!=="NOT_REQUESTED";
-  document.getElementById("btn-approve").disabled=autonomous||applied||status!=="PENDING_APPROVAL";
-  document.getElementById("btn-reject").disabled=autonomous||applied||status!=="PENDING_APPROVAL";
-  document.getElementById("btn-build-command").disabled=autonomous||applied||status!=="APPROVED";
+
+  const windowRoot=document.getElementById("policy-window-history");
+  if(windowRoot){
+    const windows=Array.isArray(consensus.recent_windows)?consensus.recent_windows:[];
+    windowRoot.innerHTML=windows.length?`<div class="label" style="margin-top:14px">Policy learning windows</div><div class="policy-window-list">${windows.map(w=>{const produced=w.produced_policy_epoch;return `<div class="policy-window-row ${w.current_window?"current":""}"><div><strong>Baseline Epoch ${esc(text(w.baseline_policy_epoch))}${produced?` → Epoch ${esc(text(produced))}`:""}</strong><div class="muted">${esc(text(w.observation_count,0))} accepted observation${Number(w.observation_count)===1?"":"s"}${w.applied_at?` · applied ${esc(new Date(w.applied_at).toLocaleString())}`:""}</div></div><span class="badge ${w.current_window?"info":produced?"ok":"warn"}">${w.current_window?"CURRENT":produced?"PRODUCED POLICY":"ARCHIVED"}</span></div>`}).join("")}</div>`:"";
+  }
+
+  const runsRoot=document.getElementById("gemini-run-history");
+  if(runsRoot){
+    const runs=Array.isArray(state.llmCycle?.run_history)?[...state.llmCycle.run_history].reverse():[];
+    runsRoot.innerHTML=runs.length?runs.map((run,i)=>{const changes=Object.keys(run.changes||{});const outcome=String(run.outcome||run.status||"UNKNOWN");const cls=outcome==="APPLIED"?"ok":outcome==="FAILED"||outcome==="REJECTED"?"bad":outcome==="DEFERRED"?"warn":"info";const obs=run.consensus_observation_recorded?`Observation ${text(run.consensus_observation_count_after_run,0)} / ${text(run.consensus_minimum_observations,3)}`:"No consensus observation";return `<div class="gemini-run-row" onclick="openGeminiRunInspector(${i})"><div class="gemini-run-head"><div><strong>Run #${esc(text(run.run_number))}</strong><div class="muted">Baseline Epoch ${esc(text(run.baseline_policy_epoch))} · ${esc((run.completed_at||"").replace("T"," ").slice(0,19))} · ${esc(pretty(run.trigger||"SCHEDULED"))}</div></div><span class="badge ${cls}">${esc(pretty(outcome))}</span></div><div class="gemini-run-meta"><span>${fmt(run.overall_confidence||0,0)}% confidence</span><span>${esc(obs)}</span><span>${changes.length?`${changes.length} proposed control${changes.length===1?"":"s"}`:"No material change"}</span>${run.critic_verdict?`<span>Critic ${esc(pretty(run.critic_verdict))}</span>`:""}</div></div>`}).join(""):`<div class="callout">Run-level lineage begins with Atlas 1.30.43. Earlier runs remain represented by accepted observations and applied-policy history where those records exist.</div>`;
+  }
+
+  const obsRoot=document.getElementById("policy-observation-list");const observations=state.policyObservations?.observations||[];if(obsRoot)obsRoot.innerHTML=observations.length?observations.map((o,i)=>{const ch=Object.entries(o.changes||{});return `<div class="observation-row" onclick="openObservationInspector(${i})"><div class="row"><div><strong>${esc(text(o.proposal_id,"Accepted Gemini observation"))}</strong><div class="muted">Baseline epoch ${esc(text(o.baseline_policy_epoch))} · ${esc((o.observed_at||"").replace("T"," ").slice(0,19))}</div></div><span class="badge info">${fmt(o.overall_confidence||0,0)}%</span></div><div class="observation-changes">${ch.length?ch.slice(0,5).map(([n,r])=>`<span class="observation-chip">${esc(pretty(n))}: ${esc(text(r.current))} → ${esc(text(r.proposed))}</span>`).join(""):`<span class="muted">Hold observation · no runtime mutation</span>`}</div></div>`}).join(""):`<div class="callout">No accepted Gemini observations have been recorded yet.</div>`;
+
+  const approval=state.review?.approval||p.approval||{};const status=approval.status||"NOT_REQUESTED";const applied=["APPLIED","AWAITING_NYAO_ACK"].includes(String(lifecycle));const autonomous=state.llmCycle?.execution_mode==="AUTONOMOUS";const steps=[["Proposal",p.proposal_id?"READY":"WAITING"],["Review",status==="NOT_REQUESTED"?"WAITING":"DONE"],["Approval",status],["Command package",applied?lifecycle:state.supervised?"READY":"WAITING"]];document.getElementById("review-workflow").innerHTML=steps.map((x,i)=>`<div class="step ${["DONE","APPROVED","READY"].some(v=>String(x[1]).includes(v))?"done":""}"><div class="step-num">${i+1}</div><div><strong>${x[0]}</strong></div><span class="badge ${badgeClass(x[1])}">${esc(x[1])}</span></div>`).join("");document.getElementById("btn-request-review").disabled=autonomous||applied||!p.proposal_id||p.review_state!=="READY_FOR_HUMAN_REVIEW"||status!=="NOT_REQUESTED";document.getElementById("btn-approve").disabled=autonomous||applied||status!=="PENDING_APPROVAL";document.getElementById("btn-reject").disabled=autonomous||applied||status!=="PENDING_APPROVAL";document.getElementById("btn-build-command").disabled=autonomous||applied||status!=="APPROVED";
 }
 
 function renderParameterIntelligence(){
@@ -4149,11 +4932,13 @@ async function loadLlmCycle(){
   const results=await Promise.allSettled([
     api("/api/v1/atlas/llm/cycle-schedule"),
     api("/api/v1/atlas/llm/status"),
-    api("/api/v1/atlas/autonomous-policy-consensus")
+    api("/api/v1/atlas/autonomous-policy-consensus"),
+    api("/api/v1/atlas/autonomous-policy-observations?limit=200")
   ]);
   if(results[0].status==="fulfilled")state.llmCycle=results[0].value;else console.warn("Gemini cycle refresh failed",results[0].reason);
   if(results[1].status==="fulfilled")state.llmStatus=results[1].value;else console.warn("Gemini status refresh failed",results[1].reason);
   if(results[2].status==="fulfilled")state.autoConsensus=results[2].value;else console.warn("Autonomous consensus refresh failed",results[2].reason);
+  if(results[3].status==="fulfilled")state.policyObservations=results[3].value;else console.warn("Policy observation refresh failed",results[3].reason);
 }
 async function loadResponsiveness(){
   try{state.responsiveness=await api("/api/v1/atlas/scalping-responsiveness")}catch(e){console.warn("Responsiveness refresh failed",e)}
@@ -4280,7 +5065,7 @@ function renderHistory(){
   document.getElementById("policy-epochs").innerHTML=(Array.isArray(eps)?eps.slice(-12).reverse():[]).map(e=>`<div class="event"><span class="muted">${esc(text(e.created_at||e.registered_at||""))}</span><div><strong>Epoch ${esc(text(e.policy_epoch??e.epoch))}</strong><div class="muted">Command ${esc(text(e.applied_command_version??e.command_version))}</div></div><span class="badge info">${esc(text(e.runtime_control_count??157))}</span></div>`).join("")||`<div class="callout">No policy epochs returned.</div>`;
   document.getElementById("raw-diagnostics").textContent=JSON.stringify({audit:state.audit,latest_execution:events[0]||null,command:{command_version:state.command?.command_version,policy_epoch:state.command?.policy_epoch},status:{applied_command_version:state.status?.applied_command_version,policy_epoch:state.status?.policy_epoch}},null,2)
 }
-function renderAll(){updateChrome();renderOverview();renderLiveAnalysis();renderAnalysis();renderPositions();renderLlmCycle();renderAutonomousConsensus();renderResponsiveness();renderAtlas();renderParameterIntelligence();renderControl();renderHistory();if(!document.getElementById("runtime-controls").children.length)renderControls()}
+function renderAll(){updateChrome();renderOverview();renderOpportunityQueue();renderDecisionTimeline();renderLiveAnalysis();renderAnalysis();renderPositions();renderLlmCycle();renderAutonomousConsensus();renderResponsiveness();renderAtlas();renderParameterIntelligence();renderControl();renderHistory();if(!document.getElementById("runtime-controls").children.length)renderControls()}
 
 async function loadCore(){
   const before=`${state.command?.command_version??""}:${state.command?.policy_epoch??""}:${state.status?.applied_command_version??""}:${state.status?.policy_epoch??""}`;
@@ -4340,18 +5125,20 @@ async function boot(){
     await loadHistory();
     renderAll();
     renderControls();
+    // Establish decision history baseline only after all authoritative state is loaded.
+    state.decisionBaseline=decisionSnapshot();
   }catch(e){toast(e.message,true)}
 
-  setInterval(async()=>{const changed=await loadCore();await loadArm();if(changed){await loadHistory();await loadProposal()}renderAll();evaluateNotifications()},2000);
+  setInterval(async()=>{const changed=await loadCore();await loadArm();if(changed){await loadHistory();await loadProposal()}renderAll();evaluateNotifications();evaluateDecisionTimeline()},2000);
   setInterval(async()=>{await loadIntelligence();renderAll()},5000);
-  setInterval(async()=>{await loadLlmCycle();renderAll()},5000);
+  setInterval(async()=>{await loadLlmCycle();renderAll();evaluateDecisionTimeline()},5000);
   setInterval(async()=>{await loadResponsiveness();renderAll()},15000);
   setInterval(async()=>{await loadMarketCandles();renderAll()},15000);
   setInterval(async()=>{await loadZoneMap();renderAll()},15000);
-  setInterval(async()=>{await loadZonePlan();renderAll()},5000);
+  setInterval(async()=>{await loadZonePlan();renderAll();evaluateDecisionTimeline()},5000);
   setInterval(async()=>{await loadParameterIntelligence();renderAll()},10000);
   setInterval(async()=>{await loadSymbols();await loadProposal();renderAll()},10000);
-  setInterval(async()=>{await loadHistory();renderAll()},15000);
+  setInterval(async()=>{await loadHistory();renderAll();evaluateDecisionTimeline()},15000);
   setInterval(()=>{if(state.zonePlan?.capital_sizing?.loss_protection?.state==="HARD_VETO"){const lp=state.zonePlan.capital_sizing.loss_protection;const loaded=Number(state.zonePlanLoadedAt||Date.now());lp.remaining_seconds=Math.max(0,Number(lp.remaining_seconds||0)-(Date.now()-loaded)/1000);state.zonePlanLoadedAt=Date.now();renderOverview();}},1000);
 }
 boot();

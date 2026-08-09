@@ -163,6 +163,7 @@ def _merge_trade_segments(
         "trades_on_entry_candle_before_this_entry",
         "total_trades_on_entry_candle_before_this_entry", "opened_at_epoch",
         "entry_price", "entry_signal_score", "chain_id", "initial_hedge_level",
+        "scalp_context_class", "scalp_context_zone_side", "scalp_context_pressure",
     ):
         if merged.get(key) in (None, "", 0, "UNKNOWN") and later.get(key) not in (None, ""):
             merged[key] = later.get(key)
@@ -454,6 +455,23 @@ def _attach_exit_deal(trade: dict[str, Any], deal: dict[str, Any]) -> None:
     trade["realized_commission"] = round(sum(_f(d.get("commission")) for d in rows), 2)
     trade["realized_fee"] = round(sum(_f(d.get("fee")) for d in rows), 2)
     trade["realized_net_pl"] = round(sum(_f(d.get("net_pl")) for d in rows), 2)
+    trade["closed_volume"] = round(sum(_f(d.get("volume")) for d in rows), 8)
+    trade["partial_exit_count"] = sum(
+        1 for d in rows if isinstance(d, dict) and not bool(d.get("full_close"))
+    )
+    trade["realized_pl_so_far_exact"] = True
+    trade["remaining_volume"] = _f(
+        (trade.get("latest_position") or {}).get("volume"),
+        max(0.0, _f(trade.get("initial_volume")) - _f(trade.get("closed_volume"))),
+    )
+    trade["floating_net_pl"] = _f(
+        (trade.get("latest_position") or {}).get("net_pl"),
+        _f(trade.get("last_observed_net_pl")),
+    )
+    trade["lifecycle_net_pl"] = round(
+        _f(trade.get("realized_net_pl")) + _f(trade.get("floating_net_pl")),
+        8,
+    )
 
     if bool(deal.get("full_close")):
         trade["final_exit_deal_ticket"] = deal_ticket
@@ -500,6 +518,35 @@ def _parse_zone_entry_comment(comment: Any) -> tuple[str, int]:
     return plan_id, layer
 
 
+def _parse_scalp_context_comment(comment: Any) -> tuple[str, str, float]:
+    text = str(comment or "").strip()
+    parts = text.split("|")
+
+    if len(parts) < 11 or not parts or parts[0] != "N":
+        return "NEUTRAL_SCALP", "NONE", 0.0
+
+    context_class = {
+        "A": "ZONE_ALIGNED_SCALP",
+        "C": "COUNTER_ZONE_SCALP",
+        "N": "NEUTRAL_SCALP",
+    }.get(parts[8].strip().upper(), "NEUTRAL_SCALP")
+
+    zone_side = {
+        "B": "BUY",
+        "S": "SELL",
+    }.get(parts[9].strip().upper(), "NONE")
+
+    try:
+        pressure = max(
+            0.0,
+            min(1.0, float(parts[10]) / 100.0),
+        )
+    except (TypeError, ValueError):
+        pressure = 0.0
+
+    return context_class, zone_side, pressure
+
+
 def _position_type_from_exit_deal(deal: dict[str, Any]) -> str:
     explicit = str(deal.get("original_position_type") or "").strip().upper()
     if explicit in {"BUY", "SELL"}:
@@ -537,6 +584,10 @@ def _reconstruct_closed_trade_from_exit_deal(
     captured = _iso_now()
     context = _context_snapshot(status, intelligence)
 
+    scalp_context_class, scalp_context_zone_side, scalp_context_pressure = (
+        _parse_scalp_context_comment(deal.get("entry_comment"))
+    )
+
     initial_position = {
         "ticket": position_id,
         "type": side,
@@ -546,6 +597,9 @@ def _reconstruct_closed_trade_from_exit_deal(
         "entry_policy_epoch": entry_policy_epoch,
         "order_origin": entry_order_origin,
         "entry_comment": deal.get("entry_comment"),
+        "scalp_context_class": scalp_context_class,
+        "scalp_context_zone_side": scalp_context_zone_side,
+        "scalp_context_pressure": scalp_context_pressure,
         "chain_id": entry_chain_id,
         "hedge_level": entry_hedge_level,
         "zone_plan_id": zone_plan_id,
@@ -565,6 +619,9 @@ def _reconstruct_closed_trade_from_exit_deal(
         "entry_evaluation_event": "UNKNOWN_RECONSTRUCTED",
         "entry_was_new_bar": False,
         "entry_policy_epoch": entry_policy_epoch,
+        "scalp_context_class": scalp_context_class,
+        "scalp_context_zone_side": scalp_context_zone_side,
+        "scalp_context_pressure": scalp_context_pressure,
         "trades_on_entry_candle_before_this_entry": -1,
         "total_trades_on_entry_candle_before_this_entry": -1,
         "lifecycle_state": "CLOSED_OR_DISAPPEARED",
@@ -911,6 +968,15 @@ def _new_trade(
             "entry_was_new_bar"
         ),
         "entry_policy_epoch": _i(position.get("entry_policy_epoch")),
+        "scalp_context_class": str(
+            position.get("scalp_context_class") or "NEUTRAL_SCALP"
+        ),
+        "scalp_context_zone_side": str(
+            position.get("scalp_context_zone_side") or "NONE"
+        ),
+        "scalp_context_pressure": _f(
+            position.get("scalp_context_pressure")
+        ),
         "zone_plan_id": str(position.get("zone_plan_id") or ""),
         "zone_layer": _i(position.get("zone_layer")),
         "trades_on_entry_candle_before_this_entry": position.get(
@@ -929,6 +995,17 @@ def _new_trade(
         "latest_position": dict(position),
         "entry_price": position.get("entry_price"),
         "initial_volume": position.get("volume"),
+        "remaining_volume": _f(position.get("volume")),
+        "closed_volume": 0.0,
+        "partial_exit_count": 0,
+        "realized_profit": 0.0,
+        "realized_swap": 0.0,
+        "realized_commission": 0.0,
+        "realized_fee": 0.0,
+        "realized_net_pl": 0.0,
+        "floating_net_pl": net_pl,
+        "lifecycle_net_pl": net_pl,
+        "realized_pl_so_far_exact": False,
         "maximum_volume_observed": _f(
             position.get("volume")
         ),
@@ -995,6 +1072,26 @@ def _update_trade(
         trade["entry_policy_epoch"] = _i(position.get("entry_policy_epoch"))
     trade["last_observed_net_pl"] = net_pl
     trade["last_observed_distance_points"] = distance
+    trade["remaining_volume"] = volume
+    trade["floating_net_pl"] = net_pl
+    trade["closed_volume"] = round(
+        sum(
+            _f(d.get("volume"))
+            for d in (trade.get("exit_deals") or [])
+            if isinstance(d, dict)
+        ),
+        8,
+    )
+    trade["partial_exit_count"] = sum(
+        1
+        for d in (trade.get("exit_deals") or [])
+        if isinstance(d, dict) and not bool(d.get("full_close"))
+    )
+    trade["lifecycle_net_pl"] = round(
+        _f(trade.get("realized_net_pl")) + net_pl,
+        8,
+    )
+    trade["realized_pl_so_far_exact"] = bool(trade.get("exit_deals"))
     trade["observation_count"] = (
         _i(trade.get("observation_count")) + 1
     )

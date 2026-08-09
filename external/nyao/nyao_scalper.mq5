@@ -4,7 +4,7 @@
 // | © Copyright Nyao Scalper by Elriz Wiraswara                      |
 // +------------------------------------------------------------------+
 #property copyright "© Copyright Nyao Scalper by Elriz Wiraswara"
-#property version "44.4"
+#property version "44.5.3"
 #property description "Auto Trading EA Robot with Comprehensive Features"
 #property description ""
 #property description "This is an open-source project for educational and experimental purposes only"
@@ -497,6 +497,9 @@ bool atlasZoneModeActive = false;
 bool atlasZoneExecutionRequested = false;
 bool atlasZoneEntryAllowed = false;
 bool atlasZoneScalpSuspended = false;
+bool atlasZoneAwareScalpingActive = false;
+bool atlasSourceZoneInvalidated = false;
+string atlasSourceZoneInvalidationReason = "";
 bool atlasZoneDirectiveFresh = false;
 string atlasZoneDirectiveState = "NOT_LOADED";
 string atlasZonePlanId = "";
@@ -1656,6 +1659,9 @@ void ReadAtlasZoneDirective()
     {
         atlasZoneDirectiveFresh = false;
         atlasZoneModeActive = false;
+        atlasZoneAwareScalpingActive = false;
+        atlasSourceZoneInvalidated = false;
+        atlasSourceZoneInvalidationReason = "";
         atlasZoneEntryCount = 0;
         atlasZoneEntryAllowed = false;
         if(wasZoneMode || wasScalpSuspended)
@@ -1671,6 +1677,9 @@ void ReadAtlasZoneDirective()
     {
         atlasZoneDirectiveFresh = false;
         atlasZoneModeActive = false;
+        atlasZoneAwareScalpingActive = false;
+        atlasSourceZoneInvalidated = false;
+        atlasSourceZoneInvalidationReason = "";
         atlasZoneEntryCount = 0;
         atlasZoneEntryAllowed = false;
         if(wasZoneMode || wasScalpSuspended) atlasZoneScalpSuspended = true;
@@ -1685,6 +1694,7 @@ void ReadAtlasZoneDirective()
     bool symbolMatches = (directiveSymbol == _Symbol);
     bool requested = JsonReadBool(json, "execution_requested", false);
     bool suspendScalping = JsonReadBool(json, "suspend_ordinary_scalp_entries", false);
+    bool directiveZoneAware = JsonReadBool(json, "zone_aware_scalping_active", false);
     string mode = JsonReadString(json, "mode", "SCALP_MODE");
 
     atlasZoneDirectiveFresh = fresh && symbolMatches;
@@ -1710,6 +1720,13 @@ void ReadAtlasZoneDirective()
     atlasZoneMaxSpreadTargetRatio = JsonReadDouble(json, "zone_max_spread_target_ratio", 0.15);
     atlasZoneVirtualLayerActivationAtrRatio = JsonReadDouble(json, "zone_virtual_layer_activation_atr_ratio", 0.25);
     atlasZoneVirtualLayerExecution = JsonReadBool(json, "zone_virtual_layer_execution", true);
+    atlasSourceZoneInvalidated = JsonReadBool(json, "source_zone_invalidated", false);
+    atlasSourceZoneInvalidationReason = JsonReadString(json, "source_zone_invalidation_reason", "");
+    if(atlasSourceZoneInvalidated)
+    {
+        atlasZoneEntryAllowed = false;
+        atlasZoneVirtualLayerExecution = false;
+    }
     atlasCapitalSizingActive = JsonReadBool(json, "capital_sizing_active", false);
     atlasCapitalVetoNewRisk = JsonReadBool(json, "capital_veto_new_risk", false);
     atlasCapitalSizingVersion = JsonReadString(json, "capital_sizing_version", "");
@@ -1741,6 +1758,7 @@ void ReadAtlasZoneDirective()
     if(!atlasZoneDirectiveFresh)
     {
         atlasZoneModeActive = false;
+        atlasZoneAwareScalpingActive = false;
         if(atlasCapitalSizingActive)
         {
             atlasCapitalVetoNewRisk = true;
@@ -1753,7 +1771,25 @@ void ReadAtlasZoneDirective()
     }
     else
     {
+        bool zoneAwareState = (
+            directiveZoneAware &&
+            (
+                atlasZoneDirectiveState == "ZONE_AWARE_SCALP" ||
+                atlasZoneDirectiveState == "ZONE_CAPITAL_INFEASIBLE"
+            ) &&
+            !requested &&
+            !atlasZoneEntryAllowed
+        );
+
+        // Authority invariant:
+        // while Atlas is WATCHING a zone, Nyao owns fresh scalp execution.
+        // A fresh zone-aware directive therefore cannot also suspend scalping.
+        if(zoneAwareState)
+            suspendScalping = false;
+
+        atlasZoneAwareScalpingActive = zoneAwareState && !suspendScalping;
         atlasZoneScalpSuspended = suspendScalping;
+
         atlasZoneModeActive = (
             EnableAtlasZoneExecution &&
             requested &&
@@ -1761,7 +1797,10 @@ void ReadAtlasZoneDirective()
             mode == "ZONE_MODE" &&
             atlasZonePlanId != ""
         );
-        if(!EnableAtlasZoneExecution && requested)
+
+        if(atlasZoneAwareScalpingActive)
+            atlasZoneLastExecutionReason = "ZONE_AWARE_SCALP_ACTIVE";
+        else if(!EnableAtlasZoneExecution && requested)
             atlasZoneLastExecutionReason = "LOCAL_ZONE_EXECUTION_DISABLED";
     }
 
@@ -2659,6 +2698,102 @@ int AtlasTotalTradesBefore()
     return buysOnCurrentBar + sellsOnCurrentBar;
 }
 
+bool AtlasZoneAwareScalpContextActive()
+{
+    return (
+        atlasZoneDirectiveFresh &&
+        !atlasZoneScalpSuspended &&
+        (
+            atlasZoneDirectiveState == "ZONE_AWARE_SCALP" ||
+            atlasZoneDirectiveState == "ZONE_CAPITAL_INFEASIBLE"
+        ) &&
+        (atlasZoneSide == "BUY" || atlasZoneSide == "SELL")
+    );
+}
+
+double AtlasZoneCommitPressure()
+{
+    if(!AtlasZoneAwareScalpContextActive()) return 0.0;
+    double confirmationRatio = 0.0;
+    double directionalRatio = 0.0;
+
+    if(atlasZoneConfirmationThreshold > 0.0)
+        confirmationRatio = atlasZoneConfirmationScore / atlasZoneConfirmationThreshold;
+    if(atlasZoneMinimumDirectionalScore > 0.0)
+        directionalRatio = atlasZoneDirectionalScore / atlasZoneMinimumDirectionalScore;
+
+    return MathMax(0.0, MathMin(1.0, MathMax(confirmationRatio, directionalRatio)));
+}
+
+string AtlasScalpContextClass(ENUM_ORDER_TYPE orderType)
+{
+    if(!AtlasZoneAwareScalpContextActive())
+        return "NEUTRAL_SCALP";
+
+    string direction = (orderType == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+    return (direction == atlasZoneSide) ? "ZONE_ALIGNED_SCALP" : "COUNTER_ZONE_SCALP";
+}
+
+double AtlasCounterZoneThresholdBoost()
+{
+    // Counter-zone trades must materially exceed the ordinary runtime threshold.
+    // The requirement tightens as the higher-timeframe campaign approaches commit.
+    double pressure = AtlasZoneCommitPressure();
+    return 0.75 + (1.25 * pressure);
+}
+
+double AtlasCounterZoneRiskMultiplier()
+{
+    // Counter-zone trades receive 40-65% of normal approved scalp risk.
+    // Risk declines as the zone campaign approaches commitment.
+    double pressure = AtlasZoneCommitPressure();
+    return MathMax(0.40, MathMin(0.65, 0.65 - (0.25 * pressure)));
+}
+
+bool AtlasCounterZoneCommitProximityBlock()
+{
+    // Preserve the higher-priority campaign once it is close to commitment
+    // and its own execution economics are feasible.
+    return (
+        AtlasZoneAwareScalpContextActive() &&
+        AtlasZoneCommitPressure() >= 0.85 &&
+        atlasZoneSpreadWithinLimit
+    );
+}
+
+string AtlasScalpContextCode(string contextClass)
+{
+    if(contextClass == "ZONE_ALIGNED_SCALP") return "A";
+    if(contextClass == "COUNTER_ZONE_SCALP") return "C";
+    return "N";
+}
+
+bool AtlasParseScalpContextComment(
+    string comment,
+    string &contextClass,
+    string &contextZoneSide,
+    double &contextPressure
+)
+{
+    contextClass = "NEUTRAL_SCALP";
+    contextZoneSide = "NONE";
+    contextPressure = 0.0;
+
+    string parts[];
+    ushort sep = (ushort)StringGetCharacter("|", 0);
+    int count = StringSplit(comment, sep, parts);
+    if(count < 11 || parts[0] != "N") return false;
+
+    if(parts[8] == "A") contextClass = "ZONE_ALIGNED_SCALP";
+    else if(parts[8] == "C") contextClass = "COUNTER_ZONE_SCALP";
+
+    if(parts[9] == "B") contextZoneSide = "BUY";
+    else if(parts[9] == "S") contextZoneSide = "SELL";
+
+    contextPressure = MathMax(0.0, MathMin(1.0, StringToDouble(parts[10]) / 100.0));
+    return true;
+}
+
 // Compact comment format:
 // N|<origin>|<gate>|<event>|<same>|<total>|<score>
 string AtlasBuildEntryComment(
@@ -2668,18 +2803,36 @@ string AtlasBuildEntryComment(
     int sameDirBefore,
     int totalBefore,
     double signalScore,
-    int policyEpoch = -1
+    int policyEpoch = -1,
+    string scalpContextClass = "NEUTRAL_SCALP",
+    string scalpContextZoneSide = "NONE",
+    double scalpContextPressure = 0.0
 )
 {
     int effectivePolicyEpoch = (policyEpoch >= 0) ? policyEpoch : atlasPolicyEpoch;
-    return "N|" +
-           AtlasOriginCode(origin) + "|" +
-           AtlasGateCode(gateMode) + "|" +
-           AtlasEventCode(eventName) + "|" +
-           IntegerToString(sameDirBefore) + "|" +
-           IntegerToString(totalBefore) + "|" +
-           IntegerToString(effectivePolicyEpoch) + "|" +
-           DoubleToString(signalScore, 2);
+
+    string comment =
+        "N|" +
+        AtlasOriginCode(origin) + "|" +
+        AtlasGateCode(gateMode) + "|" +
+        AtlasEventCode(eventName) + "|" +
+        IntegerToString(sameDirBefore) + "|" +
+        IntegerToString(totalBefore) + "|" +
+        IntegerToString(effectivePolicyEpoch) + "|" +
+        DoubleToString(signalScore, 2);
+
+    int pressurePct = (int)MathRound(
+        MathMax(0.0, MathMin(1.0, scalpContextPressure)) * 100.0
+    );
+
+    comment += "|" + AtlasScalpContextCode(scalpContextClass) + "|";
+
+    if(scalpContextZoneSide == "BUY") comment += "B";
+    else if(scalpContextZoneSide == "SELL") comment += "S";
+    else comment += "N";
+
+    comment += "|" + IntegerToString(pressurePct);
+    return comment;
 }
 
 bool AtlasParseEntryComment(
@@ -3148,10 +3301,25 @@ void WriteAtlasStatus()
                 managedPositions[managedIndex].identityRestoredFromRegistry;
         }
 
+        string scalpContextClass = "NEUTRAL_SCALP";
+        string scalpContextZoneSide = "NONE";
+        double scalpContextPressure = 0.0;
+
+        AtlasParseScalpContextComment(
+            PositionGetString(POSITION_COMMENT),
+            scalpContextClass,
+            scalpContextZoneSide,
+            scalpContextPressure
+        );
+
         string zonePlanToken = "";
         int zoneLayer = 0;
         if(orderOrigin == "ATLAS_ZONE")
-            AtlasParseZoneLineageComment(PositionGetString(POSITION_COMMENT), zonePlanToken, zoneLayer);
+            AtlasParseZoneLineageComment(
+                PositionGetString(POSITION_COMMENT),
+                zonePlanToken,
+                zoneLayer
+            );
 
         if(chainId != 0)
         {
@@ -3221,6 +3389,9 @@ void WriteAtlasStatus()
         positionsJson += "\"trades_on_entry_candle_before_this_entry\":" + IntegerToString(entrySameDirTradesBefore) + ",";
         positionsJson += "\"total_trades_on_entry_candle_before_this_entry\":" + IntegerToString(entryTotalTradesBefore) + ",";
         positionsJson += "\"entry_policy_epoch\":" + IntegerToString(entryPolicyEpoch) + ",";
+        positionsJson += "\"scalp_context_class\":\"" + AtlasJsonEscape(scalpContextClass) + "\",";
+        positionsJson += "\"scalp_context_zone_side\":\"" + AtlasJsonEscape(scalpContextZoneSide) + "\",";
+        positionsJson += "\"scalp_context_pressure\":" + DoubleToString(scalpContextPressure, 4) + ",";
         positionsJson += "\"zone_plan_id\":\"" + AtlasJsonEscape(zonePlanToken) + "\",";
         positionsJson += "\"zone_layer\":" + IntegerToString(zoneLayer) + ",";
         positionsJson += "\"identity_restored_from_registry\":" + (identityRestoredFromRegistry ? "true" : "false") + ",";
@@ -3542,6 +3713,9 @@ void WriteAtlasStatus()
     json += "\"zone_directive_fresh\":" + (atlasZoneDirectiveFresh ? "true" : "false") + ",";
     json += "\"zone_mode_active\":" + (atlasZoneModeActive ? "true" : "false") + ",";
     json += "\"zone_scalp_suspended\":" + (atlasZoneScalpSuspended ? "true" : "false") + ",";
+    json += "\"zone_aware_scalping_active\":" + (atlasZoneAwareScalpingActive ? "true" : "false") + ",";
+    json += "\"source_zone_invalidated\":" + (atlasSourceZoneInvalidated ? "true" : "false") + ",";
+    json += "\"source_zone_invalidation_reason\":\"" + AtlasJsonEscape(atlasSourceZoneInvalidationReason) + "\",";
     json += "\"zone_directive_state\":\"" + AtlasJsonEscape(atlasZoneDirectiveState) + "\",";
     json += "\"zone_plan_id\":\"" + AtlasJsonEscape(atlasZonePlanId) + "\",";
     json += "\"zone_map_id\":\"" + AtlasJsonEscape(atlasZoneMapId) + "\",";
@@ -5224,40 +5398,69 @@ void CheckForTradingSignal()
     double buySignal = BuySignal();
     double sellSignal = SellSignal();
 
-    // Atlas zone-aware scalp coexistence.
+    // Context-aware scalp coexistence.
     //
-    // When Atlas has identified a valid zone but the full zone campaign is
-    // broker/capital infeasible, Atlas may deliberately release ordinary
-    // scalping instead of leaving the symbol idle. The zone direction remains
-    // authoritative context: while this fallback is active, Nyao only permits
-    // scalps aligned with the source zone.
-    //
-    // SUPPLY -> SELL scalps only
-    // DEMAND -> BUY scalps only
-    //
-    // We do NOT lower the normal scalp score threshold and we do NOT bypass
-    // spread, capital, duplicate-distance, cooldown, margin, or other gates.
-    bool zoneAwareScalpFallback = (
-        atlasZoneDirectiveFresh &&
-        !atlasZoneScalpSuspended &&
-        (
-            atlasZoneDirectiveState == "ZONE_AWARE_SCALP" ||
-            atlasZoneDirectiveState == "ZONE_CAPITAL_INFEASIBLE"
-        ) &&
-        (atlasZoneSide == "BUY" || atlasZoneSide == "SELL")
-    );
+    // Aligned scalps keep their normal signal threshold. Counter-zone scalps
+    // remain possible, but only with stronger evidence and reduced risk.
+    // They are disabled completely as the higher-timeframe campaign approaches
+    // a feasible commit boundary.
+    bool zoneAwareScalpFallback = AtlasZoneAwareScalpContextActive();
 
     if(zoneAwareScalpFallback)
     {
-        if(atlasZoneSide == "SELL")
+        double counterBoost = AtlasCounterZoneThresholdBoost();
+
+        if(atlasZoneSide == "SELL" && buySignal > 0.0)
         {
-            buySignal = 0.0;
-            AtlasSetDecisionReason(POSITION_TYPE_BUY, "ZONE_CONTEXT_COUNTER_DIRECTION");
+            if(AtlasCounterZoneCommitProximityBlock())
+            {
+                buySignal = 0.0;
+                AtlasSetDecisionReason(
+                    POSITION_TYPE_BUY,
+                    "COUNTER_ZONE_COMMIT_PROXIMITY"
+                );
+            }
+            else if(buySignal < atlasBuyEffectiveThreshold + counterBoost)
+            {
+                buySignal = 0.0;
+                AtlasSetDecisionReason(
+                    POSITION_TYPE_BUY,
+                    "COUNTER_ZONE_EVIDENCE_INSUFFICIENT"
+                );
+            }
+            else
+            {
+                AtlasSetDecisionReason(
+                    POSITION_TYPE_BUY,
+                    "COUNTER_ZONE_SIGNAL_READY"
+                );
+            }
         }
-        else if(atlasZoneSide == "BUY")
+        else if(atlasZoneSide == "BUY" && sellSignal > 0.0)
         {
-            sellSignal = 0.0;
-            AtlasSetDecisionReason(POSITION_TYPE_SELL, "ZONE_CONTEXT_COUNTER_DIRECTION");
+            if(AtlasCounterZoneCommitProximityBlock())
+            {
+                sellSignal = 0.0;
+                AtlasSetDecisionReason(
+                    POSITION_TYPE_SELL,
+                    "COUNTER_ZONE_COMMIT_PROXIMITY"
+                );
+            }
+            else if(sellSignal < atlasSellEffectiveThreshold + counterBoost)
+            {
+                sellSignal = 0.0;
+                AtlasSetDecisionReason(
+                    POSITION_TYPE_SELL,
+                    "COUNTER_ZONE_EVIDENCE_INSUFFICIENT"
+                );
+            }
+            else
+            {
+                AtlasSetDecisionReason(
+                    POSITION_TYPE_SELL,
+                    "COUNTER_ZONE_SIGNAL_READY"
+                );
+            }
         }
     }
 
@@ -7686,6 +7889,28 @@ void OpenPosition(
     int entryTotalTradesBefore = AtlasTotalTradesBefore();
     int entryPolicyEpoch = (sourcePolicyEpoch >= 0) ? sourcePolicyEpoch : atlasPolicyEpoch;
 
+    string scalpContextClass = AtlasScalpContextClass(orderType);
+    string scalpContextZoneSide =
+        AtlasZoneAwareScalpContextActive() ? atlasZoneSide : "NONE";
+    double scalpContextPressure = AtlasZoneCommitPressure();
+
+    double scalpContextRiskMultiplier =
+        (scalpContextClass == "COUNTER_ZONE_SCALP")
+        ? AtlasCounterZoneRiskMultiplier()
+        : 1.0;
+
+    if(
+        scalpContextClass == "COUNTER_ZONE_SCALP" &&
+        AtlasCounterZoneCommitProximityBlock()
+    )
+    {
+        AtlasSetDecisionReason(
+            atlasDir,
+            "COUNTER_ZONE_COMMIT_PROXIMITY"
+        );
+        return;
+    }
+
     // P3.29: generic account/safety gates run first, but ordinary scalp spread
     // economics are evaluated only after the final executable SL/TP geometry
     // exists.  This avoids rejecting trades using an ATR-only proxy.
@@ -7772,7 +7997,7 @@ void OpenPosition(
         return;
     }
 
-    double currentLot = CalculateDynamicLotSize(signalScore, orderType, price, stopPrice);
+    double currentLot = CalculateDynamicLotSize(signalScore, orderType, price, stopPrice, scalpContextRiskMultiplier);
     if(currentLot <= 0)
     {
         // This is the economically meaningful BTC failure mode: the widened
@@ -7820,7 +8045,7 @@ void OpenPosition(
         return;
     }
 
-    currentLot = CalculateDynamicLotSize(signalScore, orderType, price, stopPrice);
+    currentLot = CalculateDynamicLotSize(signalScore, orderType, price, stopPrice, scalpContextRiskMultiplier);
     if(currentLot <= 0)
     {
         AtlasSetDecisionReason(atlasDir, costAdjusted ? "SCALP_COST_RISK_BUDGET_INFEASIBLE" : "ATLAS_CAPITAL_RISK_VETO");
@@ -7866,7 +8091,11 @@ void OpenPosition(
     request.comment = AtlasBuildEntryComment(
         orderOrigin, entryGateMode, entryEvaluationEvent,
         entrySameDirTradesBefore, entryTotalTradesBefore,
-        signalScore, entryPolicyEpoch
+        signalScore,
+        entryPolicyEpoch,
+        scalpContextClass,
+        scalpContextZoneSide,
+        scalpContextPressure
     );
     request.type_filling = GetFillingMode();
     request.sl = stopPrice;
@@ -8905,7 +9134,35 @@ void PlaceLimitEntry(ENUM_ORDER_TYPE dir, double signalScore)
         stopPrice = (dir == ORDER_TYPE_BUY)
             ? NormalizeDouble(entry - slPts * _Point, _Digits)
             : NormalizeDouble(entry + slPts * _Point, _Digits);
-    double currentLot = CalculateDynamicLotSize(signalScore, dir, entry, stopPrice);
+    string limitScalpContextClass = AtlasScalpContextClass(dir);
+    string limitScalpContextZoneSide =
+        AtlasZoneAwareScalpContextActive() ? atlasZoneSide : "NONE";
+    double limitScalpContextPressure = AtlasZoneCommitPressure();
+
+    double limitScalpContextRiskMultiplier =
+        (limitScalpContextClass == "COUNTER_ZONE_SCALP")
+        ? AtlasCounterZoneRiskMultiplier()
+        : 1.0;
+
+    if(
+        limitScalpContextClass == "COUNTER_ZONE_SCALP" &&
+        AtlasCounterZoneCommitProximityBlock()
+    )
+    {
+        AtlasSetDecisionReason(
+            atlasDir,
+            "COUNTER_ZONE_COMMIT_PROXIMITY"
+        );
+        return;
+    }
+
+    double currentLot = CalculateDynamicLotSize(
+        signalScore,
+        dir,
+        entry,
+        stopPrice,
+        limitScalpContextRiskMultiplier
+    );
     if(currentLot <= 0)
     {
         AtlasSetDecisionReason(atlasDir, "ATLAS_CAPITAL_RISK_VETO");
@@ -8935,7 +9192,11 @@ void PlaceLimitEntry(ENUM_ORDER_TYPE dir, double signalScore)
         limitEvaluationEvent,
         limitSameDirBefore,
         limitTotalBefore,
-        signalScore
+        signalScore,
+        atlasPolicyEpoch,
+        limitScalpContextClass,
+        limitScalpContextZoneSide,
+        limitScalpContextPressure
     );
     request.price = entry;
 
@@ -9425,6 +9686,11 @@ void ExecuteAtlasZonePlan()
     {
         atlasSellAdjustedScore = signalScore;
         atlasSellEffectiveThreshold = atlasZoneMinimumDirectionalScore;
+    }
+    if(atlasSourceZoneInvalidated)
+    {
+        atlasZoneLastExecutionReason = "ZONE_INVALIDATED_MANAGEMENT_ONLY";
+        return;
     }
     if(!atlasZoneEntryAllowed)
     {
@@ -10076,7 +10342,8 @@ double CalculateDynamicLotSize(
     double signalScore,
     ENUM_ORDER_TYPE direction,
     double entryPrice,
-    double stopPrice
+    double stopPrice,
+    double contextRiskMultiplier = 1.0
 )
 {
     double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -10103,8 +10370,15 @@ double CalculateDynamicLotSize(
         double confidenceMargin = signalScore - threshold;
         double confidenceMultiplier = confidenceMargin >= 1.5 ? 1.0
             : (confidenceMargin >= 0.5 ? 0.80 : 0.65);
-        double approvedRiskPct = atlasApprovedScalpRiskPct * confidenceMultiplier;
-        double moneyRisk = AccountInfoDouble(ACCOUNT_EQUITY) * approvedRiskPct / 100.0;
+        double approvedRiskPct =
+            atlasApprovedScalpRiskPct *
+            confidenceMultiplier *
+            MathMax(0.0, MathMin(1.0, contextRiskMultiplier));
+
+        double moneyRisk =
+            AccountInfoDouble(ACCOUNT_EQUITY) *
+            approvedRiskPct /
+            100.0;
         currentLot = moneyRisk / lossPerLot;
     }
     else if(atlasRuntime.enableDynamicLots)

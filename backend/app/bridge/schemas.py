@@ -244,6 +244,9 @@ class PositionTelemetry(BaseModel):
     trades_on_entry_candle_before_this_entry: int = -1
     total_trades_on_entry_candle_before_this_entry: int = -1
     entry_policy_epoch: int = 0
+    scalp_context_class: str = "NEUTRAL_SCALP"
+    scalp_context_zone_side: str = "NONE"
+    scalp_context_pressure: float = 0.0
     zone_plan_id: str = ""
     zone_layer: int = 0
     identity_restored_from_registry: bool = False
@@ -508,6 +511,9 @@ class Status(BaseModel):
     zone_directive_fresh: bool = False
     zone_mode_active: bool = False
     zone_scalp_suspended: bool = False
+    zone_aware_scalping_active: bool = False
+    source_zone_invalidated: bool = False
+    source_zone_invalidation_reason: str = ""
     zone_directive_state: str = "NOT_SUPPORTED"
     zone_plan_id: str = ""
     zone_map_id: str = ""

@@ -50,6 +50,28 @@ def _zone_price(
     return quotes["closed_m30_reference"], "LATEST_CLOSED_M30_FALLBACK"
 
 
+def _active_zone_campaign_plan_ids(status: dict[str, Any]) -> set[str]:
+    """Return plan IDs backed by actual live ATLAS_ZONE positions.
+
+    Merely loading/acknowledging a prospective zone directive is not campaign
+    exposure. This distinction prevents unrelated scalp/recovery positions from
+    freezing a zone plan as an active campaign.
+    """
+    plan_ids: set[str] = set()
+    positions = status.get("positions") or []
+    if not isinstance(positions, list):
+        return plan_ids
+
+    for position in positions:
+        if not isinstance(position, dict):
+            continue
+        origin = str(position.get("order_origin") or "").strip().upper()
+        plan_id = str(position.get("zone_plan_id") or "").strip()
+        if origin == "ATLAS_ZONE" and plan_id:
+            plan_ids.add(plan_id)
+    return plan_ids
+
+
 def _distance(price: float, zone: dict[str, Any]) -> float:
     low, high = float(zone["low"]), float(zone["high"])
     if price < low:
@@ -1086,6 +1108,8 @@ def build_zone_execution_plan(
         "execution_authority_active": bool(status.get("zone_mode_active")),
         "nyao_mutation": False,
         "capital_sizing": capital_sizing,
+        "invalidated_zones": list(zone_map.get("invalidated_zones") or []),
+        "invalidated_zone_count": int(zone_map.get("invalidated_zone_count") or 0),
     }
     quotes = _quotes(status, zone_map)
     base.update({
@@ -1161,18 +1185,14 @@ def build_zone_execution_plan(
         capital_sizing=capital_sizing,
     )
     confirmation = plan["confirmation"]
-    existing_exposure = int(status.get("strategy_open_positions") or 0) > 0
-    existing_zone_plan_id = str(status.get("zone_plan_id") or "").strip()
+    active_campaign_plan_ids = _active_zone_campaign_plan_ids(status)
+    current_plan_id = str(plan.get("plan_id") or "").strip()
     continuing_same_campaign = bool(
-        existing_exposure
-        and status.get("zone_mode_active")
-        and existing_zone_plan_id == plan.get("plan_id")
+        current_plan_id and current_plan_id in active_campaign_plan_ids
     )
     conflicting_zone_campaign = bool(
-        existing_exposure
-        and status.get("zone_mode_active")
-        and existing_zone_plan_id
-        and existing_zone_plan_id != plan.get("plan_id")
+        active_campaign_plan_ids
+        and current_plan_id not in active_campaign_plan_ids
     )
     capital_plan = capital_sizing or {}
     zone_capacity_available = bool(
@@ -1404,6 +1424,10 @@ def flatten_zone_execution_directive(plan: dict[str, Any]) -> dict[str, Any]:
         "source_zone_kind": source_zone.get("kind") or "",
         "source_zone_low": source_zone.get("low") or 0.0,
         "source_zone_high": source_zone.get("high") or 0.0,
+        "source_zone_invalidated": bool(plan.get("source_zone_invalidated", False)),
+        "source_zone_invalidation_reason": plan.get("source_zone_invalidation_reason") or "",
+        "source_zone_invalidated_at_epoch": plan.get("source_zone_invalidated_at_epoch") or 0,
+        "source_zone_invalidating_close": plan.get("source_zone_invalidating_close") or 0.0,
         "stop_loss": zone_plan.get("stop_loss") or 0.0,
         "account_risk_pct": (
             (zone_plan.get("risk") or {}).get("account_risk_pct") or 0.0
@@ -1468,29 +1492,33 @@ def persist_zone_execution_directive(
         pass
 
     now_epoch = int(time.time())
-    exposure_active = bool(
-        int(status_data.get("strategy_open_positions") or 0) > 0
-        or int(status_data.get("working_limit_orders") or 0) > 0
-    )
-    acknowledged_plan_id = str(status_data.get("zone_plan_id") or "")
-    existing_plan_id = str(existing.get("plan_id") or "")
+    active_campaign_plan_ids = _active_zone_campaign_plan_ids(status_data)
+    existing_plan_id = str(existing.get("plan_id") or "").strip()
     active_acknowledged_campaign = bool(
-        exposure_active
-        and acknowledged_plan_id
-        and acknowledged_plan_id == existing_plan_id
+        existing_plan_id and existing_plan_id in active_campaign_plan_ids
     )
     last_exposure_epoch = int(existing.get("campaign_last_exposure_epoch") or 0)
+    previously_confirmed_exposure = bool(
+        existing.get("campaign_exposure_confirmed", False)
+    )
     reattach_grace_active = bool(
         existing.get("campaign_locked")
+        and previously_confirmed_exposure
         and existing_plan_id
         and last_exposure_epoch > 0
         and now_epoch - last_exposure_epoch <= CAMPAIGN_REATTACH_GRACE_SECONDS
-        and (
-            not exposure_active
-            or not acknowledged_plan_id
-        )
+        and not active_acknowledged_campaign
     )
     lock_existing = active_acknowledged_campaign or reattach_grace_active
+
+    invalidated_by_id = {
+        str(zone.get("zone_id") or ""): zone
+        for zone in (plan.get("invalidated_zones") or [])
+        if isinstance(zone, dict)
+    }
+    existing_source_zone_id = str(existing.get("source_zone_id") or "").strip()
+    source_invalidation = invalidated_by_id.get(existing_source_zone_id)
+
     if lock_existing:
         execution_defaults = flatten_zone_execution_directive(plan)
         lock_reason = (
@@ -1511,6 +1539,7 @@ def persist_zone_execution_directive(
             "suspend_ordinary_scalp_entries": True,
             "zone_entry_allowed": True,
             "campaign_locked": True,
+            "campaign_exposure_confirmed": True,
             "campaign_lock_reason": lock_reason,
             "campaign_last_exposure_epoch": (
                 now_epoch
@@ -1519,6 +1548,20 @@ def persist_zone_execution_directive(
             ),
             "campaign_reattach_grace_seconds": CAMPAIGN_REATTACH_GRACE_SECONDS,
         }
+        if source_invalidation:
+            # The zone thesis has failed after broker exposure exists. Existing
+            # positions remain under their locked management/recovery policy,
+            # but no fresh/virtual campaign layers may be opened.
+            directive.update({
+                "state": "ZONE_CAMPAIGN_INVALIDATED_MANAGEMENT",
+                "zone_entry_allowed": False,
+                "source_zone_invalidated": True,
+                "source_zone_invalidation_reason": source_invalidation.get("invalidation_reason") or "SOURCE_ZONE_INVALIDATED",
+                "source_zone_invalidated_at_epoch": source_invalidation.get("invalidated_at_epoch") or 0,
+                "source_zone_invalidating_close": source_invalidation.get("invalidating_close") or 0.0,
+                "zone_virtual_layer_execution": False,
+            })
+
         for key in (
             "zone_spread_filter_enabled",
             "zone_market_spread_atr_ratio",
@@ -1533,6 +1576,7 @@ def persist_zone_execution_directive(
         directive = {
             **flatten_zone_execution_directive(plan),
             "campaign_locked": False,
+            "campaign_exposure_confirmed": False,
             "campaign_lock_reason": "",
             "campaign_last_exposure_epoch": 0,
             "campaign_reattach_grace_seconds": CAMPAIGN_REATTACH_GRACE_SECONDS,

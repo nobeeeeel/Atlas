@@ -261,6 +261,27 @@ def build_risk_units(outcomes: dict[str, Any] | None) -> dict[str, Any]:
             when = _trade_close_time(member)
             if when is not None:
                 close_times.append(when)
+        provisional_realized = 0.0
+        provisional_floating = 0.0
+        initial_volume = 0.0
+        remaining_volume = 0.0
+        closed_volume = 0.0
+        for member in members:
+            provisional_realized += _f(member.get("realized_net_pl"))
+            latest = member.get("latest_position") or {}
+            if member.get("_bucket") == "ACTIVE":
+                provisional_floating += _f(
+                    latest.get("net_pl"),
+                    _f(member.get("last_observed_net_pl")),
+                )
+            initial_volume += _f(member.get("initial_volume"))
+            remaining_volume += (
+                _f(latest.get("volume"))
+                if member.get("_bucket") == "ACTIVE"
+                else 0.0
+            )
+            closed_volume += _f(member.get("closed_volume"))
+
         roots = [m for m in members if unit_type != "RECOVERY_CHAIN" or _is_chain_root(m, chain_id)]
         root = roots[0] if roots else None
         complete = not active_members and (unit_type != "RECOVERY_CHAIN" or root is not None)
@@ -284,6 +305,15 @@ def build_risk_units(outcomes: dict[str, Any] | None) -> dict[str, Any]:
             "policy_epoch": policy_epoch,
             "trading_mode": "ZONE" if unit_type == "ZONE_CAMPAIGN" else str((root or (members[0] if members else {})).get("trading_mode") or "UNKNOWN"),
             "realized_net_pl": round(total, 8) if complete else None,
+            "provisional_realized_net_pl": round(provisional_realized, 8),
+            "provisional_floating_net_pl": round(provisional_floating, 8),
+            "provisional_lifecycle_net_pl": round(
+                provisional_realized + provisional_floating,
+                8,
+            ),
+            "initial_volume": round(initial_volume, 8),
+            "remaining_volume": round(remaining_volume, 8),
+            "closed_volume": round(closed_volume, 8),
             "exact_realized_pl_available": bool(complete and exact),
             "result_class": _unit_result_class(total) if complete else "UNSCORED",
             "closed_at": max(close_times).isoformat() if complete and close_times else None,
@@ -320,7 +350,26 @@ def build_risk_units(outcomes: dict[str, Any] | None) -> dict[str, Any]:
                 "member_tickets": [_i(row.get("ticket"))], "root_ticket": _i(row.get("ticket")) or None,
                 "chain_id": None, "zone_plan_id": None, "policy_epoch": _i(row.get("entry_policy_epoch")),
                 "trading_mode": str(row.get("trading_mode") or "UNKNOWN"),
-                "realized_net_pl": None, "exact_realized_pl_available": False,
+                "realized_net_pl": None,
+                "provisional_realized_net_pl": round(_f(row.get("realized_net_pl")), 8),
+                "provisional_floating_net_pl": round(
+                    _f((row.get("latest_position") or {}).get("net_pl"),
+                       _f(row.get("last_observed_net_pl"))),
+                    8,
+                ),
+                "provisional_lifecycle_net_pl": round(
+                    _f(row.get("realized_net_pl")) +
+                    _f((row.get("latest_position") or {}).get("net_pl"),
+                       _f(row.get("last_observed_net_pl"))),
+                    8,
+                ),
+                "initial_volume": round(_f(row.get("initial_volume")), 8),
+                "remaining_volume": round(
+                    _f((row.get("latest_position") or {}).get("volume")),
+                    8,
+                ),
+                "closed_volume": round(_f(row.get("closed_volume")), 8),
+                "exact_realized_pl_available": False,
                 "result_class": "UNSCORED", "closed_at": None,
             })
             continue

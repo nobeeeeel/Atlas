@@ -213,13 +213,25 @@ def _record_consensus_observation(
             "confidence": row.get("confidence"),
             "rationale": row.get("rationale"),
         }
+    bundle = dict(llm_result.get("bundle") or {})
+    critic = dict(llm_result.get("critic") or {})
     observation = {
         "observed_at": _now().isoformat(),
         "proposal_id": proposal_id or None,
         "source_llm_proposal_id": advisory.get("source_llm_proposal_id") or llm_result.get("proposal_id"),
         "baseline_policy_epoch": baseline_epoch,
-        "overall_confidence": float(((llm_result.get("bundle") or {}).get("overall_confidence") or 0.0)),
+        "overall_confidence": float(bundle.get("overall_confidence") or 0.0),
         "changes": changes,
+        # Persist concise reasoning prospectively. Legacy observations remain truthful:
+        # missing fields mean the prose was not durably stored at observation time.
+        "analysis": {
+            "performance_diagnosis": list(bundle.get("performance_diagnosis") or []),
+            "responsiveness_profile": bundle.get("responsiveness_profile"),
+            "responsiveness_diagnosis": list(bundle.get("responsiveness_diagnosis") or []),
+            "weaknesses_targeted": list(bundle.get("weaknesses_targeted") or []),
+            "critic_verdict": critic.get("verdict"),
+            "critic_summary": critic.get("summary"),
+        },
     }
     all_observations.append(observation)
     all_observations = all_observations[-CONSENSUS_MAX_HISTORY_OBSERVATIONS:]
@@ -391,6 +403,25 @@ def get_autonomous_policy_consensus(
     return {**snapshot, **_consensus_history_summary(
         all_observations, current_baseline_epoch=baseline_epoch
     )}
+
+
+
+def get_autonomous_policy_observations(limit: int = 200) -> dict[str, Any]:
+    """Return accepted Gemini consensus observations with their policy-window lineage.
+
+    Historical observations intentionally expose only evidence that was durably stored at
+    observation time; they do not reconstruct missing Gemini prose after the fact.
+    """
+    limit = max(1, min(int(limit), 2000))
+    store = _read_consensus_store()
+    rows = [dict(row) for row in list(store.get("observations") or []) if isinstance(row, dict)]
+    rows = rows[-limit:][::-1]
+    return {
+        "version": "atlas-autonomous-observation-history-v1",
+        "observation_count": len(list(store.get("observations") or [])),
+        "observations": rows,
+        "path": str(AUTONOMOUS_CONSENSUS_FILE),
+    }
 
 def _consensus_advisory(
     *,
@@ -642,7 +673,12 @@ def apply_autonomous_llm_policy(
         }
 
     last_applied = _baseline_anchor(schedule, current_command)
-    consensus_required = last_applied is not None
+    baseline_epoch_for_consensus = int(current_command.get("policy_epoch") or 0)
+    # A mature runtime baseline must never bypass the advertised consensus gate
+    # merely because Atlas has no prior autonomous-application timestamp. Epoch 1
+    # remains the only bootstrap case allowed to activate without an accumulated
+    # policy window; Epoch 2+ always requires accepted-observation consensus.
+    consensus_required = bool(last_applied is not None or baseline_epoch_for_consensus > 1)
     dwell_minutes = int(schedule.get("minimum_dwell_minutes") or 0)
     capital_protection = dict(current_status.get("_atlas_capital_protection") or {})
     dwell_override = bool(

@@ -465,6 +465,7 @@ def build_policy_input(
         "by_entry_risk": performance_analytics.get("by_entry_risk"),
         "by_origin": performance_analytics.get("by_origin"),
         "by_duplicate_filter": performance_analytics.get("by_duplicate_filter"),
+        "by_scalp_context": performance_analytics.get("by_scalp_context"),
         "runtime_configuration_results": {
             "unique_runtime_configurations": parameter_contexts.get(
                 "unique_runtime_configurations"
@@ -585,7 +586,7 @@ def _validated_value(parameter: dict[str, Any], value: Any) -> Any:
 def validate_policy_proposal(
     proposal: GemmaPolicyProposal,
     policy_input: dict[str, Any],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     catalog = {
         row["parameter"]: row
         for row in policy_input.get("control_catalog", [])
@@ -637,6 +638,7 @@ def validate_policy_proposal(
 
     seen: set[str] = set()
     validated: list[dict[str, Any]] = []
+    deferred_locked: list[dict[str, Any]] = []
     positions_open = int(
         (policy_input.get("budget") or {}).get("strategy_open_positions") or 0
     ) > 0
@@ -649,9 +651,16 @@ def validate_policy_proposal(
         if parameter is None or current_row is None:
             raise ValueError(f"Unknown parameter: {change.parameter}")
         if positions_open and parameter.get("position_sensitive"):
-            raise ValueError(
-                f"{change.parameter} is locked while strategy positions are open."
-            )
+            deferred_locked.append({
+                **change.model_dump(),
+                "current": current_row.get("current"),
+                "domain": parameter.get("domain"),
+                "family": parameter.get("family"),
+                "risk_direction": parameter.get("risk_direction"),
+                "position_sensitive": True,
+                "deferred_reason": "POSITION_SENSITIVE_CONTROL_LOCKED_WHILE_EXPOSURE_OPEN",
+            })
+            continue
         try:
             proposed = _validated_value(parameter, change.proposed)
         except ValueError as exc:
@@ -684,7 +693,7 @@ def validate_policy_proposal(
             raise ValueError(
                 "Intrabar entry requires duplicate-distance protection enabled."
             )
-    return validated
+    return validated, deferred_locked
 
 
 def run_policy_proposal(
@@ -697,9 +706,11 @@ def run_policy_proposal(
         user_prompt=_schema_prompt(GemmaPolicyProposal, policy_input),
     )
     proposal = GemmaPolicyProposal.model_validate(_parse_json(analyst_raw))
-    validated_changes = validate_policy_proposal(proposal, policy_input)
+    validated_changes, deferred_locked_changes = validate_policy_proposal(
+        proposal, policy_input
+    )
 
-    proposed_names = {change.parameter for change in proposal.changes}
+    proposed_names = {row["parameter"] for row in validated_changes}
     critic_input = {
         "policy_context": {
             "symbol": policy_input.get("symbol"),
@@ -723,6 +734,7 @@ def run_policy_proposal(
         "validated_proposal": {
             **proposal.model_dump(),
             "changes": validated_changes,
+            "deferred_locked_changes": deferred_locked_changes,
         },
     }
     critic_raw = critic_provider.complete(
@@ -787,12 +799,15 @@ def run_policy_proposal(
         "execution_authority": "PROPOSAL_ONLY",
         "policy_scope": "FULL_157_CONTROL_NYAO_SCALP_POLICY",
         "adaptive_budget": policy_input.get("budget"),
+        "deferred_locked_changes": deferred_locked_changes,
+        "position_lock_deferral_active": bool(deferred_locked_changes),
         "bundle": {
             **proposal.model_dump(exclude={"changes", "reviewed_parameters"}),
             "reviewed_parameters": catalog_names,
             "model_reported_reviewed_parameters": proposal.reviewed_parameters,
             "catalog_review_scope_enforced": True,
             "changes": validated_changes,
+            "deferred_locked_changes": deferred_locked_changes,
         },
         "runtime_patch": {
             row["parameter"]: row["proposed"] for row in validated_changes

@@ -7,7 +7,7 @@ from collections import Counter
 from typing import Any
 
 
-ENGINE_VERSION = "deterministic-zone-v0.2"
+ENGINE_VERSION = "deterministic-zone-v0.3"
 TIMEFRAME_WEIGHT = {"M30": 15.0, "H1": 25.0, "H4": 35.0}
 KIND_WEIGHT = {"FVG": 18.0, "ORDER_BLOCK": 20.0, "SUPPORT_RESISTANCE": 16.0}
 
@@ -90,6 +90,62 @@ def _market_structure(bars: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _zone_lifecycle(
+    bars: list[dict[str, Any]],
+    *,
+    created_index: int,
+    side: str,
+    low: float,
+    high: float,
+) -> dict[str, Any]:
+    """Return deterministic closed-candle lifecycle evidence for one zone.
+
+    Wicks may trade through a zone without invalidating it. Invalidation requires
+    a later CLOSED candle beyond the technical boundary. This keeps zone
+    authority stable intrabar while making failure auditable after bar close.
+    """
+    touched = False
+    touch_count = 0
+    for index, bar in enumerate(bars[created_index + 1:], start=created_index + 1):
+        close = float(bar["close"])
+        invalid = (side == "DEMAND" and close < low) or (side == "SUPPLY" and close > high)
+        if invalid:
+            boundary = low if side == "DEMAND" else high
+            penetration = (boundary - close) if side == "DEMAND" else (close - boundary)
+            local_atr = _atr(bars, index)
+            return {
+                "status": "INVALIDATED",
+                "touch_count": touch_count,
+                "invalidated_at_epoch": int(bar["time_epoch"]),
+                "invalidating_close": round(close, 8),
+                "invalidation_boundary": round(boundary, 8),
+                "invalidation_rule": "CLOSE_BELOW_ZONE" if side == "DEMAND" else "CLOSE_ABOVE_ZONE",
+                "invalidation_penetration": round(max(0.0, penetration), 8),
+                "invalidation_penetration_atr": (
+                    round(max(0.0, penetration) / local_atr, 4) if local_atr > 0 else None
+                ),
+                "invalidation_reason": (
+                    f"Closed candle {close:.5f} finished below demand boundary {low:.5f}."
+                    if side == "DEMAND"
+                    else f"Closed candle {close:.5f} finished above supply boundary {high:.5f}."
+                ),
+            }
+        if float(bar["low"]) <= high and float(bar["high"]) >= low:
+            touched = True
+            touch_count += 1
+    return {
+        "status": "MITIGATED" if touched else "FRESH",
+        "touch_count": touch_count,
+        "invalidated_at_epoch": None,
+        "invalidating_close": None,
+        "invalidation_boundary": low if side == "DEMAND" else high,
+        "invalidation_rule": "CLOSE_BELOW_ZONE" if side == "DEMAND" else "CLOSE_ABOVE_ZONE",
+        "invalidation_penetration": 0.0,
+        "invalidation_penetration_atr": 0.0,
+        "invalidation_reason": None,
+    }
+
+
 def _zone_status(
     bars: list[dict[str, Any]],
     *,
@@ -98,16 +154,9 @@ def _zone_status(
     low: float,
     high: float,
 ) -> str:
-    touched = False
-    for bar in bars[created_index + 1:]:
-        close = float(bar["close"])
-        if side == "DEMAND" and close < low:
-            return "INVALIDATED"
-        if side == "SUPPLY" and close > high:
-            return "INVALIDATED"
-        if float(bar["low"]) <= high and float(bar["high"]) >= low:
-            touched = True
-    return "MITIGATED" if touched else "FRESH"
+    return str(_zone_lifecycle(
+        bars, created_index=created_index, side=side, low=low, high=high
+    )["status"])
 
 
 def _candidate(
@@ -121,17 +170,19 @@ def _candidate(
     bars: list[dict[str, Any]],
     atr: float,
     evidence: list[str],
+    include_invalidated: bool = False,
 ) -> dict[str, Any] | None:
     if not all(math.isfinite(value) for value in (low, high)) or low <= 0 or high <= low:
         return None
-    status = _zone_status(
+    lifecycle = _zone_lifecycle(
         bars,
         created_index=created_index,
         side=side,
         low=low,
         high=high,
     )
-    if status == "INVALIDATED":
+    status = str(lifecycle["status"])
+    if status == "INVALIDATED" and not include_invalidated:
         return None
 
     age_bars = len(bars) - 1 - created_index
@@ -160,6 +211,14 @@ def _candidate(
         "created_at_epoch": int(bars[created_index]["time_epoch"]),
         "age_bars": age_bars,
         "status": status,
+        "touch_count": int(lifecycle.get("touch_count") or 0),
+        "invalidated_at_epoch": lifecycle.get("invalidated_at_epoch"),
+        "invalidating_close": lifecycle.get("invalidating_close"),
+        "invalidation_boundary": lifecycle.get("invalidation_boundary"),
+        "invalidation_rule": lifecycle.get("invalidation_rule"),
+        "invalidation_penetration": lifecycle.get("invalidation_penetration"),
+        "invalidation_penetration_atr": lifecycle.get("invalidation_penetration_atr"),
+        "invalidation_reason": lifecycle.get("invalidation_reason"),
         "score": round(max(0.0, min(100.0, score)), 1),
         "width_atr": round(width_atr, 3) if width_atr is not None else None,
         "max_width_atr": max_width_atr,
@@ -173,7 +232,7 @@ def _candidate(
     }
 
 
-def _detect_fvgs(timeframe: str, bars: list[dict[str, Any]], atr: float) -> list[dict]:
+def _detect_fvgs(timeframe: str, bars: list[dict[str, Any]], atr: float, *, include_invalidated: bool = False) -> list[dict]:
     zones: list[dict] = []
     for index in range(max(2, len(bars) - 100), len(bars)):
         left = bars[index - 2]
@@ -196,6 +255,7 @@ def _detect_fvgs(timeframe: str, bars: list[dict[str, Any]], atr: float) -> list
                     "Three-candle bullish fair-value gap.",
                     f"Gap size {bullish_gap / local_atr:.2f} ATR.",
                 ],
+            include_invalidated=include_invalidated,
             )
             if zone:
                 zones.append(zone)
@@ -213,13 +273,14 @@ def _detect_fvgs(timeframe: str, bars: list[dict[str, Any]], atr: float) -> list
                     "Three-candle bearish fair-value gap.",
                     f"Gap size {bearish_gap / local_atr:.2f} ATR.",
                 ],
+            include_invalidated=include_invalidated,
             )
             if zone:
                 zones.append(zone)
     return zones
 
 
-def _detect_order_blocks(timeframe: str, bars: list[dict[str, Any]], atr: float) -> list[dict]:
+def _detect_order_blocks(timeframe: str, bars: list[dict[str, Any]], atr: float, *, include_invalidated: bool = False) -> list[dict]:
     zones: list[dict] = []
     for index in range(max(7, len(bars) - 100), len(bars)):
         bar = bars[index]
@@ -250,7 +311,8 @@ def _detect_order_blocks(timeframe: str, bars: list[dict[str, Any]], atr: float)
                             "Last bearish candle before bullish displacement.",
                             "Displacement closed above the prior six-bar high.",
                         ],
-                    )
+                    include_invalidated=include_invalidated,
+            )
                     if zone:
                         zones.append(zone)
                     break
@@ -271,7 +333,8 @@ def _detect_order_blocks(timeframe: str, bars: list[dict[str, Any]], atr: float)
                             "Last bullish candle before bearish displacement.",
                             "Displacement closed below the prior six-bar low.",
                         ],
-                    )
+                    include_invalidated=include_invalidated,
+            )
                     if zone:
                         zones.append(zone)
                     break
@@ -294,6 +357,8 @@ def _detect_support_resistance(
     timeframe: str,
     bars: list[dict[str, Any]],
     atr: float,
+    *,
+    include_invalidated: bool = False,
 ) -> list[dict]:
     zones: list[dict] = []
     swing_highs, swing_lows = _swings(bars)
@@ -317,6 +382,7 @@ def _detect_support_resistance(
                     f"{len(cluster)} confirmed pivot reactions clustered within {tolerance:.5f}.",
                     "Level is derived from repeated closed-candle structure.",
                 ],
+            include_invalidated=include_invalidated,
             )
             if zone:
                 zone["touch_count"] = len(cluster)
@@ -502,16 +568,35 @@ def build_zone_map(candle_report: dict[str, Any]) -> dict[str, Any]:
         current_price = float(candle_report["timeframes"]["M30"]["bars"][-1]["close"])
         if timeframe == "M30":
             chart_bars = bars[-96:]
-        candidates.extend(_detect_fvgs(timeframe, bars, timeframe_atr))
-        candidates.extend(_detect_order_blocks(timeframe, bars, timeframe_atr))
-        candidates.extend(_detect_support_resistance(timeframe, bars, timeframe_atr))
+        candidates.extend(_detect_fvgs(
+            timeframe, bars, timeframe_atr, include_invalidated=True
+        ))
+        candidates.extend(_detect_order_blocks(
+            timeframe, bars, timeframe_atr, include_invalidated=True
+        ))
+        candidates.extend(_detect_support_resistance(
+            timeframe, bars, timeframe_atr, include_invalidated=True
+        ))
         source_signature["timeframes"][timeframe] = {
             "last_time": bars[-1]["time_epoch"],
             "last_close": bars[-1]["close"],
             "count": len(bars),
         }
 
-    zones = _rank_and_deduplicate(candidates, current_price)
+    invalidated_zones = [
+        zone for zone in candidates if zone.get("status") == "INVALIDATED"
+    ]
+    live_candidates = [
+        zone for zone in candidates if zone.get("status") != "INVALIDATED"
+    ]
+    # Invalidated zones are retained for audit/history but never participate in
+    # priority-zone selection, confluence, scenarios, or execution authority.
+    invalidated_zones = sorted(
+        {str(zone.get("zone_id")): zone for zone in invalidated_zones}.values(),
+        key=lambda zone: int(zone.get("invalidated_at_epoch") or 0),
+        reverse=True,
+    )[:50]
+    zones = _rank_and_deduplicate(live_candidates, current_price)
     direction_counts = Counter(
         item["direction"] for item in structures.values() if item["direction"] != "RANGE_OR_UNCLEAR"
     )
@@ -541,7 +626,9 @@ def build_zone_map(candle_report: dict[str, Any]) -> dict[str, Any]:
         "composite_bias": composite_bias,
         "market_structure": structures,
         "zone_count": len(zones),
+        "invalidated_zone_count": len(invalidated_zones),
         "zones": zones,
+        "invalidated_zones": invalidated_zones,
         "nearest_demand": nearest_demand,
         "nearest_supply": nearest_supply,
         "scenarios": [
@@ -555,7 +642,8 @@ def build_zone_map(candle_report: dict[str, Any]) -> dict[str, Any]:
             "absorbed_overlap_count": sum(
                 int(zone.get("absorbed_zone_count") or 0) for zone in zones
             ),
-            "policy": "REJECT_OVERBROAD_AND_COLLAPSE_REDUNDANT_SAME_SIDE_ZONES",
+            "policy": "REJECT_OVERBROAD_COLLAPSE_REDUNDANT_AND_ARCHIVE_INVALIDATED_ZONES",
+            "invalidation_policy": "LATER_CLOSED_CANDLE_BEYOND_TECHNICAL_BOUNDARY",
         },
         "blockers": [
             "Zone map is analysis-only and has not been activated for Nyao execution."
@@ -564,5 +652,6 @@ def build_zone_map(candle_report: dict[str, Any]) -> dict[str, Any]:
             "Detections use closed OHLC bars only; no order-book or external-news context is included.",
             "A detected zone is a location hypothesis, not an instruction to trade.",
             "Entry still requires confirmation and a viable spread-to-movement relationship.",
+            "Wick-only penetration does not invalidate a zone; invalidation requires a later closed candle beyond the technical boundary.",
         ],
     }

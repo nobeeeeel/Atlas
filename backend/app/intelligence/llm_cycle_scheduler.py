@@ -16,6 +16,7 @@ DEFAULT_INTERVAL_MINUTES = 240
 MIN_INTERVAL_MINUTES = 15
 MIN_DWELL_MINUTES = 30
 MAX_INTERVAL_MINUTES = 24 * 60
+MAX_RUN_HISTORY = 300
 _LOCK = threading.Lock()
 
 
@@ -64,6 +65,7 @@ def _default() -> dict[str, Any]:
         "last_auto_zone_policy_epoch": None,
         "auto_apply_eligible_at": None,
         "run_count": 0,
+        "run_history": [],
     }
 
 
@@ -74,7 +76,10 @@ def _read_unlocked() -> dict[str, Any]:
         value = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return _default()
-    return {**_default(), **value} if isinstance(value, dict) else _default()
+    merged = {**_default(), **value} if isinstance(value, dict) else _default()
+    if not isinstance(merged.get("run_history"), list):
+        merged["run_history"] = []
+    return merged
 
 
 def _write_unlocked(value: dict[str, Any]) -> None:
@@ -233,21 +238,39 @@ def complete_llm_cycle(
     advisory_proposal_id: str | None = None,
     critic_verdict: str | None = None,
     error: str | None = None,
+    run_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = _now()
     with _LOCK:
         value = _read_unlocked()
+        run_number = int(value.get("run_count") or 0) + 1
+        completed_at = _iso(now)
         value.update({
             "running": False,
-            "last_completed_at": _iso(now),
+            "last_completed_at": completed_at,
             "last_status": status,
             "last_error": error,
             "last_llm_proposal_id": llm_proposal_id,
             "last_advisory_proposal_id": advisory_proposal_id,
             "last_critic_verdict": critic_verdict,
-            "run_count": int(value.get("run_count") or 0) + 1,
-            "updated_at": _iso(now),
+            "run_count": run_number,
+            "updated_at": completed_at,
         })
+        row = {
+            "run_number": run_number,
+            "started_at": value.get("last_started_at"),
+            "completed_at": completed_at,
+            "trigger": value.get("last_trigger"),
+            "status": status,
+            "llm_proposal_id": llm_proposal_id,
+            "advisory_proposal_id": advisory_proposal_id,
+            "critic_verdict": critic_verdict,
+            "error": error,
+            **dict(run_record or {}),
+        }
+        history = [dict(item) for item in list(value.get("run_history") or []) if isinstance(item, dict)]
+        history.append(row)
+        value["run_history"] = history[-MAX_RUN_HISTORY:]
         _write_unlocked(value)
     return _public(value)
 
