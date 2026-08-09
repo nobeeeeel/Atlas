@@ -1,6 +1,6 @@
 # Atlas Architecture
 
-**Current release:** Atlas 1.30.43 · Nyao 44.5.3
+**Current release:** Atlas 1.30.44 · Nyao 44.5.3
 
 This document is the canonical technical architecture for Atlas. It
 describes system boundaries, authority, risk accounting, execution flow
@@ -408,3 +408,8 @@ Zone execution has two distinct phases. `ZONE_ENTRY_CONFIRMED` may suspend fresh
 Atlas zone detection uses closed candles as the deterministic invalidation authority. A demand zone becomes invalid only when a later closed candle closes below its lower boundary; a supply zone becomes invalid only when a later closed candle closes above its upper boundary. Wick-only penetration can mark a zone mitigated but cannot invalidate it. Invalidated zones are excluded from priority selection, scalp context, confluence, scenarios and new campaign admission, while remaining in `invalidated_zones` for audit.
 
 If no Atlas zone exposure exists, invalidation naturally releases zone-aware context and prospective zone-priority risk. If exposure already exists for the exact immutable zone plan, the campaign transitions to `ZONE_CAMPAIGN_INVALIDATED_MANAGEMENT`: ordinary scalping remains suspended during the live campaign, existing positions continue under their locked management/recovery lineage, and Nyao disables all unfilled/future zone layers.
+
+
+## Operator Help workspace
+
+The dashboard contains a first-class `Help & Guide` view. This is documentation-only and has no trading authority. It explains the current UI vocabulary and the separation between Atlas deterministic authority, Nyao execution, and Gemini policy learning. The guide version is kept aligned with the Atlas dashboard release.

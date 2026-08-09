@@ -1,6 +1,6 @@
 # Nyao --- Atlas MT5 Execution Layer
 
-**Current release:** Nyao 44.5.3 · paired with Atlas 1.30.43
+**Current release:** Nyao 44.5.3 · paired with Atlas 1.30.44
 
 Nyao is the MetaTrader 5 execution component of Atlas Adaptive Trading
 Intelligence. It observes live broker state, publishes execution
@@ -180,7 +180,7 @@ rather than historical development phases.
 
 ## Adaptive zone cost ratios
 
-Atlas supplies dynamic zone stop/target cost ratios and may disable the legacy direct zone ATR spread ratio by setting it to zero. Nyao 44.5.3 interprets a zero ATR ratio as disabled and continues to perform its final live bid/ask check against the supplied stop/target ratios. Nyao 44.5.3 must be compiled when upgrading to Atlas 1.30.43 because the execution bridge also carries explicit source-zone invalidation state.
+Atlas supplies dynamic zone stop/target cost ratios and may disable the legacy direct zone ATR spread ratio by setting it to zero. Nyao 44.5.3 interprets a zero ATR ratio as disabled and continues to perform its final live bid/ask check against the supplied stop/target ratios. Nyao 44.5.3 must be compiled when upgrading to Atlas 1.30.44 because the execution bridge also carries explicit source-zone invalidation state.
 
 
 ## Source-zone invalidation

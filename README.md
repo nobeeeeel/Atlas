@@ -4,7 +4,7 @@
 
 # Atlas --- Adaptive Trading Intelligence
 
-**Current release:** Atlas 1.30.43 · Nyao 44.5.3
+**Current release:** Atlas 1.30.44 · Nyao 44.5.3
 
 **Documentation:** [Architecture](docs/architecture.md) · [Nyao MT5 Execution Layer](external/nyao/README.md)
 
@@ -208,12 +208,12 @@ The Command Center uses progressive disclosure: **Atlas Now**, the account strip
 
 ## Workspace model
 
-Atlas 1.30.43 uses a task-oriented interface: Command Center is summary and action; Market owns live signal and execution-economics diagnostics; Zone Analysis owns trade-location campaigns; Portfolio owns exposure and capital; Performance owns evidence and learning; Atlas Brain owns policy reasoning; System & Audit owns integrity and historical evidence. A persistent global status strip keeps the current symbol, mode, risk capacity, positions, Brain state and health visible across workspaces.
+Atlas 1.30.44 uses a task-oriented interface: Command Center is summary and action; Market owns live signal and execution-economics diagnostics; Zone Analysis owns trade-location campaigns; Portfolio owns exposure and capital; Performance owns evidence and learning; Atlas Brain owns policy reasoning; System & Audit owns integrity and historical evidence. A persistent global status strip keeps the current symbol, mode, risk capacity, positions, Brain state and health visible across workspaces.
 
 
 ### UI renderer compatibility
 
-Atlas 1.30.43 retains the redesigned workspace layout hardening against legacy overview renderer writes. Removed Command Center diagnostic IDs are retained only in a non-rendered compatibility sink, preventing null-DOM failures while keeping the visible information architecture clean. No trading authority or data source changed.
+Atlas 1.30.44 retains the redesigned workspace layout hardening against legacy overview renderer writes. Removed Command Center diagnostic IDs are retained only in a non-rendered compatibility sink, preventing null-DOM failures while keeping the visible information architecture clean. No trading authority or data source changed.
 
 
 ### Policy lineage and observation history
@@ -266,7 +266,7 @@ Portfolio now renders operating-risk allocation directly from capital telemetry:
 
 ### Verified UI build lineage
 
-The verified Risk Allocation UI and Gemini position-lock deferral remain part of the current Atlas 1.30.43 build. Portfolio renders operating-risk allocation immediately above Open Positions, while Gemini policy validation defers position-sensitive mutations during live exposure instead of failing the complete analysis cycle.
+The verified Risk Allocation UI and Gemini position-lock deferral remain part of the current Atlas 1.30.44 build. Portfolio renders operating-risk allocation immediately above Open Positions, while Gemini policy validation defers position-sensitive mutations during live exposure instead of failing the complete analysis cycle.
 
 
 ### Atlas Brain policy lineage and consensus hardening
@@ -276,4 +276,9 @@ Atlas Brain now separates Gemini analysis runs from accepted consensus observati
 
 ### Zone invalidation lifecycle
 
-Atlas 1.30.43 makes zone invalidation explicit and auditable. Demand zones invalidate only when a later closed candle closes below the lower boundary; supply zones invalidate only when a later closed candle closes above the upper boundary. Wick-only penetration may mitigate a zone but cannot invalidate it. Invalidated zones leave active priority selection and zone-aware scalp context while remaining available in Zone Analysis history with the invalidating close, boundary, penetration and reason. If an exact Atlas zone campaign already has live exposure, invalidation changes the campaign to management-only: existing positions remain managed under their locked lineage while new zone layers are disabled.
+Atlas 1.30.44 makes zone invalidation explicit and auditable. Demand zones invalidate only when a later closed candle closes below the lower boundary; supply zones invalidate only when a later closed candle closes above the upper boundary. Wick-only penetration may mitigate a zone but cannot invalidate it. Invalidated zones leave active priority selection and zone-aware scalp context while remaining available in Zone Analysis history with the invalidating close, boundary, penetration and reason. If an exact Atlas zone campaign already has live exposure, invalidation changes the campaign to management-only: existing positions remain managed under their locked lineage while new zone layers are disabled.
+
+
+### In-dashboard Help & Atlas Guide
+
+Atlas 1.30.44 adds a searchable Help & Guide workspace intended to be sufficient for a new operator to understand the dashboard without reading the source. It documents the Atlas/Nyao/Gemini authority model; every major workspace and KPI family; market signal and execution-economics terminology; zone types, context-aware scalping and invalidation lifecycle; Portfolio lifecycle P/L and risk allocation; strategic Performance metrics; Atlas Brain run/observation/consensus/policy semantics; Settings and audit concepts; common status/block reasons; and a recommended operator workflow.
