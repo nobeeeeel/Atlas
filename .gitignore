@@ -18,6 +18,7 @@ htmlcov/
 data/
 runtime/
 logs/
+scripts/
 *.log
 
 # MT5/local terminal artifacts
@@ -30,7 +31,5 @@ external/nyao/settings.dat
 .DS_Store
 Thumbs.db
 
-scripts/
 
 
-.gitignore
