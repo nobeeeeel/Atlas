@@ -6,7 +6,7 @@ import math
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.agents.llm_provider import LlmProvider
 from backend.app.agents.llm_review import _parse_json, _schema_prompt
@@ -35,6 +35,29 @@ class GeminiZoneContextAssessment(BaseModel):
         "UNKNOWN",
     ] = "UNKNOWN"
     directional_context: Literal["BUY", "SELL", "BOTH", "NONE"] = "NONE"
+
+    @field_validator("directional_context", mode="before")
+    @classmethod
+    def normalize_directional_context(cls, value: Any) -> Any:
+        if value is None:
+            return "NONE"
+        token = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "BULLISH": "BUY",
+            "LONG": "BUY",
+            "UPSIDE": "BUY",
+            "BEARISH": "SELL",
+            "SHORT": "SELL",
+            "DOWNSIDE": "SELL",
+            "MIXED": "BOTH",
+            "BIDIRECTIONAL": "BOTH",
+            "TWO_SIDED": "BOTH",
+            "NEUTRAL": "NONE",
+            "NO_BIAS": "NONE",
+            "UNKNOWN": "NONE",
+        }
+        return aliases.get(token, token)
+
     assessment: str = "No zone context assessment was supplied."
     scalping_implications: list[str] = Field(default_factory=list, max_length=12)
     evidence_used: list[str] = Field(default_factory=list, max_length=12)
@@ -415,7 +438,11 @@ def build_policy_input(
     closed = trade_outcomes.get("closed") or []
     current_loss_streak = 0
     for trade in reversed(closed):
-        if trade.get("observed_result_class") != "NEGATIVE_BEFORE_DISAPPEARANCE":
+        if trade.get("exact_realized_pl_available"):
+            realized = float(trade.get("realized_net_pl") or 0.0)
+            if realized >= 0.0:
+                break
+        elif trade.get("observed_result_class") != "NEGATIVE_BEFORE_DISAPPEARANCE":
             break
         current_loss_streak += 1
 

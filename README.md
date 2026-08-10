@@ -4,7 +4,32 @@
 
 # Atlas --- Adaptive Trading Intelligence
 
-**Current release:** Atlas 1.30.44 · Nyao 44.5.3
+**Current release:** Atlas 1.30.57 · Nyao 44.6.2
+
+### Recovery lifecycle & hedge profit integrity (1.30.57)
+
+Atlas/Nyao now treats every unresolved rolling-hedge lifecycle as one book-level risk unit until flat. Independent fresh/zone entries are locked during any active recovery composite, not only RECOVERY_PROBE. Active HEDGE_CHILD legs receive broker-side profit protection before ordinary chain logic can allow a large positive MFE to reverse into a loss; if a protected hedge disappears, the surviving leg graduates with no-rehedge authority rather than immediately starting another uncontrolled cycle. Position management now uses MT5 `POSITION_PRICE_CURRENT` as the primary management mark, with the broker still the final SL authority, because live diagnostics exposed large divergence between position marks and raw symbol quotes. Capital reservations are also reconciled from immutable risk-unit lineage so a graduated survivor remains reserved as `recovery:<root>` instead of being misclassified as a standalone trade.
+
+
+### Gemini directional-context normalization (1.30.56)
+
+Atlas now normalizes common Gemini directional aliases before strict Pydantic validation: `BULLISH`/`LONG` -> `BUY`, `BEARISH`/`SHORT` -> `SELL`, mixed/bidirectional -> `BOTH`, and neutral/unknown -> `NONE`. The canonical stored schema remains `BUY | SELL | BOTH | NONE`; malformed unrelated values still fail validation. Nyao is unchanged at 44.6.1 because this is a backend policy-proposal parser hotfix.
+
+### Recovery chain risk integrity (1.30.54)
+
+The 1.30.54 package also enforces recovery-lifecycle atomicity: any unresolved immutable `RECOVERY_PROBE` lifecycle locally locks independent fresh entries in Nyao, the backend independently vetoes fresh risk while the composite is active, and root/child outcomes are scored only once after the whole composite is flat. A closed RP root is still linked to live historical children through durable root lineage; transient child closures cannot start a new loss-protection stage.
+
+- Recovery-probe admission is re-priced again from the **actual broker fill**, actual broker SL, actual volume, and live equity. An adverse fill that makes the probe exceed the 0.30% cap is immediately emergency-closed.
+- `RECOVERY_PROBE` is a deliberately single-leg diagnostic state. It cannot spawn `HEDGE_CHILD` rolling-hedge legs; ordinary non-probe recovery chains are unchanged.
+- Debug integrity now exposes `RECOVERY_PROBE_SINGLE_LEG_INVARIANT` in addition to the active probe risk-envelope check.
+
+### Startup risk authority integrity (1.30.52)
+
+Fresh-entry authority is fail-closed during Atlas/Nyao startup and redeployment. Atlas publishes a `STARTUP_RISK_RECONCILIATION` barrier before reconstructing account identity, outcomes, loss protection, capital sizing and operator risk appetite; Nyao refuses pre-start directives and enables new entries only after a post-start reconciled directive arrives. Operator risk appetite is persisted outside the replaceable source tree under the MT5 Atlas bridge.
+
+### Recovery probe risk integrity (1.30.51)
+
+Recovery probes now carry immutable `RECOVERY_PROBE` (`RP`) broker-comment lineage. A restart restores an in-flight probe instead of wrapping it in a new ordinary hard-veto state. Final entry/SL/volume risk is verified with `OrderCalcProfit` after geometry and lot normalization, and must remain within the deterministic 0.30% recovery cap. Once admitted, the probe's monetary stop-risk envelope is frozen: management may tighten, break even, or trail profitably, but it cannot remove the stop or widen loss beyond the frozen admission risk. Performance Intelligence attributes these trades separately as `RECOVERY_PROBE`.
 
 **Documentation:** [Architecture](docs/architecture.md) · [Nyao MT5 Execution Layer](external/nyao/README.md)
 

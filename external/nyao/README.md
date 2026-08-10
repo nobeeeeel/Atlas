@@ -1,6 +1,13 @@
 # Nyao --- Atlas MT5 Execution Layer
 
-**Current release:** Nyao 44.5.3 · paired with Atlas 1.30.44
+**Current release:** Nyao 44.6.2 · paired with Atlas 1.30.57
+
+### Recovery lifecycle & hedge profit integrity (1.30.57)
+
+Atlas/Nyao now treats every unresolved rolling-hedge lifecycle as one book-level risk unit until flat. Independent fresh/zone entries are locked during any active recovery composite, not only RECOVERY_PROBE. Active HEDGE_CHILD legs receive broker-side profit protection before ordinary chain logic can allow a large positive MFE to reverse into a loss; if a protected hedge disappears, the surviving leg graduates with no-rehedge authority rather than immediately starting another uncontrolled cycle. Position management now uses MT5 `POSITION_PRICE_CURRENT` as the primary management mark, with the broker still the final SL authority, because live diagnostics exposed large divergence between position marks and raw symbol quotes. Capital reservations are also reconciled from immutable risk-unit lineage so a graduated survivor remains reserved as `recovery:<root>` instead of being misclassified as a standalone trade.
+
+
+**Startup risk authority:** Nyao starts fail-closed, rejects capital/zone directives generated before the current EA startup, and reports `STARTUP_RISK_RECONCILIATION` until Atlas publishes a post-reconciliation directive.
 
 Nyao is the MetaTrader 5 execution component of Atlas Adaptive Trading
 Intelligence. It observes live broker state, publishes execution
@@ -84,11 +91,21 @@ loss.
 
 ## Concurrent risk units
 
-Nyao 44.5.3 is compatible with Atlas concurrent portfolio allocation.
+Nyao 44.5.7 is compatible with Atlas concurrent portfolio allocation.
 
 Existing exposure is represented by strategic risk units rather than a
 blanket global lock. Nyao therefore permits another qualified entry when
 Atlas reports sufficient capacity and all execution gates pass.
+
+> Atlas 1.30.56 is a backend-only Gemini proposal-parser hotfix; Nyao remains 44.6.1.
+
+### Recovery chain risk integrity (1.30.54)
+
+The 1.30.54 package also enforces recovery-lifecycle atomicity: any unresolved immutable `RECOVERY_PROBE` lifecycle locally locks independent fresh entries in Nyao, the backend independently vetoes fresh risk while the composite is active, and root/child outcomes are scored only once after the whole composite is flat. A closed RP root is still linked to live historical children through durable root lineage; transient child closures cannot start a new loss-protection stage.
+
+- Recovery-probe admission is re-priced again from the **actual broker fill**, actual broker SL, actual volume, and live equity. An adverse fill that makes the probe exceed the 0.30% cap is immediately emergency-closed.
+- `RECOVERY_PROBE` is a deliberately single-leg diagnostic state. It cannot spawn `HEDGE_CHILD` rolling-hedge legs; ordinary non-probe recovery chains are unchanged.
+- Debug integrity now exposes `RECOVERY_PROBE_SINGLE_LEG_INVARIANT` in addition to the active probe risk-envelope check.
 
 ### Losing-risk-unit counting
 
@@ -124,7 +141,7 @@ or reduced while authority is reconciled.
 
 ## Zone-aware scalp coexistence
 
-Nyao 44.5.3 distinguishes a zone that is being **watched** from a zone campaign that has been **committed**. In `ZONE_AWARE_SCALP`, ordinary scalp evaluation continues with explicit context classification. The zone-aligned direction uses the normal scalp gates. A counter-zone candidate is not blocked merely because it opposes the zone; it must clear the ordinary signal gate, an additional context-sensitive evidence premium and reduced risk authority, and it is deterministically blocked as the higher-timeframe campaign approaches a feasible commit boundary. Both directions remain subject to spread/structure, capital, duplicate-distance and broker-volume gates.
+Nyao 44.5.7 distinguishes a zone that is being **watched** from a zone campaign that has been **committed**. In `ZONE_AWARE_SCALP`, ordinary scalp evaluation continues with explicit context classification. The zone-aligned direction uses the normal scalp gates. A counter-zone candidate is not blocked merely because it opposes the zone; it must clear the ordinary signal gate, an additional context-sensitive evidence premium and reduced risk authority, and it is deterministically blocked as the higher-timeframe campaign approaches a feasible commit boundary. Both directions remain subject to spread/structure, capital, duplicate-distance and broker-volume gates.
 
 When Atlas reports the zone as execution-ready, Nyao crosses the commit boundary: new scalp entries are suspended and the zone executor owns fresh-entry authority. Existing positions continue to be managed normally.
 
@@ -180,9 +197,9 @@ rather than historical development phases.
 
 ## Adaptive zone cost ratios
 
-Atlas supplies dynamic zone stop/target cost ratios and may disable the legacy direct zone ATR spread ratio by setting it to zero. Nyao 44.5.3 interprets a zero ATR ratio as disabled and continues to perform its final live bid/ask check against the supplied stop/target ratios. Nyao 44.5.3 must be compiled when upgrading to Atlas 1.30.44 because the execution bridge also carries explicit source-zone invalidation state.
+Atlas supplies dynamic zone stop/target cost ratios and may disable the legacy direct zone ATR spread ratio by setting it to zero. Nyao 44.5.7 interprets a zero ATR ratio as disabled and continues to perform its final live bid/ask check against the supplied stop/target ratios. Nyao 44.5.7 must be compiled when upgrading to Atlas 1.30.51 because the execution bridge also carries explicit source-zone invalidation state.
 
 
 ## Source-zone invalidation
 
-Nyao 44.5.3 consumes Atlas source-zone invalidation state. If a prospective source zone invalidates before any Atlas zone exposure exists, zone-aware/campaign authority is released by Atlas. If the exact immutable zone plan already has live `ATLAS_ZONE` exposure, Nyao enters management-only invalidated-campaign handling: existing campaign positions remain managed, ordinary campaign lineage is preserved, and no unfilled or future zone layer may open from the invalidated source zone.
+Nyao 44.5.7 consumes Atlas source-zone invalidation state. If a prospective source zone invalidates before any Atlas zone exposure exists, zone-aware/campaign authority is released by Atlas. If the exact immutable zone plan already has live `ATLAS_ZONE` exposure, Nyao enters management-only invalidated-campaign handling: existing campaign positions remain managed, ordinary campaign lineage is preserved, and no unfilled or future zone layer may open from the invalidated source zone.

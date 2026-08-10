@@ -29,6 +29,11 @@ LOSS_PROTECTION_INITIAL_MINUTES = 15
 LOSS_PROTECTION_SECOND_MINUTES = 30
 LOSS_PROTECTION_MAX_MINUTES = 60
 RECOVERY_PROBE_SCALP_RISK_PCT = 0.05
+# A recovery probe may be lifted only to the broker minimum executable volume,
+# and only while that minimum remains beneath this deterministic equity-risk cap.
+# This keeps micro-account probes usable on instruments such as XAUUSD without
+# turning the operator portfolio ceiling into per-trade authority.
+RECOVERY_PROBE_MAX_EXECUTABLE_RISK_PCT = 0.30
 LOSS_PROTECTION_THRESHOLD = 4
 LOSS_PROTECTION_STATE_VERSION = 4
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -341,6 +346,55 @@ def _latest_loss_close_time(outcomes: dict[str, Any] | None) -> datetime | None:
     return _parse_iso(raw) if raw else None
 
 
+def _active_recovery_probe_position(status: dict[str, Any], outcomes: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return broker-survivable recovery-probe evidence after Atlas/Nyao restart."""
+    for position in list(status.get("positions") or []):
+        if not isinstance(position, dict):
+            continue
+        if bool(position.get("recovery_probe_entry")) or str(position.get("order_origin") or "").upper() == "RECOVERY_PROBE":
+            return position
+    for trade in list((outcomes or {}).get("active") or []):
+        if not isinstance(trade, dict):
+            continue
+        if bool(trade.get("recovery_probe_entry")) or str(trade.get("order_origin") or trade.get("origin_guess") or "").upper() == "RECOVERY_PROBE":
+            return trade
+    return None
+
+
+def _active_recovery_probe_lifecycle(outcomes: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return an unresolved composite whose immutable root is a recovery probe.
+
+    This survives the root ticket closing before a child because risk_units owns
+    the composite lifecycle. It is the atomicity boundary for loss protection
+    and fresh-risk admission.
+    """
+    report = build_risk_units(outcomes)
+    for unit in list(report.get("units") or []):
+        if not isinstance(unit, dict):
+            continue
+        if (
+            str(unit.get("unit_type") or "").upper() == "RECOVERY_CHAIN"
+            and str(unit.get("state") or "").upper() == "ACTIVE"
+            and str(unit.get("trading_mode") or "").upper() == "RECOVERY_PROBE"
+        ):
+            return unit
+    return None
+
+def _active_recovery_lifecycles(outcomes: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return every unresolved recovery composite, not only RECOVERY_PROBE.
+
+    Risk-unit lineage is the authoritative lifecycle boundary after a hedge child
+    closes and the surviving live position has been graduated back to chain_id=0.
+    """
+    report = build_risk_units(outcomes)
+    return [
+        unit for unit in list(report.get("units") or [])
+        if isinstance(unit, dict)
+        and str(unit.get("unit_type") or "").upper() == "RECOVERY_CHAIN"
+        and str(unit.get("state") or "").upper() == "ACTIVE"
+    ]
+
+
 def _material_fresh_entry_patch(patch: dict[str, Any]) -> dict[str, Any]:
     return {
         str(name): value
@@ -449,6 +503,8 @@ def _loss_protection_state(
     latest_loss_time = _latest_loss_close_time(outcomes)
     account_fingerprint = str((outcomes or {}).get("account_fingerprint") or status.get("account_fingerprint") or "")
     symbol = str(status.get("symbol") or "")
+    active_probe_position = _active_recovery_probe_position(status, outcomes)
+    active_probe_lifecycle = _active_recovery_probe_lifecycle(outcomes)
 
     def inactive(reason: str) -> dict[str, Any]:
         value = {
@@ -457,6 +513,7 @@ def _loss_protection_state(
             "timeout_minutes": 0, "elapsed_seconds": 0.0, "remaining_seconds": 0.0,
             "triggered_at": None, "next_review_at": None, "recovery_probe": False,
             "recovery_probe_scalp_risk_pct": RECOVERY_PROBE_SCALP_RISK_PCT,
+            "recovery_probe_max_executable_risk_pct": RECOVERY_PROBE_MAX_EXECUTABLE_RISK_PCT,
             "dwell_override_eligible": False, "escalation_level": 0,
             "failed_recovery_probes": 0, "reason": reason,
             "state_file": str(state_file) if state_file else None,
@@ -476,11 +533,14 @@ def _loss_protection_state(
     )
     if not same_scope or not stored.get("active"):
         # Historical losses establish that protection is required, but they do not
-        # retroactively count as failed recovery probes. Always begin at stage 1.
+        # retroactively count as failed recovery probes. A live RP-marked broker
+        # position, however, is authoritative restart evidence that a probe was
+        # already admitted and must be restored rather than re-vetoed as fresh risk.
+        restored_probe = active_probe_position is not None
         stored = {
             "version": LOSS_PROTECTION_STATE_VERSION,
             "active": True,
-            "state": "HARD_VETO",
+            "state": "RECOVERY_PROBE" if restored_probe else "HARD_VETO",
             "escalation_level": 1,
             "failed_recovery_probes": 0,
             "protection_started_at": now.isoformat(),
@@ -488,14 +548,48 @@ def _loss_protection_state(
             "protected_policy_epoch": int(status.get("policy_epoch") or 0),
             "streak_at_activation": streak,
             "streak_at_stage_start": streak,
-            "recovery_probe_started_at": None,
-            "released_by_policy_epoch": None,
-            "release_reason": None,
+            "recovery_probe_started_at": now.isoformat() if restored_probe else None,
+            "recovery_probe_ticket": int((active_probe_position or {}).get("ticket") or 0) if restored_probe else None,
+            "released_by_policy_epoch": int((active_probe_position or {}).get("entry_policy_epoch") or status.get("policy_epoch") or 0) if restored_probe else None,
+            "release_reason": "RECOVERY_PROBE_RESTORED_FROM_IMMUTABLE_ENTRY_LINEAGE" if restored_probe else None,
+            "streak_at_probe_start": streak if restored_probe else None,
             "account_fingerprint": account_fingerprint,
             "symbol": symbol,
         }
 
     mode = str(stored.get("state") or "HARD_VETO")
+
+    # P3.41 atomic composite repair: if an RP recovery composite is still active,
+    # no child close is allowed to finalize/increment the streak or start a new
+    # HARD_VETO stage. The whole immutable lifecycle must become flat first.
+    if active_probe_lifecycle is not None and mode != "RECOVERY_PROBE":
+        root_ticket = int(active_probe_lifecycle.get("root_ticket") or 0)
+        stored.update({
+            "state": "RECOVERY_PROBE",
+            "recovery_probe_started_at": stored.get("recovery_probe_started_at") or now.isoformat(),
+            "recovery_probe_ticket": root_ticket or stored.get("recovery_probe_ticket"),
+            "release_reason": "RECOVERY_LIFECYCLE_ATOMICITY_RESTORED",
+            "streak_at_probe_start": min(
+                int(stored.get("streak_at_probe_start") or streak),
+                streak,
+            ),
+            "atomic_recovery_lifecycle_unit_id": active_probe_lifecycle.get("unit_id"),
+        })
+        mode = "RECOVERY_PROBE"
+
+    # If state storage was reset or stale but an RP-marked live position exists,
+    # the broker entry lineage wins. Never create a second hard-veto window around
+    # an already-admitted probe simply because Atlas/Nyao restarted.
+    if active_probe_position is not None and mode != "RECOVERY_PROBE":
+        stored.update({
+            "state": "RECOVERY_PROBE",
+            "recovery_probe_started_at": stored.get("recovery_probe_started_at") or now.isoformat(),
+            "recovery_probe_ticket": int(active_probe_position.get("ticket") or 0),
+            "released_by_policy_epoch": int(active_probe_position.get("entry_policy_epoch") or status.get("policy_epoch") or 0),
+            "release_reason": "RECOVERY_PROBE_RESTORED_FROM_IMMUTABLE_ENTRY_LINEAGE",
+            "streak_at_probe_start": int(stored.get("streak_at_probe_start") or streak),
+        })
+        mode = "RECOVERY_PROBE"
     stage = max(1, min(3, int(stored.get("escalation_level") or 1)))
 
     # A recovery probe is considered failed only when the CURRENT-ACCOUNT
@@ -508,8 +602,10 @@ def _loss_protection_state(
     # A winning probe breaks the streak (< threshold) and the earlier inactive
     # branch resets protection.
     if mode == "RECOVERY_PROBE":
+        if active_probe_position is not None and not int(stored.get("recovery_probe_ticket") or 0):
+            stored["recovery_probe_ticket"] = int(active_probe_position.get("ticket") or 0)
         probe_streak = int(stored.get("streak_at_probe_start") or streak)
-        if streak > probe_streak:
+        if streak > probe_streak and active_probe_lifecycle is None:
             stage = min(3, stage + 1)
             stored.update({
                 "state": "HARD_VETO",
@@ -588,6 +684,7 @@ def _loss_protection_state(
         "next_review_at": next_review,
         "recovery_probe": mode == "RECOVERY_PROBE",
         "recovery_probe_scalp_risk_pct": RECOVERY_PROBE_SCALP_RISK_PCT,
+        "recovery_probe_max_executable_risk_pct": RECOVERY_PROBE_MAX_EXECUTABLE_RISK_PCT,
         "dwell_override_eligible": mode == "HARD_VETO",
         "escalation_level": stage,
         "state_file": str(state_file) if state_file else None,
@@ -1093,6 +1190,23 @@ def _active_risk_reservations(
     """Reserve risk by active risk unit instead of treating any exposure as a global lock."""
     positions = [item for item in (status.get("positions") or []) if isinstance(item, dict)]
     events = _recovery_ledger_events(outcomes)
+    # P3.43: live chain_id is a mutable management flag and is cleared when a
+    # survivor graduates. Risk-units preserve the immutable composite lifecycle,
+    # so use them to map still-open members back to the correct recovery unit.
+    lifecycle_chain_by_ticket: dict[int, int] = {}
+    for unit in _active_recovery_lifecycles(outcomes):
+        try:
+            chain = int(unit.get("chain_id") or unit.get("root_ticket") or 0)
+        except (TypeError, ValueError):
+            chain = 0
+        if chain <= 0:
+            continue
+        for ticket in list(unit.get("member_tickets") or []):
+            try:
+                lifecycle_chain_by_ticket[int(ticket)] = chain
+            except (TypeError, ValueError):
+                pass
+
     latest_recovery_by_chain: dict[int, dict[str, Any]] = {}
     for event in events:
         try:
@@ -1114,6 +1228,11 @@ def _active_risk_reservations(
             chain_id = int(position.get("chain_id") or 0)
         except (TypeError, ValueError):
             chain_id = 0
+        if chain_id <= 0:
+            try:
+                chain_id = lifecycle_chain_by_ticket.get(int(position.get("ticket") or 0), 0)
+            except (TypeError, ValueError):
+                chain_id = 0
         zone_plan = str(position.get("zone_plan_id") or "").strip()
         if chain_id > 0:
             chain_groups.setdefault(chain_id, []).append(position)
@@ -1329,6 +1448,18 @@ def build_capital_sizing_plan(
     if recovery_probe_in_flight:
         veto_reasons.append(
             "Recovery probe is in flight; independent fresh risk waits for the composite probe result."
+        )
+
+    active_probe_lifecycle = _active_recovery_probe_lifecycle(outcomes)
+    if active_probe_lifecycle is not None:
+        veto_reasons.append(
+            "Immutable recovery-probe lifecycle is unresolved; independent FRESH_MARKET and zone risk are locked until the composite unit is flat."
+        )
+
+    active_recovery_lifecycles = _active_recovery_lifecycles(outcomes)
+    if active_recovery_lifecycles and active_probe_lifecycle is None:
+        veto_reasons.append(
+            "Recovery lifecycle is unresolved; independent FRESH_MARKET and zone risk are locked until the composite recovery unit is flat."
         )
 
     scalp_base = float(regime["scalp_base_risk_pct"])
@@ -1710,6 +1841,10 @@ def build_capital_sizing_plan(
             scalp_risk_amount,
             2,
         ),
+
+        "recovery_probe_active": loss_protection["state"] == "RECOVERY_PROBE",
+        "recovery_probe_target_risk_pct": RECOVERY_PROBE_SCALP_RISK_PCT,
+        "recovery_probe_max_executable_risk_pct": RECOVERY_PROBE_MAX_EXECUTABLE_RISK_PCT,
 
         "approved_zone_risk_amount": round(
             zone_risk_amount,

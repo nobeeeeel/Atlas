@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data"
 OUTCOMES_FILE = DATA_DIR / "trade_outcomes.json"
 
-OUTCOME_VERSION = 5
+OUTCOME_VERSION = 6
 MAX_CLOSED_TRADES = 5_000
 MAX_PROCESSED_EXIT_DEALS = 10_000
 DISAPPEARANCE_GRACE_SECONDS = 30.0
@@ -164,6 +164,9 @@ def _merge_trade_segments(
         "total_trades_on_entry_candle_before_this_entry", "opened_at_epoch",
         "entry_price", "entry_signal_score", "chain_id", "initial_hedge_level",
         "scalp_context_class", "scalp_context_zone_side", "scalp_context_pressure",
+        "recovery_probe_entry", "recovery_probe_target_risk_pct",
+        "recovery_probe_max_risk_pct", "recovery_probe_admission_risk_pct",
+        "recovery_probe_admission_risk_amount", "recovery_probe_frozen_risk_amount",
     ):
         if merged.get(key) in (None, "", 0, "UNKNOWN") and later.get(key) not in (None, ""):
             merged[key] = later.get(key)
@@ -323,6 +326,31 @@ def _empty_store() -> dict[str, Any]:
     }
 
 
+def _normalize_closed_lifecycle_accounting(
+    rows: list[dict[str, Any]],
+) -> int:
+    """Repair historical exact closes that still carry pre-close floating P/L."""
+    repaired = 0
+    for trade in rows:
+        if not isinstance(trade, dict):
+            continue
+        if not trade.get("exact_realized_pl_available"):
+            continue
+        if not trade.get("final_exit_deal_ticket") and not trade.get("close_time_epoch"):
+            continue
+        realized = round(_f(trade.get("realized_net_pl")), 8)
+        if (
+            abs(_f(trade.get("floating_net_pl"))) > 1e-12
+            or abs(_f(trade.get("lifecycle_net_pl")) - realized) > 1e-12
+            or _f(trade.get("remaining_volume")) > 1e-12
+        ):
+            trade["remaining_volume"] = 0.0
+            trade["floating_net_pl"] = 0.0
+            trade["lifecycle_net_pl"] = realized
+            repaired += 1
+    return repaired
+
+
 def _read_store_unlocked() -> dict[str, Any]:
     outcomes_file = current_account_outcomes_file(OUTCOMES_FILE)
     if not outcomes_file.exists():
@@ -346,6 +374,7 @@ def _read_store_unlocked() -> dict[str, Any]:
         closed = []
 
     repaired_closed, repaired_count = _repair_duplicate_closed_records(closed)
+    lifecycle_repaired_count = _normalize_closed_lifecycle_accounting(repaired_closed)
     data["version"] = OUTCOME_VERSION
     data["active"] = active
     data["closed"] = repaired_closed
@@ -354,6 +383,11 @@ def _read_store_unlocked() -> dict[str, Any]:
     if repaired_count:
         data["historical_duplicate_segments_merged"] = (
             _i(data.get("historical_duplicate_segments_merged")) + repaired_count
+        )
+    if lifecycle_repaired_count:
+        data["historical_closed_lifecycle_rows_repaired"] = (
+            _i(data.get("historical_closed_lifecycle_rows_repaired"))
+            + lifecycle_repaired_count
         )
     data.setdefault("last_account", {})
     if not isinstance(data.get("processed_exit_deal_tickets"), list):
@@ -474,6 +508,13 @@ def _attach_exit_deal(trade: dict[str, Any], deal: dict[str, Any]) -> None:
     )
 
     if bool(deal.get("full_close")):
+        # Once MT5 supplies an authoritative full-close deal there is no live
+        # floating component left. Preserve last_observed_net_pl separately as
+        # diagnostic pre-close evidence, but never double-count it into the
+        # closed lifecycle result.
+        trade["remaining_volume"] = 0.0
+        trade["floating_net_pl"] = 0.0
+        trade["lifecycle_net_pl"] = round(_f(trade.get("realized_net_pl")), 8)
         trade["final_exit_deal_ticket"] = deal_ticket
         trade["close_time_epoch"] = _i(deal.get("time_epoch"))
         trade["close_time_msc"] = _i(deal.get("time_msc"))
@@ -596,6 +637,7 @@ def _reconstruct_closed_trade_from_exit_deal(
         "opened_at_epoch": opened_at,
         "entry_policy_epoch": entry_policy_epoch,
         "order_origin": entry_order_origin,
+        "recovery_probe_entry": entry_order_origin.upper() == "RECOVERY_PROBE",
         "entry_comment": deal.get("entry_comment"),
         "scalp_context_class": scalp_context_class,
         "scalp_context_zone_side": scalp_context_zone_side,
@@ -612,7 +654,10 @@ def _reconstruct_closed_trade_from_exit_deal(
         "symbol": status.get("symbol"),
         "type": side,
         "order_origin": entry_order_origin,
-        "trading_mode": "ZONE" if entry_order_origin.upper() == "ATLAS_ZONE" else "SCALP",
+        "trading_mode": (
+            "ZONE" if entry_order_origin.upper() == "ATLAS_ZONE"
+            else ("RECOVERY_PROBE" if entry_order_origin.upper() == "RECOVERY_PROBE" else "SCALP")
+        ),
         "origin_guess": entry_order_origin,
         "origin_quality": "AUTHORITATIVE_MT5_HISTORY_RECONSTRUCTION",
         "entry_gate_mode": "UNKNOWN_RECONSTRUCTED",
@@ -691,6 +736,7 @@ def _origin_guess(position: dict[str, Any]) -> str:
         "VIRTUAL_SL_REENTRY",
         "HEDGE_CHILD",
         "ATLAS_ZONE",
+        "RECOVERY_PROBE",
     }:
         return authoritative
 
@@ -718,6 +764,7 @@ def _origin_quality(position: dict[str, Any]) -> str:
         "VIRTUAL_SL_REENTRY",
         "HEDGE_CHILD",
         "ATLAS_ZONE",
+        "RECOVERY_PROBE",
     }:
         return "AUTHORITATIVE_NYAO"
 
@@ -956,8 +1003,14 @@ def _new_trade(
         "order_origin": position.get("order_origin"),
         "trading_mode": (
             "ZONE" if str(position.get("order_origin") or "").upper() == "ATLAS_ZONE"
-            else "SCALP"
+            else ("RECOVERY_PROBE" if str(position.get("order_origin") or "").upper() == "RECOVERY_PROBE" else "SCALP")
         ),
+        "recovery_probe_entry": bool(position.get("recovery_probe_entry")) or str(position.get("order_origin") or "").upper() == "RECOVERY_PROBE",
+        "recovery_probe_target_risk_pct": _f(position.get("recovery_probe_target_risk_pct")),
+        "recovery_probe_max_risk_pct": _f(position.get("recovery_probe_max_risk_pct")),
+        "recovery_probe_admission_risk_pct": _f(position.get("recovery_probe_admission_risk_pct")),
+        "recovery_probe_admission_risk_amount": _f(position.get("recovery_probe_admission_risk_amount")),
+        "recovery_probe_frozen_risk_amount": _f(position.get("recovery_probe_frozen_risk_amount")),
         "origin_guess": _origin_guess(position),
         "origin_quality": _origin_quality(position),
         "entry_gate_mode": position.get("entry_gate_mode"),

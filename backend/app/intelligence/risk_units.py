@@ -238,6 +238,19 @@ def build_risk_units(outcomes: dict[str, Any] | None) -> dict[str, Any]:
             chain_groups.setdefault(chain_id, []).append(row)
             assigned.add(id(row))
 
+    # P3.41 atomic recovery lineage: hedge comments carry the immutable root
+    # ticket even when the root itself has chain_id=0. Attach that root to the
+    # child-defined composite before standalone scoring, otherwise a root close
+    # can be scored independently while its recovery children are still live.
+    for chain_id, members in list(chain_groups.items()):
+        for row in rows:
+            if id(row) in assigned:
+                continue
+            if _i(row.get("ticket")) == chain_id and not _is_hedge_child(row):
+                members.append(row)
+                assigned.add(id(row))
+                break
+
     for row in rows:
         if id(row) in assigned:
             continue

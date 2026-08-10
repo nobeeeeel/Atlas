@@ -1460,6 +1460,9 @@ def flatten_zone_execution_directive(plan: dict[str, Any]) -> dict[str, Any]:
         "capital_sizing_active": bool(plan.get("capital_sizing")),
         "capital_veto_new_risk": bool((plan.get("capital_sizing") or {}).get("veto_new_risk", False)),
         "approved_scalp_risk_pct": (plan.get("capital_sizing") or {}).get("approved_scalp_risk_pct") or 0.0,
+        "recovery_probe_active": bool((plan.get("capital_sizing") or {}).get("recovery_probe_active", False)),
+        "recovery_probe_target_risk_pct": (plan.get("capital_sizing") or {}).get("recovery_probe_target_risk_pct") or 0.0,
+        "recovery_probe_max_executable_risk_pct": (plan.get("capital_sizing") or {}).get("recovery_probe_max_executable_risk_pct") or 0.0,
         "maximum_total_strategy_risk_pct": (plan.get("capital_sizing") or {}).get("maximum_total_strategy_risk_pct") or 0.0,
         # Atlas uses this snapshot to keep the dashboard and executor on the
         # exact same campaign while live broker exposure exists. Nyao ignores

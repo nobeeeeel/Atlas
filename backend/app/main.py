@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,7 @@ from backend.app.intelligence.autonomous_policy import (
     get_pending_autonomous_policy,
     get_autonomous_policy_consensus,
     get_autonomous_policy_observations,
+    reset_autonomous_policy_consensus,
 )
 from backend.app.intelligence.llm_cycle_scheduler import (
     claim_llm_cycle,
@@ -168,7 +170,7 @@ from backend.app.agents.policy_proposal import (
 
 app = FastAPI(
     title="Atlas",
-    version="1.30.43",
+    version="1.30.58",
 )
 
 
@@ -231,6 +233,11 @@ class ZonePolicyUpdateRequest(BaseModel):
 class RiskAppetiteUpdateRequest(BaseModel):
     portfolio_hard_risk_pct: float = Field(ge=1.0, le=20.0)
     actor: str = Field(default="human_operator", min_length=1, max_length=120)
+
+
+class ConsensusResetRequest(BaseModel):
+    actor: str = Field(default="human_operator", min_length=1, max_length=120)
+    reason: str = Field(default="Operator requested a fresh learning window.", min_length=1, max_length=500)
 
 
 def _raise_review_workflow_error(exc: ReviewWorkflowError) -> None:
@@ -373,7 +380,7 @@ def root() -> dict[str, str]:
 def health() -> dict[str, str]:
     return {
         "status": "running",
-        "version": "1.30.43",
+        "version": "1.30.58",
         "strategy": "nyao",
         "execution_model": "account_environment_agnostic",
     }
@@ -2178,6 +2185,154 @@ def get_atlas_autonomous_policy_observations(limit: int = 200) -> dict[str, Any]
     return get_autonomous_policy_observations(limit=limit)
 
 
+@app.post("/api/v1/atlas/autonomous-policy-consensus/reset")
+def reset_atlas_autonomous_policy_consensus(request: ConsensusResetRequest) -> dict[str, Any]:
+    """Start a fresh operator-owned consensus window without changing live policy."""
+    return reset_autonomous_policy_consensus(
+        read_json(COMMANDS_FILE) or {}, actor=request.actor, reason=request.reason
+    )
+
+
+@app.get("/api/v1/atlas/account-performance")
+def get_atlas_account_performance() -> dict[str, Any]:
+    status = read_json(STATUS_FILE) or {}
+    outcomes = get_trade_outcomes(closed_limit=5000, include_active=True)
+    ledger = dict(status.get("account_ledger") or {})
+    return {
+        "version": "atlas-account-performance-v1",
+        "symbol": status.get("symbol"),
+        "currency": status.get("account_currency") or "USD",
+        "balance": status.get("balance", 0.0),
+        "equity": status.get("equity", 0.0),
+        "floating_pl": status.get("floating_profit", 0.0),
+        "broker_ledger": ledger,
+        "atlas_performance": evaluate_policy_performance(),
+        "active_outcomes": list(outcomes.get("active") or []),
+        "source_note": "Broker ledger uses MT5 account history; Atlas performance contains Atlas-attributed completed risk units only.",
+    }
+
+
+def _redact_debug(value: Any) -> Any:
+    sensitive = ("api_key", "apikey", "token", "secret", "password", "authorization", "cookie")
+    if isinstance(value, dict):
+        return {k: ("[REDACTED]" if any(s in str(k).lower() for s in sensitive) else _redact_debug(v)) for k,v in value.items()}
+    if isinstance(value, list): return [_redact_debug(v) for v in value]
+    return value
+
+
+@app.get("/api/v1/atlas/debug/snapshot")
+def get_atlas_debug_snapshot(full: bool = False) -> dict[str, Any]:
+    status = read_json(STATUS_FILE) or {}
+    command = read_json(COMMANDS_FILE) or {}
+    outcomes = get_trade_outcomes(closed_limit=(100 if full else 12), include_active=True)
+    risk_units = build_risk_units(get_trade_outcomes(closed_limit=2000, include_active=True))
+    capital = build_capital_sizing_plan(status, get_trade_outcomes(closed_limit=2000, include_active=True)) if status else {}
+    consensus = get_autonomous_policy_consensus(command)
+    applications = get_atlas_autonomous_policy_applications(limit=(20 if full else 5))
+    observations = get_autonomous_policy_observations(limit=(50 if full else 10))
+    try:
+        zone_plan = get_zone_execution_plan()
+    except Exception as exc:
+        zone_plan = {"ready": False, "error": str(exc)}
+    integrity=[]
+    def check(name, ok, detail): integrity.append({"name":name,"status":"PASS" if ok else "WARN","detail":detail})
+    check("POLICY_RUNTIME_RECONCILIATION", int(command.get("policy_epoch") or 0)==int(status.get("policy_epoch") or 0), f'command={command.get("policy_epoch")} runtime={status.get("policy_epoch")}')
+    check("SCALP_STRUCTURE_GEOMETRY", bool(status.get("scalp_structure_feasible", True)), str(status.get("scalp_structure_reason") or "OK"))
+    check("SPREAD_COST_GATE", bool(status.get("scalp_cost_ratio_feasible", True)), f'spread={status.get("spread_points")} cap={status.get("effective_spread_cap_points")}')
+    check("CLOSED_LIFECYCLE_PL", all(abs(float(r.get("floating_net_pl") or 0)) < 1e-9 for r in list(outcomes.get("closed") or [])), "Closed outcomes must carry zero floating P/L.")
+    check("MARKET_SESSION_TELEMETRY", bool(status.get("market_session_state")), str(status.get("market_session_state") or "Telemetry unavailable until Nyao 44.6.0 is running."))
+    if bool(capital.get("recovery_probe_active")):
+        probe_reason = str(status.get("recovery_probe_feasibility_reason") or "NOT_EVALUATED")
+        probe_fresh = bool(status.get("recovery_probe_feasibility_fresh", False))
+        probe_ok = probe_reason not in {"FINAL_RISK_CALCULATION_FAILED"}
+        check("RECOVERY_PROBE_BROKER_FEASIBILITY", probe_ok, f'target={capital.get("recovery_probe_target_risk_pct")}%; min={status.get("recovery_probe_minimum_executable_risk_pct")}%; cap={capital.get("recovery_probe_max_executable_risk_pct")}%; fresh={probe_fresh}; reason={probe_reason}')
+        amount = float(status.get("recovery_probe_minimum_executable_risk_amount") or 0.0)
+        pct = float(status.get("recovery_probe_minimum_executable_risk_pct") or 0.0)
+        eval_equity = float(status.get("recovery_probe_feasibility_equity") or 0.0)
+        if probe_fresh and amount > 0.0 and eval_equity > 0.0:
+            expected_pct = amount / eval_equity * 100.0
+            denominator_ok = abs(expected_pct - pct) <= 0.00001
+            check("RECOVERY_PROBE_FEASIBILITY_DENOMINATOR", denominator_ok, f'amount={amount}; pct={pct}; evaluation_equity={eval_equity}; expected_pct={expected_pct:.6f}')
+        else:
+            check("RECOVERY_PROBE_FEASIBILITY_DENOMINATOR", True, f'Not currently evaluated; reason={probe_reason}')
+    active_probe_positions = [p for p in list(status.get("positions") or []) if isinstance(p, dict) and (bool(p.get("recovery_probe_entry")) or str(p.get("order_origin") or "").upper() == "RECOVERY_PROBE")]
+    if active_probe_positions:
+        probe_risk_ok = all(float(p.get("recovery_probe_admission_risk_pct") or 0.0) > 0.0 and float(p.get("recovery_probe_admission_risk_pct") or 0.0) <= float(p.get("recovery_probe_max_risk_pct") or 0.0) + 1e-9 for p in active_probe_positions)
+        details = "; ".join(f'ticket={p.get("ticket")} admission={p.get("recovery_probe_admission_risk_pct")}% cap={p.get("recovery_probe_max_risk_pct")}% frozen=${p.get("recovery_probe_frozen_risk_amount")}' for p in active_probe_positions)
+        check("RECOVERY_PROBE_ACTIVE_RISK_ENVELOPE", probe_risk_ok, details)
+
+    active_recovery_units = [u for u in list(risk_units.get("units") or []) if isinstance(u, dict) and str(u.get("unit_type") or "").upper() == "RECOVERY_CHAIN" and str(u.get("state") or "").upper() == "ACTIVE"]
+    active_rp_units = [u for u in active_recovery_units if str(u.get("trading_mode") or "").upper() == "RECOVERY_PROBE"]
+    rp_chain_ids = {int(u.get("chain_id") or 0) for u in active_rp_units if int(u.get("chain_id") or 0) > 0}
+    rp_hedge_children = [p for p in list(status.get("positions") or []) if isinstance(p, dict) and str(p.get("order_origin") or "").upper() == "HEDGE_CHILD" and int(p.get("chain_id") or 0) in rp_chain_ids]
+    check("RECOVERY_PROBE_SINGLE_LEG_INVARIANT", not rp_hedge_children, "No HEDGE_CHILD may remain attached to an active RECOVERY_PROBE lifecycle." if not rp_hedge_children else "; ".join(f'child={p.get("ticket")} root={p.get("chain_id")} sl={p.get("sl")}' for p in rp_hedge_children))
+
+    if active_recovery_units:
+        recovery_member_tickets = {int(t) for u in active_recovery_units for t in list(u.get("member_tickets") or []) if str(t).isdigit()}
+        fresh_during_recovery = [p for p in list(status.get("positions") or []) if isinstance(p, dict) and str(p.get("order_origin") or "").upper() in {"FRESH_MARKET", "FRESH_LIMIT", "VIRTUAL_SL_REENTRY", "ATLAS_ZONE"} and int(p.get("ticket") or 0) not in recovery_member_tickets]
+        check("RECOVERY_LIFECYCLE_FRESH_RISK_LOCK", not fresh_during_recovery, "No independent fresh risk may coexist with any unresolved recovery lifecycle." if not fresh_during_recovery else "; ".join(f'ticket={p.get("ticket")} origin={p.get("order_origin")}' for p in fresh_during_recovery))
+        atomic_state_ok = all(not bool(u.get("eligible_for_loss_streak")) and str(u.get("result_class") or "").upper() == "UNSCORED" for u in active_recovery_units)
+        check("RECOVERY_COMPOSITE_OUTCOME_ATOMICITY", atomic_state_ok, f'active_units={[u.get("unit_id") for u in active_recovery_units]} streak={risk_units.get("consecutive_completed_loss_units")}')
+
+        reservation_rows = list(((capital.get("portfolio_allocation") or {}).get("reservations") or []))
+        reserved_ids = {str(r.get("unit_id") or "") for r in reservation_rows if isinstance(r, dict)}
+        expected_ids = {str(u.get("unit_id") or "") for u in active_recovery_units}
+        reservation_ok = expected_ids.issubset(reserved_ids)
+        check("RECOVERY_RESERVATION_COHERENCE", reservation_ok, f'expected={sorted(expected_ids)} reserved={sorted(reserved_ids)}')
+    else:
+        check("RECOVERY_LIFECYCLE_FRESH_RISK_LOCK", True, "No unresolved recovery lifecycle is active.")
+        check("RECOVERY_COMPOSITE_OUTCOME_ATOMICITY", True, "No active recovery composite is awaiting scoring.")
+        check("RECOVERY_RESERVATION_COHERENCE", True, "No active recovery reservation is required.")
+    directive = read_json(STATUS_FILE.parent / "zone_directive.json") or {}
+    startup_ready = str(directive.get("state") or "") != "STARTUP_RISK_RECONCILIATION" and bool(directive.get("capital_sizing_active", False))
+    check("STARTUP_RISK_AUTHORITY_READY", startup_ready, f'state={directive.get("state")} generated={directive.get("generated_at_epoch")}')
+    ra = dict(capital.get("risk_appetite") or get_risk_appetite())
+    persistence_ok = bool(ra.get("persistent_outside_release_tree")) and "_operator_state" in str(ra.get("file") or "")
+    check("OPERATOR_RISK_APPETITE_PERSISTENCE", persistence_ok, f'file={ra.get("file")} state={ra.get("persistence_state")} updated_by={ra.get("updated_by")}')
+    profit_protection_issues = []
+
+    for p in list(status.get("positions") or []):
+        if not isinstance(p, dict):
+            continue
+
+        profit = float(p.get("profit") or 0.0)
+        state = str(p.get("profit_management_state") or "")
+
+        # P3.44: eligibility is no longer determined from a universal
+        # dollar threshold. Nyao owns the ATR/age/favourable-excursion gate.
+        # Atlas only warns when Nyao explicitly reports an eligible state
+        # without a broker-side protection state.
+        if state == "PROTECTION_ELIGIBLE":
+            profit_protection_issues.append(
+                f'ticket={p.get("ticket")} '
+                f'profit=${profit:.2f} '
+                f'state={state} '
+                f'sl={p.get("sl")}'
+            )
+
+    check(
+        "BROKER_SIDE_PROFIT_PROTECTION",
+        not profit_protection_issues,
+        (
+            "Positions that Nyao declares protection-eligible have a "
+            "broker-side break-even/profit floor."
+            if not profit_protection_issues
+            else "; ".join(profit_protection_issues)
+        ),
+    )
+    payload={
+      "meta":{"atlas_version":"1.30.58","timestamp":datetime.now(timezone.utc).isoformat(),"symbol":status.get("symbol"),"mode":"FULL" if full else "COMPACT"},
+      "account":{"balance":status.get("balance"),"equity":status.get("equity"),"floating_profit":status.get("floating_profit"),"drawdown_pct":status.get("equity_drawdown_pct"),"ledger":status.get("account_ledger",{})},
+      "market":{"bid":status.get("bid"),"ask":status.get("ask"),"spread_points":status.get("spread_points"),"atr":status.get("current_atr"),"session_state":status.get("market_session_state"),"session_open":status.get("market_session_open"),"next_close_epoch":status.get("market_next_close_epoch"),"next_open_epoch":status.get("market_next_open_epoch")},
+      "execution":{"buy_score":status.get("buy_score"),"sell_score":status.get("sell_score"),"buy_adjusted_score":status.get("buy_adjusted_score"),"sell_adjusted_score":status.get("sell_adjusted_score"),"buy_threshold":status.get("buy_effective_threshold"),"sell_threshold":status.get("sell_effective_threshold"),"buy_block_reason":status.get("buy_block_reason"),"sell_block_reason":status.get("sell_block_reason"),"global_blocker":status.get("last_global_block_reason"),"structure_feasible":status.get("scalp_structure_feasible"),"structure_reason":status.get("scalp_structure_reason"),"cost_ratio_feasible":status.get("scalp_cost_ratio_feasible"),"recovery_probe":{"active":status.get("recovery_probe_active"),"target_risk_pct":status.get("recovery_probe_target_risk_pct"),"max_executable_risk_pct":status.get("recovery_probe_max_executable_risk_pct"),"minimum_executable_risk_pct":status.get("recovery_probe_minimum_executable_risk_pct"),"minimum_executable_risk_amount":status.get("recovery_probe_minimum_executable_risk_amount"),"minimum_volume":status.get("recovery_probe_minimum_volume"),"broker_override_active":status.get("recovery_probe_broker_override_active"),"feasibility_reason":status.get("recovery_probe_feasibility_reason"),"feasibility_fresh":status.get("recovery_probe_feasibility_fresh"),"feasibility_equity":status.get("recovery_probe_feasibility_equity"),"feasibility_evaluated_at_epoch":status.get("recovery_probe_feasibility_evaluated_at_epoch")},"positions":status.get("positions",[]),"startup_risk_authority":{"ready":startup_ready,"directive_state":directive.get("state"),"generated_at_epoch":directive.get("generated_at_epoch")}},
+      "capital":capital, "zone":zone_plan, "risk_units":risk_units, "performance":evaluate_policy_performance(),
+      "brain":{"consensus":consensus,"applications":applications,"observations":observations,"schedule":get_llm_cycle_schedule()},
+      "outcomes":outcomes,
+      "integrity":{"healthy":all(x["status"]=="PASS" for x in integrity),"checks":integrity,"warnings":[x["detail"] for x in integrity if x["status"]!="PASS"]},
+    }
+    return _redact_debug(payload)
+
+
 @app.get("/api/v1/atlas/autonomous-policy-applications")
 def get_atlas_autonomous_policy_applications(limit: int = 50) -> dict[str, Any]:
     """Reconcile autonomous intent with registered and live Nyao runtime state."""
@@ -2384,6 +2539,73 @@ def _refresh_zone_directive_for_symbol(symbol: str) -> None:
     )
 
 
+def _write_startup_risk_barrier(symbol: str) -> dict[str, Any]:
+    """Publish a fresh fail-closed bridge directive before any startup reconciliation.
+
+    This prevents Nyao from reusing a still-fresh pre-restart capital directive while
+    Atlas is rebuilding account outcomes, loss protection, and operator risk state.
+    Existing positions continue to be managed by their immutable entry policy.
+    """
+    _command_file, status_file, _runtime_file = symbol_bridge_paths(_ATLAS_BRIDGE_DIR, symbol)
+    status = read_json(status_file) or {}
+    now = datetime.now(timezone.utc)
+    payload = {
+        "version": "atlas-startup-risk-barrier-v1",
+        "symbol": symbol,
+        "generated_at": now.isoformat(),
+        "generated_at_epoch": int(now.timestamp()),
+        "state": "STARTUP_RISK_RECONCILIATION",
+        "mode": "SCALP_MODE",
+        "execution_requested": False,
+        "zone_entry_allowed": False,
+        "entry_count": 0,
+        "suspend_ordinary_scalp_entries": True,
+        "zone_aware_scalping_active": False,
+        "capital_sizing_active": True,
+        "capital_veto_new_risk": True,
+        "approved_scalp_risk_pct": 0.0,
+        "approved_zone_risk_pct": 0.0,
+        "maximum_total_strategy_risk_pct": 0.0,
+        "recovery_probe_active": False,
+        "recovery_probe_target_risk_pct": 0.05,
+        "recovery_probe_max_executable_risk_pct": 0.3,
+        "startup_risk_authority_ready": False,
+        "startup_risk_authority_reason": "Atlas is reconstructing account-scoped risk authority before enabling fresh entries.",
+        "account_login": status.get("account_login", 0),
+        "account_server": status.get("account_server", ""),
+    }
+    write_json(payload, status_file.parent / "zone_directive.json")
+    return payload
+
+
+def _startup_reconcile_symbol(symbol: str) -> dict[str, Any]:
+    """Fail closed, reconstruct deterministic risk authority, then publish the live directive."""
+    _write_startup_risk_barrier(symbol)
+    command_file, status_file, _runtime_file = symbol_bridge_paths(_ATLAS_BRIDGE_DIR, symbol)
+    status = read_json(status_file) or {}
+    identity = account_identity(status)
+    if not identity.get("ready"):
+        return {"symbol": symbol, "ready": False, "reason": "ACCOUNT_IDENTITY_NOT_READY"}
+    with scoped_symbol_storage(symbol):
+        with scoped_account_performance(status):
+            # Force reconstruction of all account-owned state before publication.
+            outcomes = get_trade_outcomes(closed_limit=2000, include_active=True)
+            build_risk_units(outcomes)
+            capital = build_capital_sizing_plan(status, outcomes)
+            get_risk_appetite()
+            _refresh_zone_directive_for_symbol(symbol)
+    directive = read_json(status_file.parent / "zone_directive.json") or {}
+    ready = str(directive.get("state") or "") != "STARTUP_RISK_RECONCILIATION" and bool(directive.get("capital_sizing_active", False))
+    return {
+        "symbol": symbol,
+        "ready": ready,
+        "account_fingerprint": identity.get("fingerprint"),
+        "loss_protection_state": (capital.get("loss_protection") or {}).get("state"),
+        "consecutive_losses": capital.get("consecutive_losses"),
+        "directive_state": directive.get("state"),
+    }
+
+
 async def _zone_directive_loop() -> None:
     while True:
         try:
@@ -2412,11 +2634,23 @@ async def _zone_directive_loop() -> None:
 @app.on_event("startup")
 async def start_llm_cycle_scheduler() -> None:
     global _LLM_SCHEDULE_LOOP_TASK, _ZONE_DIRECTIVE_LOOP_TASK
-    for item in discover_bridge_symbols(_ATLAS_BRIDGE_DIR):
-        symbol = str(item.get("symbol") or "").strip()
-        if symbol:
-            with scoped_symbol_storage(symbol):
-                recover_interrupted_llm_cycle()
+    symbols = [str(item.get("symbol") or "").strip() for item in discover_bridge_symbols(_ATLAS_BRIDGE_DIR)]
+    symbols = [symbol for symbol in symbols if symbol]
+
+    # P3.52: publish fail-closed barriers first, before any scheduler/background
+    # work can expose a stale pre-restart capital directive to Nyao.
+    for symbol in symbols:
+        _write_startup_risk_barrier(symbol)
+
+    for symbol in symbols:
+        with scoped_symbol_storage(symbol):
+            recover_interrupted_llm_cycle()
+        try:
+            await asyncio.to_thread(_startup_reconcile_symbol, symbol)
+        except Exception:
+            # Keep the barrier in place on any reconstruction failure.
+            _write_startup_risk_barrier(symbol)
+
     _LLM_SCHEDULE_LOOP_TASK = asyncio.create_task(
         _llm_schedule_loop(),
         name="atlas-llm-cycle-scheduler",
@@ -2429,6 +2663,14 @@ async def start_llm_cycle_scheduler() -> None:
 
 @app.on_event("shutdown")
 async def stop_llm_cycle_scheduler() -> None:
+    # A graceful Atlas stop revokes fresh-entry authority immediately.
+    for item in discover_bridge_symbols(_ATLAS_BRIDGE_DIR):
+        symbol = str(item.get("symbol") or "").strip()
+        if symbol:
+            try:
+                _write_startup_risk_barrier(symbol)
+            except Exception:
+                pass
     tasks = [task for task in _LLM_CYCLE_TASKS.values() if not task.done()]
     if _LLM_SCHEDULE_LOOP_TASK and not _LLM_SCHEDULE_LOOP_TASK.done():
         _LLM_SCHEDULE_LOOP_TASK.cancel()
@@ -2678,7 +2920,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 .zone-card.invalidated{opacity:.82;border-color:rgba(255,91,116,.28);background:linear-gradient(90deg,rgba(255,91,116,.045),var(--panel3) 36%)}
 .zone-plan.invalidated{border-color:rgba(255,91,116,.35);background:linear-gradient(90deg,rgba(255,91,116,.05),var(--panel2) 45%)}
 
-/* Atlas Help & Guide — 1.30.47 */
+/* Atlas Help & Guide — 1.30.58 */
 .help-hero{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(280px,.7fr);gap:14px;align-items:stretch}
 .help-hero-copy{padding:24px}.help-hero-copy h3{font-size:22px;margin:0 0 8px}.help-hero-copy p{max-width:840px;line-height:1.7}
 .help-search-wrap{display:flex;gap:10px;align-items:center;margin-top:16px}.help-search-wrap .search{flex:1;min-width:0}
@@ -2740,6 +2982,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
       <div class="top-meta">
         <div class="notify-wrap"><button class="notify-bell" id="notify-bell" onclick="toggleNotifications()" title="Notifications">♢<span id="notify-count" class="notify-count">0</span></button></div>
         <select id="symbol-select" class="symbol-select" onchange="switchSymbol(this.value)"><option value="">Symbol —</option></select>
+        <span class="pill" id="market-session-pill">MARKET —</span>
         <span class="pill" id="account-pill">MT5 ACCOUNT</span>
         <span class="pill" id="epoch-pill">Epoch —</span>
         <span class="pill" id="command-pill">Command —</span>
@@ -2865,6 +3108,23 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 
 
 
+        <div class="card section" id="account-performance-card">
+          <div class="section-head"><div><h3>Account P&amp;L &amp; Cashflow</h3><p>Broker-realized account performance separated from deposits and withdrawals.</p></div><span id="acct-market-state" class="badge">MARKET —</span></div>
+          <div class="grid g4">
+            <div class="kpi"><div class="label">Today realized</div><div class="value small" id="acct-today">—</div></div>
+            <div class="kpi"><div class="label">Yesterday realized</div><div class="value small" id="acct-yesterday">—</div></div>
+            <div class="kpi"><div class="label">Last 7 days</div><div class="value small" id="acct-week">—</div></div>
+            <div class="kpi"><div class="label">Last 30 days</div><div class="value small" id="acct-month">—</div></div>
+          </div>
+          <div class="grid g4" style="margin-top:12px">
+            <div class="kpi"><div class="label">Balance</div><div class="value small" id="acct-balance">—</div></div>
+            <div class="kpi"><div class="label">Equity / floating</div><div class="value small" id="acct-equity">—</div></div>
+            <div class="kpi"><div class="label">Deposits</div><div class="value small" id="acct-deposits">—</div></div>
+            <div class="kpi"><div class="label">Withdrawals</div><div class="value small" id="acct-withdrawals">—</div></div>
+          </div>
+          <div class="callout" id="acct-detail" style="margin-top:12px">Waiting for MT5 account ledger telemetry.</div>
+        </div>
+
         <div class="command-workspaces section">
           <button class="workspace-card market" onclick="go('market')">
             <div class="workspace-icon">MKT</div>
@@ -2947,7 +3207,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
               <div class="kpi"><div class="label">Global blocker</div><div class="value small" id="signal-global-block">—</div></div>
               <div class="kpi"><div class="label">New-bar gate</div><div class="value small" id="signal-newbar">—</div></div>
               <div class="kpi"><div class="label">Cooldown</div><div class="value small" id="signal-cooldown">—</div></div>
-              <div class="kpi"><div class="label">Spread gate</div><div class="value small" id="signal-spread">—</div></div>
+              <div class="kpi"><div class="label">Spread cost gate</div><div class="value small" id="signal-spread">—</div></div>
             </div>
           </div>
         </div>
@@ -3023,7 +3283,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
       </section>
 
       <section id="view-positions" class="view">
-        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><div class="row"><span class="badge info">NYAO EXECUTION</span><span class="badge ok">RISK UI · 1.30.47</span></div></div>
+        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><div class="row"><span class="badge info">NYAO EXECUTION</span><span class="badge ok">RISK UI · 1.30.58</span></div></div>
         <div class="grid g3">
           <div class="card"><div class="label">Strategy positions</div><div class="value" id="p-count">0</div></div>
           <div class="card"><div class="label">Total lots remaining</div><div class="value" id="p-lots">0.00</div></div>
@@ -3226,6 +3486,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
           <div style="margin-top:14px"><div class="label">Evidence maturity by domain</div><div id="pi-domains" class="changes" style="margin-top:8px"></div></div>
           <div style="margin-top:14px"><div class="label">Highest-priority parameter candidates</div><div id="pi-candidates" class="changes" style="margin-top:8px"></div></div>
           <div class="callout" style="margin-top:12px" id="pi-authority-note">Historical value/outcome differences are descriptive associations, not causal proof.</div>
+          <div class="actions" style="margin-top:10px"><button class="btn danger" onclick="resetConsensusWindow()">Operator reset learning window</button></div>
         </div>
 
         
@@ -3346,7 +3607,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
             <p>Atlas separates <strong>market interpretation</strong>, <strong>deterministic risk authority</strong>, <strong>Nyao execution</strong>, and <strong>Gemini policy learning</strong>. This guide explains the dashboard in that same order so a new operator can understand why a trade is or is not allowed without reading the source code.</p>
             <div class="help-flow"><span>Market evidence</span><b>→</b><span>Atlas risk & zone authority</span><b>→</b><span>Nyao execution gates</span><b>→</b><span>Position lifecycle</span><b>→</b><span>Performance evidence</span><b>→</b><span>Gemini policy learning</span></div>
             <div class="help-search-wrap"><input id="help-search" class="search" placeholder="Search: spread cap, zone invalidated, lifecycle P/L, consensus, MFE…" oninput="filterHelp(this.value)"><button class="btn" onclick="clearHelpSearch()">Clear</button></div>
-            <div class="help-version">Guide aligned to Atlas 1.30.47 · Nyao 44.5.3</div>
+            <div class="help-version">Guide aligned to Atlas 1.30.58 · Nyao 44.6.3</div>
           </div>
           <div class="card help-quick">
             <div class="label">Jump to a live workspace</div>
@@ -3407,7 +3668,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
               <div class="help-definition"><dt>Global blocker</dt><dd>A market-wide veto affecting both directions, such as trading pause, account safety, committed zone ownership or another global execution condition.</dd></div>
               <div class="help-definition"><dt>New-bar gate</dt><dd>Whether entry is restricted to a new candle. When disabled, qualified intrabar entries may be evaluated.</dd></div>
               <div class="help-definition"><dt>Cooldown</dt><dd>Temporary protection after configured loss sequences or other timing conditions. It prevents repeated immediate re-entry.</dd></div>
-              <div class="help-definition"><dt>Spread gate</dt><dd>Whether the current bid/ask cost is acceptable for the active strategy geometry. Scalp and zone campaigns use separate economics.</dd></div>
+              <div class="help-definition"><dt>Spread cost gate</dt><dd>Whether bid/ask cost itself is affordable for the planned scalp geometry. This is separate from Structure Feasibility; a structurally invalid stop can block entry even when spread cost passes.</dd></div>
               <div class="help-definition"><dt>Market bias</dt><dd>Atlas's current directional interpretation. It explains context; it is not execution authority by itself.</dd></div>
               <div class="help-definition"><dt>Volatility / volatility ratio</dt><dd>Current ATR conditions compared with recent average ATR. The ratio helps Atlas scale risk and judge whether current movement is unusual.</dd></div>
               <div class="help-definition"><dt>Execution fit</dt><dd>Whether current market geometry and cost are suitable for the strategy. A strong directional thesis can still have poor execution fit.</dd></div>
@@ -3657,7 +3918,7 @@ const CONTROL_CONFIG = __CONTROL_CONFIG__;
 const state = {
   status:null, command:null, intelligence:null, parameterIntel:null, proposal:null, review:null,
   supervised:null, preflight:null, execution:null, ack:null, arm:null, llmCycle:null, llmStatus:null, autoConsensus:null, responsiveness:null, candles:null, zoneMap:null, zonePlan:null,
-  executionEvents:null, epochs:null, outcomes:null, performance:null, riskUnits:null, recoveryAttribution:null, recoveryRisk:null, riskAppetite:null, audit:null, autoApplications:null, dirty:{}, symbols:[], selectedSymbol:null, notificationBaseline:null, decisionBaseline:null
+  executionEvents:null, epochs:null, outcomes:null, performance:null, riskUnits:null, recoveryAttribution:null, recoveryRisk:null, riskAppetite:null, audit:null, autoApplications:null, accountPerf:null, dirty:{}, symbols:[], selectedSymbol:null, notificationBaseline:null, decisionBaseline:null
 };
 
 const viewMeta={
@@ -3928,6 +4189,7 @@ function updateChrome(){
   document.getElementById("side-dot").className="dot "+(connected?"ok":"bad");
   document.getElementById("side-connection").textContent=connected?"Connected":"Offline";
   document.getElementById("side-symbol").textContent=symbol;
+  const ms=String(s.market_session_state||"UNKNOWN");const mp=document.getElementById("market-session-pill");if(mp){mp.textContent=`MARKET ${pretty(ms)}`;mp.className=`pill ${ms==="CLOSED"?"bad":ms==="CLOSING_SOON"?"warn":""}`};
   document.getElementById("account-pill").textContent=accountType();
   document.getElementById("epoch-pill").textContent="Epoch "+text(c.policy_epoch??s.policy_epoch);
   document.getElementById("command-pill").textContent="Command "+text(c.command_version??s.applied_command_version);
@@ -3970,9 +4232,11 @@ function renderOverview(){
   setGlobal("global-status-brain",cycle.running?"REVIEWING":cycle.enabled&&Number.isFinite(Number(cycle.seconds_until_next_run))?`REVIEW ${age(cycle.seconds_until_next_run)}`:"IDLE");
   setGlobal("global-status-health",connected&&permissionsOk&&s.zone_directive_fresh!==false?"HEALTHY":connected?"DEGRADED":"OFFLINE");
   const gsd=document.getElementById("global-status-dot");if(gsd)gsd.className="dot "+(connected?"ok":"bad");
-  document.getElementById("hero-state").textContent=!connected?"Nyao is offline":zoneAware?`${side} zone context guiding scalps`:zoneMode?`${side} zone campaign owns execution`:"Atlas is scanning for scalps";
+  document.getElementById("hero-state").textContent=!connected?"Nyao is offline":String(s.market_session_state||"")==="CLOSED"?"Market is closed":zoneAware?`${side} zone context guiding scalps`:zoneMode?`${side} zone campaign owns execution`:"Atlas is scanning for scalps";
   document.getElementById("hero-copy").textContent=!connected
     ?"Atlas cannot verify market state or execution authority."
+    :String(s.market_session_state||"")==="CLOSED"
+      ?`Broker session is closed for ${text(s.symbol)}. Existing state remains observable; no fresh broker execution is possible until the next session opens.`
     :zoneAware
       ?`A qualified ${side} zone is informing scalp direction, but the full zone campaign does not own execution. Nyao keeps normal scalp thresholds, costs and Atlas risk limits.`
       :zoneMode
@@ -3980,7 +4244,7 @@ function renderOverview(){
         :"No priority zone currently owns execution. Nyao may scalp when Atlas direction, cost, signal and capital gates agree.";
   const modeBadge=document.getElementById("hero-mode-badge");modeBadge.textContent=connected?modeName:"OFFLINE";modeBadge.className="badge "+(connected?(zoneMode?"info":"ok"):"bad");
   document.getElementById("hero-symbol").textContent=text(s.symbol||state.selectedSymbol);
-  document.getElementById("hero-market-state").textContent=zoneAware?`${side} aligned preferred · counter-zone conditional`:zoneMode?(confirmed?"zone confirmed":"awaiting confirmation"):(s.spread_within_limit===false?"cost blocked":"scalp scan active");
+  document.getElementById("hero-market-state").textContent=zoneAware?`${side} aligned preferred · counter-zone conditional`:zoneMode?(confirmed?"zone confirmed":"awaiting confirmation"):(s.scalp_cost_ratio_feasible===false?"spread cost blocked":s.scalp_structure_feasible===false?"structure blocked":"scalp scan active");
   document.getElementById("hero-bridge").textContent=s.zone_directive_fresh===false?"stale":"live";
   document.getElementById("hero-risk").textContent=modeName;
   document.getElementById("hero-policy").textContent=campaignRisk>0?`${fmt(campaignRisk,3)}% equity`:capital.approved_scalp_risk_pct>0?`${fmt(capital.approved_scalp_risk_pct,3)}% equity`:"No new risk";
@@ -4115,9 +4379,19 @@ function renderOverview(){
     const adapted=lossProtection.release_reason==="MATERIAL_POLICY_RUNTIME_CONFIRMED";
     capitalBadge.textContent=adapted?"POLICY-ADAPTED RECOVERY":"RECOVERY PROBE";
     capitalBadge.className="badge warn";
-    document.getElementById("capital-risk-copy").textContent=adapted
-      ?`Epoch ${text(release.policy_epoch)} is runtime-confirmed after the latest loss and materially changed fresh-entry policy (${(release.material_controls||[]).map(pretty).join(", ")||"entry controls"}). The old loss timer was released; only a reduced ${fmt(lossProtection.recovery_probe_scalp_risk_pct||scalpPct,3)}% scalp probe is permitted. The ${text(lossProtection.consecutive_losses,0)} prior losses remain evidence; zone risk stays zero.`
-      :`Loss-protection timer completed. Only a reduced ${fmt(lossProtection.recovery_probe_scalp_risk_pct||scalpPct,3)}% scalp probe is permitted; zone risk remains zero until the streak breaks.`;
+    const probeTarget=Number(capital.recovery_probe_target_risk_pct||lossProtection.recovery_probe_scalp_risk_pct||scalpPct||0);
+    const probeCap=Number(capital.recovery_probe_max_executable_risk_pct||lossProtection.recovery_probe_max_executable_risk_pct||0);
+    const probeMinPct=Number(s.recovery_probe_minimum_executable_risk_pct||0);
+    const probeMinUsd=Number(s.recovery_probe_minimum_executable_risk_amount||0);
+    const probeReason=String(s.recovery_probe_feasibility_reason||"NOT_EVALUATED");
+    const probeBrokerNote=probeReason==="BROKER_MINIMUM_OVERRIDE_WITHIN_PROBE_CAP"
+      ?` Broker minimum requires ${money(probeMinUsd)} (${fmt(probeMinPct,3)}%); bounded minimum-volume override is active within the ${fmt(probeCap,3)}% probe cap.`
+      :probeReason==="MIN_VOLUME_RISK_EXCEEDS_PROBE_CAP"
+        ?` Broker minimum would risk ${money(probeMinUsd)} (${fmt(probeMinPct,3)}%), above the ${fmt(probeCap,3)}% recovery cap, so the probe remains unexecutable.`
+        :` If ${fmt(probeTarget,3)}% is below broker minimum size, Atlas may use the minimum volume only while actual stop risk stays ≤ ${fmt(probeCap,3)}%.`;
+    document.getElementById("capital-risk-copy").textContent=(adapted
+      ?`Epoch ${text(release.policy_epoch)} is runtime-confirmed after the latest loss and materially changed fresh-entry policy (${(release.material_controls||[]).map(pretty).join(", ")||"entry controls"}). The old loss timer was released; target probe risk is ${fmt(probeTarget,3)}%. The ${text(lossProtection.consecutive_losses,0)} prior losses remain evidence; zone risk stays zero.`
+      :`Loss-protection timer completed. Target scalp probe risk is ${fmt(probeTarget,3)}%; zone risk remains zero until the streak breaks.`)+probeBrokerNote;
   }
   document.getElementById("capital-scalp-budget").textContent=capitalSyncing?"SYNCING":capitalExplicitVeto?"0.000% · VETOED":scalpAmount>0?`${money(scalpAmount)} · ${fmt(scalpPct,3)}%`:`${fmt(scalpPct,3)}%`;
   document.getElementById("capital-zone-budget").textContent=capitalSyncing?"SYNCING":capitalExplicitVeto?"0.000% · VETOED":zoneAmount>0?`${money(zoneAmount)} · ${fmt(zonePct,3)}%`:`${fmt(zonePct,3)}%`;
@@ -4290,7 +4564,7 @@ function renderLiveAnalysis(){
   document.getElementById("signal-global-block").textContent=pretty(block);
   document.getElementById("signal-newbar").textContent=s.new_bar_entry_only?(s.new_bar_ready?"READY":"WAITING"):"INTRABAR";
   document.getElementById("signal-cooldown").textContent=s.cooldown_active?"ACTIVE":"INACTIVE";
-  document.getElementById("signal-spread").textContent=s.spread_within_limit===false?"BLOCKED":s.spread_within_limit===true?"CLEAR":"—";
+  document.getElementById("signal-spread").textContent=s.scalp_cost_ratio_feasible===false?"BLOCKED":s.scalp_cost_ratio_feasible===true?"CLEAR":"—";
 }
 
 function renderZoneChart(zoneMap,livePrice=null){
@@ -5408,7 +5682,21 @@ function renderHistory(){
   document.getElementById("policy-epochs").innerHTML=(Array.isArray(eps)?eps.slice(-12).reverse():[]).map(e=>`<div class="event"><span class="muted">${esc(text(e.created_at||e.registered_at||""))}</span><div><strong>Epoch ${esc(text(e.policy_epoch??e.epoch))}</strong><div class="muted">Command ${esc(text(e.applied_command_version??e.command_version))}</div></div><span class="badge info">${esc(text(e.runtime_control_count??157))}</span></div>`).join("")||`<div class="callout">No policy epochs returned.</div>`;
   document.getElementById("raw-diagnostics").textContent=JSON.stringify({audit:state.audit,latest_execution:events[0]||null,command:{command_version:state.command?.command_version,policy_epoch:state.command?.policy_epoch},status:{applied_command_version:state.status?.applied_command_version,policy_epoch:state.status?.policy_epoch}},null,2)
 }
-function renderAll(){updateChrome();renderOverview();renderOpportunityQueue();renderDecisionTimeline();renderLiveAnalysis();renderAnalysis();renderPositions();renderLlmCycle();renderAutonomousConsensus();renderResponsiveness();renderAtlas();renderParameterIntelligence();renderControl();renderHistory();if(!document.getElementById("runtime-controls").children.length)renderControls()}
+function accountMoney(v){const n=Number(v);return Number.isFinite(n)?`${n>=0?"+":"-"}$${Math.abs(n).toFixed(2)}`:"—"}
+function renderAccountPerformance(){
+  const a=state.accountPerf||{}, l=a.broker_ledger||{}, s=state.status||{};
+  const by=(k)=>l[k]||{};
+  const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};
+  set("acct-today",accountMoney(by("today").realized_trading_pl));set("acct-yesterday",accountMoney(by("yesterday").realized_trading_pl));
+  set("acct-week",accountMoney(by("last_7_days").realized_trading_pl));set("acct-month",accountMoney(by("last_30_days").realized_trading_pl));
+  set("acct-balance",`$${Number(a.balance||0).toFixed(2)}`);set("acct-equity",`$${Number(a.equity||0).toFixed(2)} / ${accountMoney(a.floating_pl)}`);
+  set("acct-deposits",`$${Number((l.lifetime||{}).deposits||0).toFixed(2)}`);set("acct-withdrawals",`$${Math.abs(Number((l.lifetime||{}).withdrawals||0)).toFixed(2)}`);
+  const ms=String(s.market_session_state||"UNKNOWN");const b=document.getElementById("acct-market-state");if(b){b.textContent=`MARKET ${pretty(ms)}`;b.className=`badge ${ms==="OPEN"?"ok":ms==="CLOSING_SOON"?"warn":ms==="CLOSED"?"bad":"info"}`}
+  const d=document.getElementById("acct-detail");if(d){const nc=Number(s.market_next_close_epoch||0), no=Number(s.market_next_open_epoch||0);d.textContent=l.version?`Broker server ledger · net deposits are separated from trading P/L.${ms==="OPEN"&&nc?` Next close ${new Date(nc*1000).toLocaleString()}.`:ms==="CLOSED"&&no?` Next open ${new Date(no*1000).toLocaleString()}.`:""}`:"Nyao account-ledger telemetry is unavailable. Recompile Nyao 44.6.0 for broker P/L and deposit history."}
+}
+async function resetConsensusWindow(){if(!confirm("Start a fresh Gemini consensus learning window? This does not change the active policy or close positions."))return;try{const r=await api("/api/v1/atlas/autonomous-policy-consensus/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({actor:"human_operator",reason:"Operator reset from Atlas dashboard"})});state.autoConsensus=r.consensus||r;await loadLlmCycle();renderAll();toast("Learning window reset. Active policy unchanged.")}catch(e){toast(e.message,true)}}
+
+function renderAll(){updateChrome();renderOverview();renderOpportunityQueue();renderDecisionTimeline();renderLiveAnalysis();renderAnalysis();renderPositions();renderLlmCycle();renderAutonomousConsensus();renderResponsiveness();renderAtlas();renderParameterIntelligence();renderAccountPerformance();renderControl();renderHistory();if(!document.getElementById("runtime-controls").children.length)renderControls()}
 
 async function loadCore(){
   const before=`${state.command?.command_version??""}:${state.command?.policy_epoch??""}:${state.status?.applied_command_version??""}:${state.status?.policy_epoch??""}`;
@@ -5437,7 +5725,8 @@ async function loadHistory(){
     api("/api/v1/atlas/autonomous-policy-applications?limit=50"),
     api("/api/v1/atlas/risk-units"),
     api("/api/v1/atlas/recovery-attribution"),
-    api("/api/v1/atlas/recovery-risk")
+    api("/api/v1/atlas/recovery-risk"),
+    api("/api/v1/atlas/account-performance")
   ]);
   if(rs[0].status==="fulfilled")state.executionEvents=rs[0].value;
   if(rs[1].status==="fulfilled")state.audit=rs[1].value;
@@ -5448,6 +5737,7 @@ async function loadHistory(){
   if(rs[6].status==="fulfilled")state.riskUnits=rs[6].value;
   if(rs[7].status==="fulfilled")state.recoveryAttribution=rs[7].value;
   if(rs[8].status==="fulfilled")state.recoveryRisk=rs[8].value;
+  if(rs[9].status==="fulfilled")state.accountPerf=rs[9].value;
 }
 async function boot(){
   // Restore operator notification preferences before the first live render.

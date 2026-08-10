@@ -149,7 +149,23 @@ def _consensus_history_summary(
 
 def _baseline_anchor(schedule: dict[str, Any], current_command: dict[str, Any]) -> datetime | None:
     last_applied = _parse(schedule.get("last_auto_applied_at"))
-    return last_applied
+    store = _read_consensus_store()
+    reset = dict(store.get("operator_reset") or {})
+    reset_at = _parse(reset.get("reset_at")) if int(reset.get("baseline_policy_epoch") or -1) == int(current_command.get("policy_epoch") or 0) else None
+    candidates = [x for x in (last_applied, reset_at) if x is not None]
+    return max(candidates) if candidates else None
+
+
+def reset_autonomous_policy_consensus(current_command: dict[str, Any], *, actor: str, reason: str) -> dict[str, Any]:
+    """Operator-owned reset of the current observation window; live policy is untouched."""
+    store = _read_consensus_store()
+    baseline_epoch = int(current_command.get("policy_epoch") or 0)
+    reset_at = _now().isoformat()
+    store["operator_reset"] = {"baseline_policy_epoch": baseline_epoch, "reset_at": reset_at, "actor": actor, "reason": reason}
+    _atomic_json(AUTONOMOUS_CONSENSUS_FILE, store)
+    _event("AUTO_CONSENSUS_OPERATOR_RESET", {"baseline_policy_epoch": baseline_epoch, "reset_at": reset_at, "actor": actor, "reason": reason})
+    consensus = get_autonomous_policy_consensus(current_command)
+    return {"status":"RESET","active_policy_unchanged":True,"baseline_policy_epoch":baseline_epoch,"reset_at":reset_at,"actor":actor,"reason":reason,"consensus":consensus}
 
 
 def _normalize_observations(

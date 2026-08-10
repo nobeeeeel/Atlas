@@ -250,6 +250,12 @@ class PositionTelemetry(BaseModel):
     zone_plan_id: str = ""
     zone_layer: int = 0
     identity_restored_from_registry: bool = False
+    recovery_probe_entry: bool = False
+    recovery_probe_target_risk_pct: float = 0.0
+    recovery_probe_max_risk_pct: float = 0.0
+    recovery_probe_admission_risk_pct: float = 0.0
+    recovery_probe_admission_risk_amount: float = 0.0
+    recovery_probe_frozen_risk_amount: float = 0.0
 
     management_policy_lock_active: bool = False
     management_policy_source: str = ""
@@ -281,6 +287,11 @@ class PositionTelemetry(BaseModel):
     trailing_policy_ts_input_type: int = 0
     trailing_policy_distance_value: float = 0.0
     trailing_policy_value_multiplier: float = 0.0
+
+    profit_management_state: str = "UNPROTECTED"
+    profit_protection_trigger_amount: float = 0.0
+    protected_profit_amount: float = 0.0
+    protected_profit_pct_of_current_profit: float = 0.0
 
     partial_close_level: int = 0
     break_even_locked: bool = False
@@ -429,6 +440,8 @@ class Status(BaseModel):
     # adapts its executable SL/TP geometry to the live spread before capital
     # sizing; the fixed spread setting is only an emergency outer ceiling.
     scalp_cost_gate_version: str = ""
+    scalp_stop_geometry_basis: str = ""
+    scalp_stop_input_lot_dependent: bool = False
     scalp_cost_gate_basis: str = ""
     scalp_cost_limiting_factor: str = ""
     scalp_cost_adjusted: bool = False
@@ -464,6 +477,12 @@ class Status(BaseModel):
     total_pause_duration_minutes: float = 0.0
     outside_trading_hours: bool = False
     near_market_close: bool = False
+    market_session_state: str = "UNKNOWN"
+    market_session_open: bool = False
+    market_next_close_epoch: int = 0
+    market_next_open_epoch: int = 0
+    market_session_source: str = ""
+    account_ledger: dict[str, Any] = Field(default_factory=dict)
     leverage_changed: bool = False
     initial_leverage: int = 0
 
@@ -535,6 +554,17 @@ class Status(BaseModel):
     capital_sizing_version: str = ""
     capital_veto_new_risk: bool = False
     approved_scalp_risk_pct: float = 0.0
+    recovery_probe_active: bool = False
+    recovery_probe_target_risk_pct: float = 0.0
+    recovery_probe_max_executable_risk_pct: float = 0.0
+    recovery_probe_minimum_executable_risk_pct: float = 0.0
+    recovery_probe_minimum_executable_risk_amount: float = 0.0
+    recovery_probe_minimum_volume: float = 0.0
+    recovery_probe_broker_override_active: bool = False
+    recovery_probe_feasibility_reason: str = "NOT_EVALUATED"
+    recovery_probe_feasibility_fresh: bool = False
+    recovery_probe_feasibility_equity: float = 0.0
+    recovery_probe_feasibility_evaluated_at_epoch: int = 0
     maximum_total_strategy_risk_pct: float = 0.0
     recovery_sizing_version: str = ""
     recovery_sizing_reason: str = "NOT_EVALUATED"
@@ -771,6 +801,25 @@ class Status(BaseModel):
     last_order_retcode: int = 0
     last_order_ticket: int = 0
     last_order_time_epoch: int = 0
+    # P3.44 broker-preflight integrity
+    preflight_state: str = "NOT_EVALUATED"
+    preflight_retry_count: int = 0
+    preflight_retcode: int = 0
+    preflight_comment: str = ""
+
+    preflight_request_price: float = 0.0
+    preflight_request_sl: float = 0.0
+    preflight_request_tp: float = 0.0
+    preflight_request_volume: float = 0.0
+
+    preflight_bid: float = 0.0
+    preflight_ask: float = 0.0
+
+    preflight_stops_level: int = 0
+    preflight_freeze_level: int = 0
+
+    preflight_sl_distance_points: float = 0.0
+    preflight_tp_distance_points: float = 0.0
     terminal_algo_trading_allowed: Optional[bool] = None
     ea_trading_allowed: Optional[bool] = None
     account_trade_allowed: Optional[bool] = None

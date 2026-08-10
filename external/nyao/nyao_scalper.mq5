@@ -4,7 +4,7 @@
 // | © Copyright Nyao Scalper by Elriz Wiraswara                      |
 // +------------------------------------------------------------------+
 #property copyright "© Copyright Nyao Scalper by Elriz Wiraswara"
-#property version "44.5.3"
+#property version "44.6.3"
 #property description "Auto Trading EA Robot with Comprehensive Features"
 #property description ""
 #property description "This is an open-source project for educational and experimental purposes only"
@@ -13,7 +13,7 @@
 #property description "No guarantee of profitability. Use at your own risk. Past performance ≠ future results"
 #property description "Built with significant effort, please use and share respectfully"
 #property description "I do not sell this EA myself. If sold under my name, treat it as a scam and report it"
-#property description "Named after my cat MaoMao, he says 'Nyao!' when spotting good trades"
+#property description "Named after my cat MaoMao, he says 'Nyao!' when spo  tting good trades"
 #property strict
 
 // Windows API for Algo Trading Button Control
@@ -492,6 +492,8 @@ string atlasStatusFile = "Atlas\\status.json";
 string atlasCandlesFile = "Atlas\\candles.json";
 string atlasZoneDirectiveFile = "Atlas\\zone_directive.json";
 datetime atlasLastCandleExportAt = 0;
+datetime atlasEaStartedAt = 0;
+bool atlasStartupRiskAuthorityReady = false;
 
 bool atlasZoneModeActive = false;
 bool atlasZoneExecutionRequested = false;
@@ -528,6 +530,17 @@ bool atlasCapitalSizingActive = false;
 bool atlasCapitalVetoNewRisk = false;
 string atlasCapitalSizingVersion = "";
 double atlasApprovedScalpRiskPct = 0.0;
+bool atlasRecoveryProbeActive = false;
+double atlasRecoveryProbeTargetRiskPct = 0.0;
+double atlasRecoveryProbeMaxExecutableRiskPct = 0.0;
+double atlasRecoveryProbeMinimumExecutableRiskPct = 0.0;
+double atlasRecoveryProbeMinimumExecutableRiskAmount = 0.0;
+double atlasRecoveryProbeMinimumVolume = 0.0;
+bool atlasRecoveryProbeBrokerOverrideActive = false;
+string atlasRecoveryProbeFeasibilityReason = "NOT_EVALUATED";
+double atlasRecoveryProbeFeasibilityEquity = 0.0;
+datetime atlasRecoveryProbeFeasibilityEvaluatedAt = 0;
+bool atlasRecoveryProbeFeasibilityFresh = false;
 double atlasMaximumTotalStrategyRiskPct = 0.0;
 
 // P3.30 recovery risk-ledger telemetry. Recovery hedges may bypass the fresh-entry
@@ -1230,6 +1243,77 @@ long atlasLastOrderRetcode = 0;
 ulong atlasLastOrderTicket = 0;
 datetime atlasLastOrderTime = 0;
 
+// P3.44 Entry / broker-preflight integrity telemetry
+string atlasPreflightState = "NOT_EVALUATED";
+int atlasPreflightRetryCount = 0;
+long atlasPreflightRetcode = 0;
+string atlasPreflightComment = "";
+double atlasPreflightRequestPrice = 0.0;
+double atlasPreflightRequestSL = 0.0;
+double atlasPreflightRequestTP = 0.0;
+double atlasPreflightRequestVolume = 0.0;
+double atlasPreflightBid = 0.0;
+double atlasPreflightAsk = 0.0;
+long atlasPreflightStopsLevel = 0;
+long atlasPreflightFreezeLevel = 0;
+double atlasPreflightSLDistancePoints = 0.0;
+double atlasPreflightTPDistancePoints = 0.0;
+
+void AtlasCapturePreflightTelemetry(
+    const MqlTradeRequest &request,
+    const MqlTradeCheckResult &check,
+    string state,
+    int retryCount
+)
+{
+    atlasPreflightState = state;
+    atlasPreflightRetryCount = retryCount;
+    atlasPreflightRetcode = (long)check.retcode;
+    atlasPreflightComment = check.comment;
+
+    atlasPreflightRequestPrice = request.price;
+    atlasPreflightRequestSL = request.sl;
+    atlasPreflightRequestTP = request.tp;
+    atlasPreflightRequestVolume = request.volume;
+
+    MqlTick tick = {};
+    if(SymbolInfoTick(_Symbol, tick))
+    {
+        atlasPreflightBid = tick.bid;
+        atlasPreflightAsk = tick.ask;
+    }
+    else
+    {
+        atlasPreflightBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        atlasPreflightAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    }
+
+    atlasPreflightStopsLevel =
+        SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+
+    atlasPreflightFreezeLevel =
+        SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+
+    atlasPreflightSLDistancePoints = 0.0;
+    atlasPreflightTPDistancePoints = 0.0;
+
+    double executableReference =
+        (request.type == ORDER_TYPE_BUY)
+            ? atlasPreflightBid
+            : atlasPreflightAsk;
+
+    if(_Point > 0.0 && executableReference > 0.0)
+    {
+        if(request.sl > 0.0)
+            atlasPreflightSLDistancePoints =
+                MathAbs(executableReference - request.sl) / _Point;
+
+        if(request.tp > 0.0)
+            atlasPreflightTPDistancePoints =
+                MathAbs(request.tp - executableReference) / _Point;
+    }
+}
+
 void AtlasSetDecisionReason(ENUM_POSITION_TYPE dir, string reason, bool eligible=false)
 {
     if(dir == POSITION_TYPE_BUY)
@@ -1690,7 +1774,8 @@ void ReadAtlasZoneDirective()
     string directiveSymbol = JsonReadString(json, "symbol", "");
     datetime generatedAt = (datetime)JsonReadInt(json, "generated_at_epoch", 0);
     int ageSeconds = (generatedAt > 0) ? (int)(TimeGMT() - generatedAt) : 2147483647;
-    bool fresh = (ageSeconds >= -5 && ageSeconds <= AtlasZoneDirectiveMaxAgeSeconds);
+    bool generatedAfterEaStart = (atlasEaStartedAt <= 0 || generatedAt >= atlasEaStartedAt);
+    bool fresh = (ageSeconds >= -5 && ageSeconds <= AtlasZoneDirectiveMaxAgeSeconds && generatedAfterEaStart);
     bool symbolMatches = (directiveSymbol == _Symbol);
     bool requested = JsonReadBool(json, "execution_requested", false);
     bool suspendScalping = JsonReadBool(json, "suspend_ordinary_scalp_entries", false);
@@ -1700,6 +1785,12 @@ void ReadAtlasZoneDirective()
     atlasZoneDirectiveFresh = fresh && symbolMatches;
     atlasZoneDirectiveGeneratedAt = generatedAt;
     atlasZoneDirectiveState = JsonReadString(json, "state", "UNKNOWN");
+    atlasStartupRiskAuthorityReady = (
+        fresh &&
+        symbolMatches &&
+        atlasZoneDirectiveState != "STARTUP_RISK_RECONCILIATION" &&
+        JsonReadBool(json, "capital_sizing_active", false)
+    );
     atlasZoneExecutionRequested = requested;
     atlasZoneEntryAllowed = JsonReadBool(json, "zone_entry_allowed", false);
     atlasZoneEntryCount = AtlasClampInt(JsonReadInt(json, "entry_count", 0), 0, 3);
@@ -1731,6 +1822,9 @@ void ReadAtlasZoneDirective()
     atlasCapitalVetoNewRisk = JsonReadBool(json, "capital_veto_new_risk", false);
     atlasCapitalSizingVersion = JsonReadString(json, "capital_sizing_version", "");
     atlasApprovedScalpRiskPct = JsonReadDouble(json, "approved_scalp_risk_pct", 0.0);
+    atlasRecoveryProbeActive = JsonReadBool(json, "recovery_probe_active", false);
+    atlasRecoveryProbeTargetRiskPct = JsonReadDouble(json, "recovery_probe_target_risk_pct", 0.0);
+    atlasRecoveryProbeMaxExecutableRiskPct = JsonReadDouble(json, "recovery_probe_max_executable_risk_pct", 0.0);
     atlasMaximumTotalStrategyRiskPct = JsonReadDouble(json, "maximum_total_strategy_risk_pct", 0.0);
 
     for(int i = 0; i < 3; i++)
@@ -1757,12 +1851,16 @@ void ReadAtlasZoneDirective()
 
     if(!atlasZoneDirectiveFresh)
     {
+        atlasStartupRiskAuthorityReady = false;
         atlasZoneModeActive = false;
         atlasZoneAwareScalpingActive = false;
         if(atlasCapitalSizingActive)
         {
             atlasCapitalVetoNewRisk = true;
             atlasApprovedScalpRiskPct = 0.0;
+            atlasRecoveryProbeActive = false;
+            atlasRecoveryProbeTargetRiskPct = 0.0;
+            atlasRecoveryProbeMaxExecutableRiskPct = 0.0;
         }
         // If Atlas had already switched this symbol into zone mode, a stale
         // directive fails closed for new entries instead of silently resuming scalping.
@@ -1910,6 +2008,15 @@ struct ManagedPosition
     int entryTotalTradesBefore;                           // All Nyao entries already counted on the decision candle
     int entryPolicyEpoch;                                 // Runtime policy epoch locked at the original entry/recovery lineage
     bool identityRestoredFromRegistry;                     // true only after strong restart identity validation
+
+    // Recovery-probe identity and immutable admission-risk envelope.
+    bool recoveryProbe;                                    // broker-survivable via RP entry origin
+    double recoveryProbeTargetRiskPct;
+    double recoveryProbeMaxRiskPct;
+    double recoveryProbeAdmissionRiskPct;
+    double recoveryProbeAdmissionRiskAmount;
+    double recoveryProbeFrozenRiskAmount;                  // may tighten, never widen beyond this
+    double recoveryProbeInitialSL;
 };
 
 
@@ -2093,6 +2200,60 @@ int AtlasFindManagedPositionRegistryRecord(ulong ticket)
         if(atlasManagedPositionRegistry[i].ticket == ticket)
             return i;
     return -1;
+}
+
+// P3.41: immutable recovery-probe lifecycle authority. The root may already
+// be closed while one of its historical hedge children is still live, so a
+// broker/registry-backed root lookup is required rather than relying only on
+// the current managed-position array.
+bool AtlasIsRecoveryProbeRootTicket(ulong ticket)
+{
+    if(ticket == 0) return false;
+    int managedIndex = GetManagedPositionIndex(ticket);
+    if(managedIndex >= 0 &&
+       (managedPositions[managedIndex].recoveryProbe || managedPositions[managedIndex].orderOrigin == "RECOVERY_PROBE"))
+        return true;
+
+    int registryIndex = AtlasFindManagedPositionRegistryRecord(ticket);
+    return registryIndex >= 0 && atlasManagedPositionRegistry[registryIndex].orderOrigin == "RECOVERY_PROBE";
+}
+
+bool AtlasRecoveryProbeLifecycleInFlight()
+{
+    for(int i = 0; i < managedPositionCount; i++)
+    {
+        ulong ticket = managedPositions[i].ticket;
+        if(!PositionSelectByTicket(ticket)) continue;
+        if(managedPositions[i].recoveryProbe || managedPositions[i].orderOrigin == "RECOVERY_PROBE")
+            return true;
+        ulong chainId = managedPositions[i].chainId;
+        if(chainId > 0 && AtlasIsRecoveryProbeRootTicket(chainId))
+            return true;
+    }
+    return false;
+}
+
+// P3.43: any unresolved recovery lifecycle owns the book. This is broader than
+// the RECOVERY_PROBE lock: ordinary rolling-hedge chains, hedge children, and
+// graduated/no-rehedge survivors all remain one composite risk unit until flat.
+// Independent fresh entries must therefore wait for the lifecycle to finish.
+bool AtlasRecoveryLifecycleInFlight()
+{
+    for(int i = 0; i < managedPositionCount; i++)
+    {
+        ulong ticket = managedPositions[i].ticket;
+        if(!PositionSelectByTicket(ticket)) continue;
+
+        if(managedPositions[i].recoveryProbe || managedPositions[i].orderOrigin == "RECOVERY_PROBE")
+            return true;
+        if(managedPositions[i].chainId > 0)
+            return true;
+        if(managedPositions[i].orderOrigin == "HEDGE_CHILD")
+            return true;
+        if(managedPositions[i].hedgeGraduated || managedPositions[i].noRehedge)
+            return true;
+    }
+    return false;
 }
 
 bool AtlasRestoreManagedPositionIdentity(ulong ticket)
@@ -2641,6 +2802,7 @@ string AtlasOriginCode(string origin)
     if(origin == "FRESH_LIMIT") return "FL";
     if(origin == "VIRTUAL_SL_REENTRY") return "VR";
     if(origin == "HEDGE_CHILD") return "HC";
+    if(origin == "RECOVERY_PROBE") return "RP";
     return "UK";
 }
 
@@ -2650,6 +2812,7 @@ string AtlasOriginFromCode(string code)
     if(code == "FL") return "FRESH_LIMIT";
     if(code == "VR") return "VIRTUAL_SL_REENTRY";
     if(code == "HC") return "HEDGE_CHILD";
+    if(code == "RP") return "RECOVERY_PROBE";
     return "UNKNOWN_RESTARTED";
 }
 
@@ -2975,6 +3138,134 @@ void AtlasRepairRecoveryPolicyEpochs()
     }
 }
 
+
+string AtlasLedgerPeriodJson(datetime fromTime, datetime toTime)
+{
+    double tradingPl = 0.0, deposits = 0.0, withdrawals = 0.0, credits = 0.0;
+    int tradeDeals = 0, balanceDeals = 0;
+    if(HistorySelect(fromTime, toTime))
+    {
+        int total = HistoryDealsTotal();
+        for(int i=0; i<total; i++)
+        {
+            ulong ticket = HistoryDealGetTicket(i);
+            if(ticket == 0) continue;
+            long type = HistoryDealGetInteger(ticket, DEAL_TYPE);
+            double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+            double swap = HistoryDealGetDouble(ticket, DEAL_SWAP);
+            double commission = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+            double fee = HistoryDealGetDouble(ticket, DEAL_FEE);
+            if(type == DEAL_TYPE_BUY || type == DEAL_TYPE_SELL)
+            {
+                tradingPl += profit + swap + commission + fee;
+                tradeDeals++;
+            }
+            else if(type == DEAL_TYPE_BALANCE)
+            {
+                if(profit >= 0.0) deposits += profit;
+                else withdrawals += profit;
+                balanceDeals++;
+            }
+            else if(type == DEAL_TYPE_CREDIT)
+            {
+                credits += profit;
+            }
+        }
+    }
+    string json = "{";
+    json += "\"realized_trading_pl\":" + DoubleToString(tradingPl, 2) + ",";
+    json += "\"deposits\":" + DoubleToString(deposits, 2) + ",";
+    json += "\"withdrawals\":" + DoubleToString(withdrawals, 2) + ",";
+    json += "\"credits\":" + DoubleToString(credits, 2) + ",";
+    json += "\"net_account_change\":" + DoubleToString(tradingPl + deposits + withdrawals + credits, 2) + ",";
+    json += "\"trade_deal_count\":" + IntegerToString(tradeDeals) + ",";
+    json += "\"cashflow_deal_count\":" + IntegerToString(balanceDeals);
+    json += "}";
+    return json;
+}
+
+string AtlasAccountLedgerJson()
+{
+    static datetime cachedAt = 0;
+    static string cached = "{}";
+    datetime now = TimeTradeServer();
+    if(now <= 0) now = TimeCurrent();
+    if(cachedAt > 0 && (now - cachedAt) < 30) return cached;
+
+    MqlDateTime dt; TimeToStruct(now, dt);
+    MqlDateTime d0 = dt; d0.hour=0; d0.min=0; d0.sec=0;
+    datetime today = StructToTime(d0);
+    int mondayOffset = (dt.day_of_week + 6) % 7;
+    datetime weekStart = today - mondayOffset * 86400;
+    MqlDateTime m0 = d0; m0.day=1;
+    datetime monthStart = StructToTime(m0);
+
+    cached = "{";
+    cached += "\"version\":\"nyao-account-ledger-v1\",";
+    cached += "\"server_time_epoch\":" + IntegerToString((int)now) + ",";
+    cached += "\"today\":" + AtlasLedgerPeriodJson(today, now) + ",";
+    cached += "\"yesterday\":" + AtlasLedgerPeriodJson(today-86400, today-1) + ",";
+    cached += "\"this_week\":" + AtlasLedgerPeriodJson(weekStart, now) + ",";
+    cached += "\"last_7_days\":" + AtlasLedgerPeriodJson(now-7*86400, now) + ",";
+    cached += "\"this_month\":" + AtlasLedgerPeriodJson(monthStart, now) + ",";
+    cached += "\"last_30_days\":" + AtlasLedgerPeriodJson(now-30*86400, now) + ",";
+    cached += "\"lifetime\":" + AtlasLedgerPeriodJson(0, now);
+    cached += "}";
+    cachedAt = now;
+    return cached;
+}
+
+int AtlasMinuteOfDay(datetime t)
+{
+    MqlDateTime x; TimeToStruct(t, x);
+    return x.hour * 60 + x.min;
+}
+
+datetime AtlasSessionEpoch(datetime dayBase, datetime sessionClock)
+{
+    MqlDateTime day; TimeToStruct(dayBase, day);
+    MqlDateTime clock; TimeToStruct(sessionClock, clock);
+    day.hour = clock.hour; day.min = clock.min; day.sec = clock.sec;
+    return StructToTime(day);
+}
+
+void AtlasMarketSessionTelemetry(bool &isOpen, string &state, long &nextClose, long &nextOpen)
+{
+    isOpen=false; state="UNKNOWN"; nextClose=0; nextOpen=0;
+    datetime now=TimeTradeServer(); if(now<=0) now=TimeCurrent();
+    MqlDateTime nd; TimeToStruct(now, nd);
+    ENUM_DAY_OF_WEEK dow=(ENUM_DAY_OF_WEEK)nd.day_of_week;
+    bool sessionInfo=false;
+    for(uint i=0; i<10; i++)
+    {
+        datetime sf, st;
+        if(!SymbolInfoSessionTrade(_Symbol, dow, i, sf, st)) break;
+        sessionInfo=true;
+        datetime openEpoch=AtlasSessionEpoch(now, sf);
+        datetime closeEpoch=AtlasSessionEpoch(now, st);
+        int fm=AtlasMinuteOfDay(sf), tm=AtlasMinuteOfDay(st);
+        if(tm <= fm) closeEpoch += 86400;
+        if(now >= openEpoch && now < closeEpoch)
+        {
+            isOpen=true; nextClose=(long)closeEpoch;
+            int mins=(int)((closeEpoch-now)/60);
+            state=(mins >= 0 && mins <= MinutesBeforeClose) ? "CLOSING_SOON" : "OPEN";
+            return;
+        }
+        if(openEpoch > now && (nextOpen==0 || openEpoch < nextOpen)) nextOpen=(long)openEpoch;
+    }
+    // Search up to one week ahead for the next broker-declared trade session.
+    for(int offset=1; offset<=7 && nextOpen==0; offset++)
+    {
+        datetime day=now + offset*86400;
+        MqlDateTime dd; TimeToStruct(day, dd);
+        ENUM_DAY_OF_WEEK futureDow=(ENUM_DAY_OF_WEEK)dd.day_of_week;
+        datetime sf, st;
+        if(SymbolInfoSessionTrade(_Symbol, futureDow, 0, sf, st)) nextOpen=(long)AtlasSessionEpoch(day, sf);
+    }
+    state=sessionInfo ? "CLOSED" : "UNKNOWN";
+}
+
 void WriteAtlasStatus()
 {
     AtlasRepairRecoveryPolicyEpochs();
@@ -3099,8 +3390,8 @@ void WriteAtlasStatus()
     // execution.  For the current RR/SL policy this gives Atlas a meaningful
     // answer to "is the spread affordable for this planned trade?" instead of
     // comparing spread to a very small instantaneous ATR alone.
-    double statusBaseSlPoints = GetSLPoints(atlasRuntime.baseLotSize);
-    double statusBaseTpPoints = GetTPPoints(atlasRuntime.baseLotSize);
+    double statusBaseSlPoints = AtlasGetScalpStructuralSLPoints(atlasRuntime.baseLotSize);
+    double statusBaseTpPoints = AtlasGetScalpStructuralTPPoints(atlasRuntime.baseLotSize, statusBaseSlPoints);
     double statusSlPoints = statusBaseSlPoints;
     double statusTpPoints = statusBaseTpPoints;
     string statusCostBasis = "STRUCTURE";
@@ -3395,6 +3686,18 @@ void WriteAtlasStatus()
         positionsJson += "\"zone_plan_id\":\"" + AtlasJsonEscape(zonePlanToken) + "\",";
         positionsJson += "\"zone_layer\":" + IntegerToString(zoneLayer) + ",";
         positionsJson += "\"identity_restored_from_registry\":" + (identityRestoredFromRegistry ? "true" : "false") + ",";
+        bool positionRecoveryProbe = (managedIndex >= 0 && managedIndex < managedPositionCount) ? managedPositions[managedIndex].recoveryProbe : (orderOrigin == "RECOVERY_PROBE");
+        double positionProbeTargetPct = (managedIndex >= 0 && managedIndex < managedPositionCount) ? managedPositions[managedIndex].recoveryProbeTargetRiskPct : 0.0;
+        double positionProbeMaxPct = (managedIndex >= 0 && managedIndex < managedPositionCount) ? managedPositions[managedIndex].recoveryProbeMaxRiskPct : 0.0;
+        double positionProbeAdmissionPct = (managedIndex >= 0 && managedIndex < managedPositionCount) ? managedPositions[managedIndex].recoveryProbeAdmissionRiskPct : 0.0;
+        double positionProbeAdmissionAmount = (managedIndex >= 0 && managedIndex < managedPositionCount) ? managedPositions[managedIndex].recoveryProbeAdmissionRiskAmount : 0.0;
+        double positionProbeFrozenAmount = (managedIndex >= 0 && managedIndex < managedPositionCount) ? managedPositions[managedIndex].recoveryProbeFrozenRiskAmount : 0.0;
+        positionsJson += "\"recovery_probe_entry\":" + (positionRecoveryProbe ? "true" : "false") + ",";
+        positionsJson += "\"recovery_probe_target_risk_pct\":" + DoubleToString(positionProbeTargetPct, 6) + ",";
+        positionsJson += "\"recovery_probe_max_risk_pct\":" + DoubleToString(positionProbeMaxPct, 6) + ",";
+        positionsJson += "\"recovery_probe_admission_risk_pct\":" + DoubleToString(positionProbeAdmissionPct, 6) + ",";
+        positionsJson += "\"recovery_probe_admission_risk_amount\":" + DoubleToString(positionProbeAdmissionAmount, 4) + ",";
+        positionsJson += "\"recovery_probe_frozen_risk_amount\":" + DoubleToString(positionProbeFrozenAmount, 4) + ",";
         positionsJson += "\"management_policy_lock_active\":" + (managementPolicySnapshotAvailable ? "true" : "false") + ",";
         positionsJson += "\"management_policy_source\":\"" + AtlasJsonEscape(managementPolicySource) + "\",";
         positionsJson += "\"management_policy_resolved_epoch\":" + IntegerToString(resolvedManagementPolicy.policyEpoch) + ",";
@@ -3423,6 +3726,77 @@ void WriteAtlasStatus()
         positionsJson += "\"trailing_policy_ts_input_type\":" + IntegerToString((int)resolvedTrailingPolicy.tsInputType) + ",";
         positionsJson += "\"trailing_policy_distance_value\":" + DoubleToString(resolvedTrailingPolicy.trailingDistanceValue, 8) + ",";
         positionsJson += "\"trailing_policy_value_multiplier\":" + DoubleToString(resolvedTrailingPolicy.trailingValueMultiplier, 8) + ",";
+
+        // P3.42 profit-protection observability: derive guaranteed broker-side P/L
+        // directly from the live SL so Atlas never confuses a virtual intention
+        // with an actually enforceable exit.
+        double protectedProfitAmount = 0.0;
+        if(sl > 0.0)
+        {
+            ENUM_ORDER_TYPE protectOrderType = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+            double slPnl = 0.0;
+            if(OrderCalcProfit(protectOrderType, _Symbol, volume, entryPrice, sl, slPnl))
+                protectedProfitAmount = MathMax(0.0, slPnl);
+        }
+        double telemetryProtectionAtr = 0.0;
+        double telemetryFavourableMove = 0.0;
+        double telemetryBreakEvenTrigger = 0.0;
+        double telemetryProfitLockTrigger = 0.0;
+        string telemetryProtectionReason = "";
+
+        bool telemetryHedgeChild =
+            orderOrigin == "HEDGE_CHILD" &&
+            chainId != 0;
+
+        bool telemetryProtectionEligible =
+            AtlasProfitProtectionGate(
+                ticket,
+                telemetryHedgeChild,
+                telemetryProtectionAtr,
+                telemetryFavourableMove,
+                telemetryBreakEvenTrigger,
+                telemetryProfitLockTrigger,
+                telemetryProtectionReason
+            );
+
+        double profitProtectionTriggerTelemetry =
+            telemetryBreakEvenTrigger;
+
+        string profitManagementState =
+            "UNPROTECTED";
+
+        if(protectedProfitAmount > 0.01)
+        {
+            profitManagementState =
+                "PROFIT_LOCKED";
+        }
+        else if(
+            breakEvenLocked ||
+            (
+                posType == POSITION_TYPE_BUY &&
+                sl >= entryPrice &&
+                sl > 0.0
+            ) ||
+            (
+                posType == POSITION_TYPE_SELL &&
+                sl <= entryPrice &&
+                sl > 0.0
+            )
+        )
+        {
+            profitManagementState =
+                "BREAK_EVEN_LOCKED";
+        }
+        else if(telemetryProtectionEligible)
+        {
+            profitManagementState =
+                "PROTECTION_ELIGIBLE";
+        }
+        double protectedPctOfProfit = (profit > 0.0) ? (protectedProfitAmount / profit * 100.0) : 0.0;
+        positionsJson += "\"profit_management_state\":\"" + profitManagementState + "\",";
+        positionsJson += "\"profit_protection_trigger_amount\":" + DoubleToString(profitProtectionTriggerTelemetry, 4) + ",";
+        positionsJson += "\"protected_profit_amount\":" + DoubleToString(protectedProfitAmount, 4) + ",";
+        positionsJson += "\"protected_profit_pct_of_current_profit\":" + DoubleToString(protectedPctOfProfit, 2) + ",";
         positionsJson += "\"partial_close_level\":" + IntegerToString(partialCloseLevel) + ",";
         positionsJson += "\"break_even_locked\":" + (breakEvenLocked ? "true" : "false") + ",";
         positionsJson += "\"chain_id\":" + IntegerToString((long)chainId) + ",";
@@ -3636,6 +4010,8 @@ void WriteAtlasStatus()
     json += "\"effective_spread_cap_points\":" + DoubleToString(effectiveSpreadCapPoints, 2) + ",";
     json += "\"spread_within_limit\":" + (spreadWithinLimit ? "true" : "false") + ",";
     json += "\"scalp_cost_gate_version\":\"nyao-scalp-cost-v3\",";
+    json += "\"scalp_stop_geometry_basis\":\"" + (atlasCapitalSizingActive && AtlasScalpStopInputDependsOnLot() ? "ATR_STRUCTURAL_FOR_CAPITAL_SIZING" : "CONFIGURED_DISTANCE") + "\",";
+    json += "\"scalp_stop_input_lot_dependent\":" + (AtlasScalpStopInputDependsOnLot() ? "true" : "false") + ",";
     json += "\"scalp_cost_gate_basis\":\"" + AtlasJsonEscape(statusCostBasis) + "\",";
     json += "\"scalp_cost_limiting_factor\":\"" + AtlasJsonEscape(statusCostLimitingFactor) + "\",";
     json += "\"scalp_cost_adjusted\":" + (statusCostAdjusted ? "true" : "false") + ",";
@@ -3670,6 +4046,14 @@ void WriteAtlasStatus()
     json += "\"total_pause_duration_minutes\":" + DoubleToString(totalPauseDurationMinutes, 2) + ",";
     json += "\"outside_trading_hours\":" + (isOutsideTradingHours ? "true" : "false") + ",";
     json += "\"near_market_close\":" + (isNearMarketClose ? "true" : "false") + ",";
+    bool atlasMarketOpen=false; string atlasMarketState="UNKNOWN"; long atlasNextClose=0; long atlasNextOpen=0;
+    AtlasMarketSessionTelemetry(atlasMarketOpen, atlasMarketState, atlasNextClose, atlasNextOpen);
+    json += "\"market_session_state\":\"" + atlasMarketState + "\",";
+    json += "\"market_session_open\":" + (atlasMarketOpen ? "true" : "false") + ",";
+    json += "\"market_next_close_epoch\":" + IntegerToString((int)atlasNextClose) + ",";
+    json += "\"market_next_open_epoch\":" + IntegerToString((int)atlasNextOpen) + ",";
+    json += "\"market_session_source\":\"SYMBOL_TRADE_SESSION\",";
+    json += "\"account_ledger\":" + AtlasAccountLedgerJson() + ",";
     json += "\"leverage_changed\":" + (isLeverageDiffFromInitial ? "true" : "false") + ",";
     json += "\"initial_leverage\":" + IntegerToString(initialLeverage) + ",";
 
@@ -3717,6 +4101,8 @@ void WriteAtlasStatus()
     json += "\"source_zone_invalidated\":" + (atlasSourceZoneInvalidated ? "true" : "false") + ",";
     json += "\"source_zone_invalidation_reason\":\"" + AtlasJsonEscape(atlasSourceZoneInvalidationReason) + "\",";
     json += "\"zone_directive_state\":\"" + AtlasJsonEscape(atlasZoneDirectiveState) + "\",";
+    json += "\"startup_risk_authority_ready\":" + (atlasStartupRiskAuthorityReady ? "true" : "false") + ",";
+    json += "\"startup_risk_authority_ea_started_at_epoch\":" + IntegerToString((int)atlasEaStartedAt) + ",";
     json += "\"zone_plan_id\":\"" + AtlasJsonEscape(atlasZonePlanId) + "\",";
     json += "\"zone_map_id\":\"" + AtlasJsonEscape(atlasZoneMapId) + "\",";
     json += "\"zone_side\":\"" + AtlasJsonEscape(atlasZoneSide) + "\",";
@@ -3738,6 +4124,17 @@ void WriteAtlasStatus()
     json += "\"capital_sizing_version\":\"" + AtlasJsonEscape(atlasCapitalSizingVersion) + "\",";
     json += "\"capital_veto_new_risk\":" + (atlasCapitalVetoNewRisk ? "true" : "false") + ",";
     json += "\"approved_scalp_risk_pct\":" + DoubleToString(atlasApprovedScalpRiskPct, 4) + ",";
+    json += "\"recovery_probe_active\":" + (atlasRecoveryProbeActive ? "true" : "false") + ",";
+    json += "\"recovery_probe_target_risk_pct\":" + DoubleToString(atlasRecoveryProbeTargetRiskPct, 6) + ",";
+    json += "\"recovery_probe_max_executable_risk_pct\":" + DoubleToString(atlasRecoveryProbeMaxExecutableRiskPct, 6) + ",";
+    json += "\"recovery_probe_minimum_executable_risk_pct\":" + DoubleToString(atlasRecoveryProbeMinimumExecutableRiskPct, 6) + ",";
+    json += "\"recovery_probe_minimum_executable_risk_amount\":" + DoubleToString(atlasRecoveryProbeMinimumExecutableRiskAmount, 4) + ",";
+    json += "\"recovery_probe_minimum_volume\":" + DoubleToString(atlasRecoveryProbeMinimumVolume, 8) + ",";
+    json += "\"recovery_probe_broker_override_active\":" + (atlasRecoveryProbeBrokerOverrideActive ? "true" : "false") + ",";
+    json += "\"recovery_probe_feasibility_reason\":\"" + AtlasJsonEscape(atlasRecoveryProbeFeasibilityReason) + "\",";
+    json += "\"recovery_probe_feasibility_fresh\":" + (atlasRecoveryProbeFeasibilityFresh ? "true" : "false") + ",";
+    json += "\"recovery_probe_feasibility_equity\":" + DoubleToString(atlasRecoveryProbeFeasibilityEquity, 2) + ",";
+    json += "\"recovery_probe_feasibility_evaluated_at_epoch\":" + IntegerToString((int)atlasRecoveryProbeFeasibilityEvaluatedAt) + ",";
     json += "\"maximum_total_strategy_risk_pct\":" + DoubleToString(atlasMaximumTotalStrategyRiskPct, 4) + ",";
     json += "\"recovery_sizing_version\":\"" + AtlasJsonEscape(atlasRecoverySizingVersion) + "\",";
     json += "\"recovery_sizing_reason\":\"" + AtlasJsonEscape(atlasRecoveryLastSizingReason) + "\",";
@@ -3962,6 +4359,20 @@ void WriteAtlasStatus()
     json += "\"last_order_retcode\":" + IntegerToString(atlasLastOrderRetcode) + ",";
     json += "\"last_order_ticket\":" + IntegerToString((long)atlasLastOrderTicket) + ",";
     json += "\"last_order_time_epoch\":" + IntegerToString((long)atlasLastOrderTime) + ",";
+    json += "\"preflight_state\":\"" + AtlasJsonEscape(atlasPreflightState) + "\",";
+    json += "\"preflight_retry_count\":" + IntegerToString(atlasPreflightRetryCount) + ",";
+    json += "\"preflight_retcode\":" + IntegerToString(atlasPreflightRetcode) + ",";
+    json += "\"preflight_comment\":\"" + AtlasJsonEscape(atlasPreflightComment) + "\",";
+    json += "\"preflight_request_price\":" + DoubleToString(atlasPreflightRequestPrice, _Digits) + ",";
+    json += "\"preflight_request_sl\":" + DoubleToString(atlasPreflightRequestSL, _Digits) + ",";
+    json += "\"preflight_request_tp\":" + DoubleToString(atlasPreflightRequestTP, _Digits) + ",";
+    json += "\"preflight_request_volume\":" + DoubleToString(atlasPreflightRequestVolume, 4) + ",";
+    json += "\"preflight_bid\":" + DoubleToString(atlasPreflightBid, _Digits) + ",";
+    json += "\"preflight_ask\":" + DoubleToString(atlasPreflightAsk, _Digits) + ",";
+    json += "\"preflight_stops_level\":" + IntegerToString(atlasPreflightStopsLevel) + ",";
+    json += "\"preflight_freeze_level\":" + IntegerToString(atlasPreflightFreezeLevel) + ",";
+    json += "\"preflight_sl_distance_points\":" + DoubleToString(atlasPreflightSLDistancePoints, 2) + ",";
+    json += "\"preflight_tp_distance_points\":" + DoubleToString(atlasPreflightTPDistancePoints, 2) + ",";
     json += "\"terminal_algo_trading_allowed\":" + (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) ? "true" : "false") + ",";
     json += "\"ea_trading_allowed\":" + (MQLInfoInteger(MQL_TRADE_ALLOWED) ? "true" : "false") + ",";
     json += "\"account_trade_allowed\":" + (AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) ? "true" : "false") + ",";
@@ -4548,6 +4959,8 @@ void AtlasInitializeSymbolNamespace()
 // +------------------------------------------------------------------+
 int OnInit()
 {
+    atlasEaStartedAt = TimeGMT();
+    atlasStartupRiskAuthorityReady = false;
     AtlasInitializeSymbolNamespace();   
     // Load the active .set/input values into Atlas runtime state first.
     InitializeAtlasRuntime();
@@ -4865,6 +5278,21 @@ void OnTick()
     // because legacy children may carry an old broker comment with the wrong
     // epoch from the brief v1 lineage bug.
     AtlasRepairRecoveryPolicyEpochs();
+
+    // P3.38: recovery-probe feasibility is geometry- and equity-specific.
+    // Never carry a prior tick/account-equity percentage forward as if it were
+    // current. A qualified entry attempt will repopulate these fields from the
+    // live structural stop + live broker min volume + live ACCOUNT_EQUITY.
+    atlasRecoveryProbeFeasibilityFresh = false;
+    atlasRecoveryProbeFeasibilityEquity = 0.0;
+    atlasRecoveryProbeFeasibilityEvaluatedAt = 0;
+    atlasRecoveryProbeMinimumExecutableRiskPct = 0.0;
+    atlasRecoveryProbeMinimumExecutableRiskAmount = 0.0;
+    atlasRecoveryProbeMinimumVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    atlasRecoveryProbeBrokerOverrideActive = false;
+    atlasRecoveryProbeFeasibilityReason = atlasRecoveryProbeActive
+        ? "AWAITING_QUALIFIED_SIGNAL_EVALUATION"
+        : "NOT_EVALUATED";
 
     // Invalidate per-tick signal cache
     _buyStrengthValid = false;
@@ -5687,6 +6115,12 @@ bool CheckEntryConditions(ENUM_POSITION_TYPE dir, double price)
 
     int sameOnBar = isBuy ? buysOnCurrentBar : sellsOnCurrentBar;
     int oppOnBar  = isBuy ? sellsOnCurrentBar : buysOnCurrentBar;
+
+    if(!atlasStartupRiskAuthorityReady)
+    {
+        AtlasSetDecisionReason(dir, "STARTUP_RISK_RECONCILIATION");
+        return false;
+    }
 
     // Atlas capital authority is a global fresh-entry gate. Apply it before
     // signal scoring so both directional telemetry lanes report the same
@@ -6555,17 +6989,40 @@ void ManageLosingPositions()
             );
         }
         
-        // Skip all management during grace period
+        // Health grace suppresses health/signal-decay loss management only. Broker-side
+        // break-even/profit protection already ran in ManageTrailingTPSL above.
         if(health.inGracePeriod) continue;
         
         // 1. BREAK-EVEN LOCK (when profit exceeds spread cost)
-        if(managementPolicy.enableBreakEvenOnSpread && !managedPositions[posIndex].breakEvenLocked)
+        // 1. BREAK-EVEN LOCK
+        // P3.44: spread cost alone is not enough evidence that a move has matured.
+        // Reuse the same volatility/age-aware gate as the trailing engine.
+        if(
+            managementPolicy.enableBreakEvenOnSpread &&
+            !managedPositions[posIndex].breakEvenLocked
+        )
         {
-            double spreadPoints = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
-            double spreadCost = spreadPoints * volume * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-            double breakEvenTrigger = spreadCost * managementPolicy.breakEvenSpreadMultiplier;
-            
-            if(profit > breakEvenTrigger)
+            double healthProtectionAtr = 0.0;
+            double healthFavourableMove = 0.0;
+            double healthBreakEvenTrigger = 0.0;
+            double healthProfitLockTrigger = 0.0;
+            string healthProtectionReason = "";
+
+            bool healthProtectionEligible =
+                AtlasProfitProtectionGate(
+                    ticket,
+                    false,
+                    healthProtectionAtr,
+                    healthFavourableMove,
+                    healthBreakEvenTrigger,
+                    healthProfitLockTrigger,
+                    healthProtectionReason
+                );
+
+            if(
+                profit > 0.0 &&
+                healthProtectionEligible
+            )
             {
                 // Calculate break-even SL at entry price
                 double newBESL = NormalizeDouble(entryPrice, _Digits);
@@ -6594,7 +7051,22 @@ void ManageLosingPositions()
                         
                         LogPrint("+-----------------------------------------+");
                         LogPrint("[BREAK-EVEN LOCKED] Ticket: ", ticket);
-                        LogPrint("Profit: $", DoubleToString(profit, 2), " > Trigger: $", DoubleToString(breakEvenTrigger, 2));
+                        LogPrint(
+                            "Profit: $",
+                            DoubleToString(profit, 2),
+                            " | favourable=",
+                            DoubleToString(
+                                healthFavourableMove,
+                                _Digits
+                            ),
+                            " | ATR=",
+                            DoubleToString(
+                                healthProtectionAtr,
+                                _Digits
+                            ),
+                            " | gate=",
+                            healthProtectionReason
+                        );
                         LogPrint("SL moved to entry: ", newBESL);
                         LogPrint("+-----------------------------------------+");
                     }
@@ -7154,6 +7626,378 @@ int CountLosingPositions()
 }
 // +------------------------------------------------------------------+
 
+bool AtlasProfitProtectionGate(
+    ulong ticket,
+    bool hedgeChild,
+    double &atr,
+    double &favourableMove,
+    double &breakEvenTriggerPrice,
+    double &profitLockTriggerPrice,
+    string &reason
+)
+{
+    atr = 0.0;
+    favourableMove = 0.0;
+    breakEvenTriggerPrice = 0.0;
+    profitLockTriggerPrice = 0.0;
+    reason = "NOT_EVALUATED";
+
+    if(!PositionSelectByTicket(ticket))
+    {
+        reason = "POSITION_UNAVAILABLE";
+        return false;
+    }
+
+    ENUM_POSITION_TYPE posType =
+        (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+    double entryPrice =
+        PositionGetDouble(POSITION_PRICE_OPEN);
+
+    double currentPrice =
+        PositionGetDouble(POSITION_PRICE_CURRENT);
+
+    datetime openedAt =
+        (datetime)PositionGetInteger(POSITION_TIME);
+
+    if(entryPrice <= 0.0 || currentPrice <= 0.0)
+    {
+        reason = "POSITION_PRICE_UNAVAILABLE";
+        return false;
+    }
+
+    // Do not strangle newborn positions.
+    datetime now = TimeTradeServer();
+    if(now <= 0)
+        now = TimeCurrent();
+
+    int ageSeconds =
+        (int)MathMax(0, (long)now - (long)openedAt);
+
+    int minimumAgeSeconds =
+        hedgeChild ? 60 : 30;
+
+    if(ageSeconds < minimumAgeSeconds)
+    {
+        reason = "MINIMUM_AGE_NOT_REACHED";
+        return false;
+    }
+
+    // Closed-candle ATR gives the protection gate a stable volatility basis.
+    double atrBuffer[];
+    ArraySetAsSeries(atrBuffer, true);
+
+    if(
+        atrSignalHandle != INVALID_HANDLE &&
+        CopyBuffer(atrSignalHandle, 0, 0, 2, atrBuffer) >= 2
+    )
+    {
+        atr = atrBuffer[1];
+    }
+
+    if(atr <= 0.0)
+        atr = GetCurrentATR();
+
+    MqlTick tick = {};
+    double spreadPrice = 0.0;
+
+    if(SymbolInfoTick(_Symbol, tick))
+        spreadPrice = MathMax(0.0, tick.ask - tick.bid);
+
+    if(posType == POSITION_TYPE_BUY)
+        favourableMove = currentPrice - entryPrice;
+    else
+        favourableMove = entryPrice - currentPrice;
+
+    if(favourableMove <= 0.0)
+    {
+        reason = "NO_FAVOURABLE_EXCURSION";
+        return false;
+    }
+
+    // Standalone scalps:
+    //   BE only after >= 0.35 ATR
+    //   meaningful profit lock after >= 0.80 ATR
+    //
+    // Hedge children receive more breathing room:
+    //   BE only after >= 0.60 ATR
+    //   profit lock after >= 1.20 ATR
+    double breakEvenAtrMultiplier =
+        hedgeChild ? 0.60 : 0.35;
+
+    double profitLockAtrMultiplier =
+        hedgeChild ? 1.20 : 0.80;
+
+    if(atr > 0.0)
+    {
+        breakEvenTriggerPrice =
+            atr * breakEvenAtrMultiplier;
+
+        profitLockTriggerPrice =
+            atr * profitLockAtrMultiplier;
+    }
+
+    // Spread is also a minimum noise floor.
+    if(spreadPrice > 0.0)
+    {
+        breakEvenTriggerPrice =
+            MathMax(
+                breakEvenTriggerPrice,
+                spreadPrice * (hedgeChild ? 5.0 : 4.0)
+            );
+
+        profitLockTriggerPrice =
+            MathMax(
+                profitLockTriggerPrice,
+                spreadPrice * (hedgeChild ? 10.0 : 8.0)
+            );
+    }
+
+    if(breakEvenTriggerPrice <= 0.0)
+    {
+        reason = "PROTECTION_THRESHOLD_UNAVAILABLE";
+        return false;
+    }
+
+    if(favourableMove < breakEvenTriggerPrice)
+    {
+        reason = "FAVOURABLE_MOVE_BELOW_THRESHOLD";
+        return false;
+    }
+
+    reason =
+        (profitLockTriggerPrice > 0.0 &&
+         favourableMove >= profitLockTriggerPrice)
+            ? "PROFIT_LOCK_ELIGIBLE"
+            : "BREAK_EVEN_ELIGIBLE";
+
+    return true;
+}
+
+
+// P3.43: profit protection for an ACTIVE hedge child. Active-chain legs are
+// intentionally excluded from ordinary trailing because rolling-pair logic owns
+// their lifecycle. That exclusion must not mean a hedge can move from material
+// profit to a large loss with no broker floor. Once a hedge child reaches the
+// ordinary protection trigger, lock break-even; above 3x the trigger, lock 50%
+// of live profit. If that protected hedge is later stopped, the surviving root
+// is graduated with noRehedge so the broken pair cannot immediately restart an
+// uncontrolled hedge cycle.
+bool AtlasProtectActiveHedgeProfit(ulong ticket)
+{
+    int idx = GetManagedPositionIndex(ticket);
+
+    if(
+        idx < 0 ||
+        managedPositions[idx].chainId == 0 ||
+        managedPositions[idx].orderOrigin != "HEDGE_CHILD"
+    )
+        return false;
+
+    if(!PositionSelectByTicket(ticket))
+        return false;
+
+    ENUM_POSITION_TYPE posType =
+        (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+    double entryPrice =
+        PositionGetDouble(POSITION_PRICE_OPEN);
+
+    double currentSL =
+        PositionGetDouble(POSITION_SL);
+
+    double currentTP =
+        PositionGetDouble(POSITION_TP);
+
+    double currentPrice =
+        PositionGetDouble(POSITION_PRICE_CURRENT);
+
+    double profit =
+        PositionGetDouble(POSITION_PROFIT);
+
+    double volume =
+        PositionGetDouble(POSITION_VOLUME);
+
+    if(
+        entryPrice <= 0.0 ||
+        currentPrice <= 0.0 ||
+        volume <= 0.0 ||
+        profit <= 0.0
+    )
+        return false;
+
+    double protectionAtr = 0.0;
+    double favourableMove = 0.0;
+    double breakEvenTriggerPrice = 0.0;
+    double profitLockTriggerPrice = 0.0;
+    string protectionReason = "";
+
+    bool protectionEligible =
+        AtlasProfitProtectionGate(
+            ticket,
+            true,
+            protectionAtr,
+            favourableMove,
+            breakEvenTriggerPrice,
+            profitLockTriggerPrice,
+            protectionReason
+        );
+
+    if(!protectionEligible)
+        return false;
+
+    bool strongMove =
+        profitLockTriggerPrice > 0.0 &&
+        favourableMove >= profitLockTriggerPrice;
+
+    // Hedge children get a looser floor than standalone trades.
+    // Once the move is genuinely established, preserve 35% rather than
+    // immediately choking the hedge at 50% of a tiny early profit.
+    double protectedTargetUsd =
+        strongMove ? profit * 0.35 : 0.0;
+
+    double floorSL =
+        CalculateBreakEvenPrice(
+            ticket,
+            posType,
+            entryPrice,
+            volume
+        );
+
+    double tv =
+        SymbolInfoDouble(
+            _Symbol,
+            SYMBOL_TRADE_TICK_VALUE
+        );
+
+    double ts =
+        SymbolInfoDouble(
+            _Symbol,
+            SYMBOL_TRADE_TICK_SIZE
+        );
+
+    if(
+        protectedTargetUsd > 0.0 &&
+        tv > 0.0 &&
+        ts > 0.0 &&
+        volume > 0.0
+    )
+    {
+        double protectDist =
+            (protectedTargetUsd / volume) *
+            (ts / tv);
+
+        if(posType == POSITION_TYPE_BUY)
+            floorSL += protectDist;
+        else
+            floorSL -= protectDist;
+    }
+
+    long stopLevel =
+        SymbolInfoInteger(
+            _Symbol,
+            SYMBOL_TRADE_STOPS_LEVEL
+        );
+
+    long freezeLevel =
+        SymbolInfoInteger(
+            _Symbol,
+            SYMBOL_TRADE_FREEZE_LEVEL
+        );
+
+    double minDistance =
+        MathMax(stopLevel, freezeLevel) *
+        _Point;
+
+    floorSL =
+        NormalizeDouble(
+            floorSL,
+            _Digits
+        );
+
+    bool improve = false;
+
+    if(posType == POSITION_TYPE_BUY)
+    {
+        double maxFloor =
+            currentPrice - minDistance;
+
+        if(floorSL > maxFloor)
+            floorSL =
+                NormalizeDouble(
+                    maxFloor,
+                    _Digits
+                );
+
+        improve =
+            floorSL > 0.0 &&
+            floorSL < currentPrice &&
+            (
+                currentSL == 0.0 ||
+                floorSL >
+                    currentSL +
+                    (_Point * 0.5)
+            );
+    }
+    else
+    {
+        double minFloor =
+            currentPrice + minDistance;
+
+        if(floorSL < minFloor)
+            floorSL =
+                NormalizeDouble(
+                    minFloor,
+                    _Digits
+                );
+
+        improve =
+            floorSL > currentPrice &&
+            (
+                currentSL == 0.0 ||
+                floorSL <
+                    currentSL -
+                    (_Point * 0.5)
+            );
+    }
+
+    if(!improve)
+        return false;
+
+    if(
+        ModifyPosition(
+            ticket,
+            floorSL,
+            currentTP
+        )
+    )
+    {
+        if(protectedTargetUsd <= 0.0)
+            managedPositions[idx].breakEvenLocked = true;
+
+        LogPrint(
+            "[HEDGE PROFIT PROTECTION] Ticket: ",
+            ticket,
+            " | live=$",
+            DoubleToString(profit, 2),
+            " | favourable=",
+            DoubleToString(favourableMove, _Digits),
+            " | ATR=",
+            DoubleToString(protectionAtr, _Digits),
+            " | reason=",
+            protectionReason,
+            " | protected target=$",
+            DoubleToString(protectedTargetUsd, 2),
+            " | broker SL=",
+            DoubleToString(floorSL, _Digits)
+        );
+
+        return true;
+    }
+
+    return false;
+}
+
 // +------------------------------------------------------------------+
 // | Manage Trailing TP & SL                                          |
 // | Adjusts TP/SL based on signal strength and trails price          |
@@ -7187,20 +8031,231 @@ void ManageTrailingTPSL(ulong ticket)
     // Get Position Details
     ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
-    // HEDGE CHAIN: skip any leg that belongs to an active chain. The chain logic
-    // (ManageHedgeChains) exclusively manages these legs (covered / roll / stop).
+    // HEDGE CHAIN: rolling-pair logic still owns active chain legs, but hedge
+    // children receive a broker-side MFE floor before ordinary trailing exits.
+    // This prevents the confirmed +$33 -> -$45 giveback pattern while avoiding
+    // generic trailing logic on the chain root.
     {
         int hpi = GetManagedPositionIndex(ticket);
         if(hpi != -1 && managedPositions[hpi].chainId != 0)
+        {
+            AtlasProtectActiveHedgeProfit(ticket);
             return;
+        }
     }
 
     double currentSL = PositionGetDouble(POSITION_SL);
     double currentTP = PositionGetDouble(POSITION_TP);
     double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-    double currentPrice = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+    if(currentPrice <= 0.0) currentPrice = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double profit = PositionGetDouble(POSITION_PROFIT);
     double volume = PositionGetDouble(POSITION_VOLUME);
+
+    // P3.42: broker-side profit protection is an execution-safety invariant, not
+    // a health-management decision. Once a standalone position is materially
+    // profitable, guarantee at least break-even and then a conservative share
+    // of the currently observed profit. This runs before adaptive trailing and
+    // is intentionally independent of HealthGraceBars. The ordinary trailing
+    // engine remains free to tighten the stop further.
+    double protectionAtr = 0.0;
+    double favourableMove = 0.0;
+    double breakEvenTriggerPrice = 0.0;
+    double profitLockTriggerPrice = 0.0;
+    string profitProtectionReason = "";
+
+    bool profitProtectionEligible =
+        AtlasProfitProtectionGate(
+            ticket,
+            false,
+            protectionAtr,
+            favourableMove,
+            breakEvenTriggerPrice,
+            profitLockTriggerPrice,
+            profitProtectionReason
+        );
+
+    if(
+        managementPolicy.trailingEnableBreakEvenLock &&
+        profit > 0.0 &&
+        profitProtectionEligible
+    )
+    {
+        bool strongMove =
+            profitLockTriggerPrice > 0.0 &&
+            favourableMove >=
+                profitLockTriggerPrice;
+
+        double protectedTargetUsd =
+            strongMove
+                ? profit * 0.35
+                : 0.0;
+
+        double floorSL =
+            CalculateBreakEvenPrice(
+                ticket,
+                posType,
+                entryPrice,
+                volume
+            );
+
+        double tvProtect =
+            SymbolInfoDouble(
+                _Symbol,
+                SYMBOL_TRADE_TICK_VALUE
+            );
+
+        double tsProtect =
+            SymbolInfoDouble(
+                _Symbol,
+                SYMBOL_TRADE_TICK_SIZE
+            );
+
+        if(
+            protectedTargetUsd > 0.0 &&
+            tvProtect > 0.0 &&
+            tsProtect > 0.0 &&
+            volume > 0.0
+        )
+        {
+            double protectDist =
+                (protectedTargetUsd / volume) *
+                (tsProtect / tvProtect);
+
+            if(posType == POSITION_TYPE_BUY)
+                floorSL += protectDist;
+            else
+                floorSL -= protectDist;
+        }
+
+        floorSL =
+            NormalizeDouble(
+                floorSL,
+                _Digits
+            );
+
+        long protectStopLevel =
+            SymbolInfoInteger(
+                _Symbol,
+                SYMBOL_TRADE_STOPS_LEVEL
+            );
+
+        long protectFreezeLevel =
+            SymbolInfoInteger(
+                _Symbol,
+                SYMBOL_TRADE_FREEZE_LEVEL
+            );
+
+        double protectMinDist =
+            MathMax(
+                protectStopLevel,
+                protectFreezeLevel
+            ) * _Point;
+
+        bool improveFloor = false;
+
+        if(posType == POSITION_TYPE_BUY)
+        {
+            double maxFloor =
+                currentPrice -
+                protectMinDist;
+
+            if(floorSL > maxFloor)
+                floorSL =
+                    NormalizeDouble(
+                        maxFloor,
+                        _Digits
+                    );
+
+            improveFloor =
+                floorSL > 0.0 &&
+                floorSL < currentPrice &&
+                (
+                    currentSL == 0.0 ||
+                    floorSL >
+                        currentSL +
+                        (_Point * 0.5)
+                );
+        }
+        else
+        {
+            double minFloor =
+                currentPrice +
+                protectMinDist;
+
+            if(floorSL < minFloor)
+                floorSL =
+                    NormalizeDouble(
+                        minFloor,
+                        _Digits
+                    );
+
+            improveFloor =
+                floorSL > currentPrice &&
+                (
+                    currentSL == 0.0 ||
+                    floorSL <
+                        currentSL -
+                        (_Point * 0.5)
+                );
+        }
+
+        if(improveFloor)
+        {
+            if(
+                ModifyPosition(
+                    ticket,
+                    floorSL,
+                    currentTP
+                )
+            )
+            {
+                currentSL = floorSL;
+
+                int protectPosIndex =
+                    GetManagedPositionIndex(ticket);
+
+                if(
+                    protectPosIndex != -1 &&
+                    protectedTargetUsd <= 0.0
+                )
+                {
+                    managedPositions[
+                        protectPosIndex
+                    ].breakEvenLocked = true;
+                }
+
+                LogPrint(
+                    "[PROFIT PROTECTION] Ticket: ",
+                    ticket,
+                    " | live=$",
+                    DoubleToString(profit, 2),
+                    " | favourable=",
+                    DoubleToString(
+                        favourableMove,
+                        _Digits
+                    ),
+                    " | ATR=",
+                    DoubleToString(
+                        protectionAtr,
+                        _Digits
+                    ),
+                    " | reason=",
+                    profitProtectionReason,
+                    " | protected target=$",
+                    DoubleToString(
+                        protectedTargetUsd,
+                        2
+                    ),
+                    " | broker SL=",
+                    DoubleToString(
+                        floorSL,
+                        _Digits
+                    )
+                );
+            }
+        }
+    }
     
     // Get Signal Strength (smoothed score for management)
     ENUM_ORDER_TYPE orderType = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
@@ -7272,9 +8327,10 @@ void ManageTrailingTPSL(ulong ticket)
     bool shouldModifySL = false;
 
     // Filter by profit threshold if enabled (only trail if profit > threshold)
-    double profitThreshold = MinBreakEvenProfit * ProfitThresholdMultiplier;
-    bool canTrail = (MinBreakEvenProfit <= 0 || !managementPolicy.trailingSlOnProfitableOnly || profit >= profitThreshold);
-    
+    bool canTrail =
+        !managementPolicy.trailingSlOnProfitableOnly ||
+        profitProtectionEligible;
+        
     if(canTrail)
     {
         // Calculate effective Trailing Distance
@@ -7304,9 +8360,38 @@ void ManageTrailingTPSL(ulong ticket)
         }
         else
         {
-            finalTrailingPoints   = ConvertToPoints(managementPolicy.tsInputType, effectiveDist, volume);
-            trailingDistancePrice = finalTrailingPoints * _Point;
-        }
+            finalTrailingPoints =
+                ConvertToPoints(
+                    managementPolicy.tsInputType,
+                    effectiveDist,
+                    volume
+                );
+
+            trailingDistancePrice =
+                finalTrailingPoints * _Point;
+
+            // P3.44: a tiny dollar-based trailing distance must never place the
+            // broker SL essentially on top of the market. Once protection is
+            // eligible, preserve at least 0.25 ATR of breathing room.
+            if(protectionAtr > 0.0)
+            {
+                double minimumAtrTrail =
+                    protectionAtr * 0.25;
+
+                if(
+                    trailingDistancePrice <
+                    minimumAtrTrail
+                )
+                {
+                    trailingDistancePrice =
+                        minimumAtrTrail;
+
+                    finalTrailingPoints =
+                        trailingDistancePrice /
+                        _Point;
+                }
+            }
+        }       
         
         long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
         long freezeLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
@@ -7326,7 +8411,7 @@ void ManageTrailingTPSL(ulong ticket)
             if(profitPoints >= finalTrailingPoints) // Use finalTrailingPoints check logic from original
             {
                 calculatedSL = currentPrice - trailingDistancePrice;
-                double maxAllowedSL = SymbolInfoDouble(_Symbol, SYMBOL_BID) - minDistance;
+                double maxAllowedSL = currentPrice - minDistance;
                 
                 if(calculatedSL > maxAllowedSL) calculatedSL = maxAllowedSL;
                 
@@ -7336,7 +8421,7 @@ void ManageTrailingTPSL(ulong ticket)
                 // Only modify if moving UP
                 if(currentSL == 0 || calculatedSL > currentSL)
                 {
-                    if(calculatedSL < SymbolInfoDouble(_Symbol, SYMBOL_BID)) // Safety
+                    if(calculatedSL < currentPrice) // Safety
                     {
                         newSL = calculatedSL;
                         shouldModifySL = true;
@@ -7351,7 +8436,7 @@ void ManageTrailingTPSL(ulong ticket)
             if(profitPoints >= finalTrailingPoints)
             {
                 calculatedSL = currentPrice + trailingDistancePrice;
-                double minAllowedSL = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + minDistance;
+                double minAllowedSL = currentPrice + minDistance;
                 
                 if(calculatedSL < minAllowedSL) calculatedSL = minAllowedSL;
                 
@@ -7361,7 +8446,7 @@ void ManageTrailingTPSL(ulong ticket)
                 // Only modify if moving DOWN
                 if(currentSL == 0 || calculatedSL < currentSL)
                 {
-                    if(calculatedSL > SymbolInfoDouble(_Symbol, SYMBOL_ASK)) // Safety
+                    if(calculatedSL > currentPrice) // Safety
                     {
                         newSL = calculatedSL;
                         shouldModifySL = true;
@@ -7382,15 +8467,14 @@ void ManageTrailingTPSL(ulong ticket)
         if(tv > 0 && ts > 0 && volume > 0)
         {
             double lockDist = (lockProfit / volume) * (ts / tv);   // dollars -> price distance
-            double bidNow = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-            double askNow = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double markNow = currentPrice;
             double baseSL = shouldModifySL ? newSL : currentSL;
 
             if(posType == POSITION_TYPE_BUY)
             {
                 double lockPrice = NormalizeDouble(entryPrice + lockDist, _Digits);
                 // Raise the SL up to the lock (but keep an already-better trailed SL)
-                if(lockPrice > baseSL && lockPrice < bidNow)
+                if(lockPrice > baseSL && lockPrice < markNow)
                 {
                     newSL = lockPrice;
                     shouldModifySL = true;
@@ -7400,7 +8484,7 @@ void ManageTrailingTPSL(ulong ticket)
             {
                 double lockPrice = NormalizeDouble(entryPrice - lockDist, _Digits);
                 // Cap the SL down to the lock (but keep an already-better trailed SL)
-                if((baseSL == 0 || lockPrice < baseSL) && lockPrice > askNow)
+                if((baseSL == 0 || lockPrice < baseSL) && lockPrice > markNow)
                 {
                     newSL = lockPrice;
                     shouldModifySL = true;
@@ -7444,11 +8528,34 @@ void ManageTrailingTPSL(ulong ticket)
         // Prevents losing substantial profit due to inability to trail
         
         // Define substantial as 3x minimum target profit
-        double minSubstantialProfit = MinBreakEvenProfit * 3.0;
+        bool substantialProtectedMove =
+            profitProtectionEligible &&
+            profitLockTriggerPrice > 0.0 &&
+            favourableMove >=
+                profitLockTriggerPrice;
 
-        if(MinBreakEvenProfit > 0 && profit >= minSubstantialProfit)
+        if(
+            profit > 0.0 &&
+            substantialProtectedMove
+        )
         {
-            LogPrint("!! EMERGENCY CLOSE TRIGGERED !!");
+            LogPrint(
+                "!! EMERGENCY CLOSE TRIGGERED AFTER MEANINGFUL MFE !! ",
+                "Ticket=", ticket,
+                " | profit=$",
+                DoubleToString(profit, 2),
+                " | favourable=",
+                DoubleToString(
+                    favourableMove,
+                    _Digits
+                ),
+                " | ATR=",
+                DoubleToString(
+                    protectionAtr,
+                    _Digits
+                )
+            );
+
             ClosePosition(ticket);
         }
     }
@@ -7504,6 +8611,32 @@ void RegisterManagedPosition(
         if(entryPolicyEpoch >= 0)
             managedPositions[existingIndex].entryPolicyEpoch = entryPolicyEpoch;
 
+        if(orderOrigin == "RECOVERY_PROBE")
+        {
+            managedPositions[existingIndex].recoveryProbe = true;
+            managedPositions[existingIndex].recoveryProbeTargetRiskPct = atlasRecoveryProbeTargetRiskPct;
+            managedPositions[existingIndex].recoveryProbeMaxRiskPct = atlasRecoveryProbeMaxExecutableRiskPct;
+            if(PositionSelectByTicket(ticket))
+            {
+                double probeSL = PositionGetDouble(POSITION_SL);
+                double probeVolume = PositionGetDouble(POSITION_VOLUME);
+                double probeEntry = PositionGetDouble(POSITION_PRICE_OPEN);
+                double probeLoss = 0.0;
+                ENUM_ORDER_TYPE probeOrderType = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+                double probeEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+                if(probeSL > 0.0 && probeVolume > 0.0 && probeEntry > 0.0 &&
+                   OrderCalcProfit(probeOrderType, _Symbol, probeVolume, probeEntry, probeSL, probeLoss))
+                {
+                    double amount = MathMax(0.0, -probeLoss);
+                    managedPositions[existingIndex].recoveryProbeAdmissionRiskAmount = amount;
+                    managedPositions[existingIndex].recoveryProbeAdmissionRiskPct = (probeEquity > 0.0) ? amount / probeEquity * 100.0 : 0.0;
+                    // On restart, freezing at the currently tighter envelope is conservative.
+                    managedPositions[existingIndex].recoveryProbeFrozenRiskAmount = amount;
+                    managedPositions[existingIndex].recoveryProbeInitialSL = probeSL;
+                }
+            }
+        }
+
         return;
     }
 
@@ -7537,9 +8670,36 @@ void RegisterManagedPosition(
     managedPositions[managedPositionCount].entryPolicyEpoch =
         (entryPolicyEpoch >= 0) ? entryPolicyEpoch : atlasPolicyEpoch;
     managedPositions[managedPositionCount].identityRestoredFromRegistry = false;
+    managedPositions[managedPositionCount].recoveryProbe = (orderOrigin == "RECOVERY_PROBE");
+    managedPositions[managedPositionCount].recoveryProbeTargetRiskPct = managedPositions[managedPositionCount].recoveryProbe ? atlasRecoveryProbeTargetRiskPct : 0.0;
+    managedPositions[managedPositionCount].recoveryProbeMaxRiskPct = managedPositions[managedPositionCount].recoveryProbe ? atlasRecoveryProbeMaxExecutableRiskPct : 0.0;
+    managedPositions[managedPositionCount].recoveryProbeAdmissionRiskPct = 0.0;
+    managedPositions[managedPositionCount].recoveryProbeAdmissionRiskAmount = 0.0;
+    managedPositions[managedPositionCount].recoveryProbeFrozenRiskAmount = managedPositions[managedPositionCount].recoveryProbe ? -1.0 : 0.0;
+    managedPositions[managedPositionCount].recoveryProbeInitialSL = 0.0;
     // Capture original SL from broker if position exists
     double origSL = 0;
-    if(PositionSelectByTicket(ticket)) origSL = PositionGetDouble(POSITION_SL);
+    if(PositionSelectByTicket(ticket))
+    {
+        origSL = PositionGetDouble(POSITION_SL);
+        if(managedPositions[managedPositionCount].recoveryProbe)
+        {
+            double probeVolume = PositionGetDouble(POSITION_VOLUME);
+            double probeEntry = PositionGetDouble(POSITION_PRICE_OPEN);
+            double probeLoss = 0.0;
+            ENUM_ORDER_TYPE probeOrderType = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+            double probeEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+            if(origSL > 0.0 && probeVolume > 0.0 && probeEntry > 0.0 &&
+               OrderCalcProfit(probeOrderType, _Symbol, probeVolume, probeEntry, origSL, probeLoss))
+            {
+                double amount = MathMax(0.0, -probeLoss);
+                managedPositions[managedPositionCount].recoveryProbeAdmissionRiskAmount = amount;
+                managedPositions[managedPositionCount].recoveryProbeAdmissionRiskPct = (probeEquity > 0.0) ? amount / probeEquity * 100.0 : 0.0;
+                managedPositions[managedPositionCount].recoveryProbeFrozenRiskAmount = amount;
+                managedPositions[managedPositionCount].recoveryProbeInitialSL = origSL;
+            }
+        }
+    }
     managedPositions[managedPositionCount].profitOffsetOriginalSL = origSL;
 
     managedPositionCount++;
@@ -7786,14 +8946,29 @@ bool AtlasBuildOrdinaryMarketGeometry(
 )
 {
     reason = "OK";
-    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    if(tick <= 0) tick = _Point;
+    MqlTick liveTick = {};
+    if(!SymbolInfoTick(_Symbol, liveTick))
+    {
+        reason = "FRESH_TICK_UNAVAILABLE";
+        return false;
+    }
 
-    if(ask <= 0 || bid <= 0 || tick <= 0)
+    double ask = liveTick.ask;
+    double bid = liveTick.bid;
+
+    double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    if(tick <= 0.0)
+        tick = _Point;
+
+    if(ask <= 0.0 || bid <= 0.0 || tick <= 0.0)
     {
         reason = "QUOTE_UNAVAILABLE";
+        return false;
+    }
+
+    if(liveTick.time_msc <= 0)
+    {
+        reason = "FRESH_TICK_TIMESTAMP_INVALID";
         return false;
     }
 
@@ -7861,6 +9036,72 @@ bool AtlasBuildOrdinaryMarketGeometry(
     return true;
 }
 
+// P3.40: validate the broker's ACTUAL recovery-probe fill, not only the
+// pre-send quote. Market execution can fill away from the validated request
+// price, which changes the loss to the already-normalized broker SL. A probe
+// that breaches its immutable cap after fill is immediately rejected and
+// scheduled for emergency close by the caller.
+bool AtlasValidateRecoveryProbeActualFill(ulong ticket, ENUM_POSITION_TYPE type)
+{
+    if(ticket == 0 || !PositionSelectByTicket(ticket))
+    {
+        atlasRecoveryProbeFeasibilityReason = "POST_FILL_POSITION_UNAVAILABLE";
+        return false;
+    }
+
+    double actualEntry = PositionGetDouble(POSITION_PRICE_OPEN);
+    double actualSL = PositionGetDouble(POSITION_SL);
+    double actualVolume = PositionGetDouble(POSITION_VOLUME);
+    double actualEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+    ENUM_ORDER_TYPE actualOrderType = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    double actualPnlAtSL = 0.0;
+
+    if(actualEntry <= 0.0 || actualSL <= 0.0 || actualVolume <= 0.0 || actualEquity <= 0.0 ||
+       !OrderCalcProfit(actualOrderType, _Symbol, actualVolume, actualEntry, actualSL, actualPnlAtSL))
+    {
+        atlasRecoveryProbeFeasibilityReason = "POST_FILL_RISK_CALCULATION_FAILED";
+        return false;
+    }
+
+    double actualRiskAmount = MathMax(0.0, -actualPnlAtSL);
+    double actualRiskPct = actualRiskAmount / actualEquity * 100.0;
+    atlasRecoveryProbeMinimumExecutableRiskAmount = actualRiskAmount;
+    atlasRecoveryProbeMinimumExecutableRiskPct = actualRiskPct;
+    atlasRecoveryProbeFeasibilityEquity = actualEquity;
+    atlasRecoveryProbeFeasibilityEvaluatedAt = TimeCurrent();
+    atlasRecoveryProbeFeasibilityFresh = true;
+
+    int idx = GetManagedPositionIndex(ticket);
+    if(idx >= 0)
+    {
+        managedPositions[idx].entryPrice = actualEntry;
+        managedPositions[idx].recoveryProbe = true;
+        managedPositions[idx].recoveryProbeTargetRiskPct = atlasRecoveryProbeTargetRiskPct;
+        managedPositions[idx].recoveryProbeMaxRiskPct = atlasRecoveryProbeMaxExecutableRiskPct;
+        managedPositions[idx].recoveryProbeAdmissionRiskAmount = actualRiskAmount;
+        managedPositions[idx].recoveryProbeAdmissionRiskPct = actualRiskPct;
+        managedPositions[idx].recoveryProbeFrozenRiskAmount = actualRiskAmount;
+        managedPositions[idx].recoveryProbeInitialSL = actualSL;
+    }
+
+    if(atlasRecoveryProbeMaxExecutableRiskPct <= 0.0 ||
+       actualRiskPct > atlasRecoveryProbeMaxExecutableRiskPct + 1e-9)
+    {
+        atlasRecoveryProbeFeasibilityReason = "POST_FILL_RISK_EXCEEDS_PROBE_CAP";
+        LogPrint("[RECOVERY PROBE] ACTUAL FILL RISK BREACH ticket=", ticket,
+                 " | entry=", DoubleToString(actualEntry, _Digits),
+                 " | SL=", DoubleToString(actualSL, _Digits),
+                 " | lot=", DoubleToString(actualVolume, 2),
+                 " | risk=$", DoubleToString(actualRiskAmount, 2),
+                 " (", DoubleToString(actualRiskPct, 6), "%) > cap ",
+                 DoubleToString(atlasRecoveryProbeMaxExecutableRiskPct, 6), "%");
+        return false;
+    }
+
+    atlasRecoveryProbeFeasibilityReason = "ACTUAL_FILL_RISK_VERIFIED";
+    return true;
+}
+
 // Open Position
 void OpenPosition(
     ENUM_ORDER_TYPE orderType,
@@ -7888,6 +9129,14 @@ void OpenPosition(
     int entrySameDirTradesBefore = AtlasSameDirTradesBefore(atlasDir);
     int entryTotalTradesBefore = AtlasTotalTradesBefore();
     int entryPolicyEpoch = (sourcePolicyEpoch >= 0) ? sourcePolicyEpoch : atlasPolicyEpoch;
+
+    // Recovery probes are immutable entry lineage, not ordinary FRESH_MARKET scalps.
+    // The compact RP origin survives MT5/Atlas restarts through the broker comment.
+    if(atlasRecoveryProbeActive && orderOrigin == "FRESH_MARKET")
+    {
+        orderOrigin = "RECOVERY_PROBE";
+        entryGateMode = "RECOVERY";
+    }
 
     string scalpContextClass = AtlasScalpContextClass(orderType);
     string scalpContextZoneSide =
@@ -7935,8 +9184,8 @@ void OpenPosition(
     // spread consumes at most the configured fraction of risk/reward, then let
     // Atlas capital sizing decide whether that wider trade is affordable.
     double liveSpreadPoints = AtlasLiveSpreadPoints();
-    double baseSlPoints = GetSLPoints(atlasRuntime.baseLotSize);
-    double baseTpPoints = GetTPPoints(atlasRuntime.baseLotSize);
+    double baseSlPoints = AtlasGetScalpStructuralSLPoints(atlasRuntime.baseLotSize);
+    double baseTpPoints = AtlasGetScalpStructuralTPPoints(atlasRuntime.baseLotSize, baseSlPoints);
     double slPoints = baseSlPoints;
     double tpPoints = baseTpPoints;
     string costBasis = "STRUCTURE_ADAPTIVE";
@@ -8003,15 +9252,18 @@ void OpenPosition(
         // This is the economically meaningful BTC failure mode: the widened
         // stop required to absorb spread cannot be funded at broker min lot
         // within Atlas's approved risk budget.
-        AtlasSetDecisionReason(atlasDir, costAdjusted ? "SCALP_COST_RISK_BUDGET_INFEASIBLE" : "ATLAS_CAPITAL_RISK_VETO");
+        if(atlasRecoveryProbeActive && atlasRecoveryProbeFeasibilityReason == "MIN_VOLUME_RISK_EXCEEDS_PROBE_CAP")
+            AtlasSetDecisionReason(atlasDir, "RECOVERY_PROBE_MIN_VOLUME_RISK_EXCEEDS_CAP");
+        else
+            AtlasSetDecisionReason(atlasDir, costAdjusted ? "SCALP_COST_RISK_BUDGET_INFEASIBLE" : "ATLAS_CAPITAL_RISK_VETO");
         return;
     }
 
     // Re-resolve manual dollar/percent SL/TP inputs using the actual lot, then
     // apply the same spread-aware geometry a second time. ATR/RR modes are
     // already lot-independent, while this keeps legacy input types consistent.
-    baseSlPoints = GetSLPoints(currentLot);
-    baseTpPoints = GetTPPoints(currentLot);
+    baseSlPoints = AtlasGetScalpStructuralSLPoints(currentLot);
+    baseTpPoints = AtlasGetScalpStructuralTPPoints(currentLot, baseSlPoints);
     slPoints = baseSlPoints;
     tpPoints = baseTpPoints;
     if(!AtlasBuildScalpEconomicStructure(
@@ -8048,7 +9300,10 @@ void OpenPosition(
     currentLot = CalculateDynamicLotSize(signalScore, orderType, price, stopPrice, scalpContextRiskMultiplier);
     if(currentLot <= 0)
     {
-        AtlasSetDecisionReason(atlasDir, costAdjusted ? "SCALP_COST_RISK_BUDGET_INFEASIBLE" : "ATLAS_CAPITAL_RISK_VETO");
+        if(atlasRecoveryProbeActive && atlasRecoveryProbeFeasibilityReason == "MIN_VOLUME_RISK_EXCEEDS_PROBE_CAP")
+            AtlasSetDecisionReason(atlasDir, "RECOVERY_PROBE_MIN_VOLUME_RISK_EXCEEDS_CAP");
+        else
+            AtlasSetDecisionReason(atlasDir, costAdjusted ? "SCALP_COST_RISK_BUDGET_INFEASIBLE" : "ATLAS_CAPITAL_RISK_VETO");
         return;
     }
 
@@ -8079,6 +9334,146 @@ void OpenPosition(
         return;
     }
 
+    // P3.36: final authoritative recovery-probe risk integrity.  This check is
+    // intentionally AFTER all geometry and lot normalization. Realized P/L is
+    // not the admission test: final entry + final SL + final volume must fit the
+    // deterministic recovery cap before an order is allowed to exist.
+    if(orderOrigin == "RECOVERY_PROBE")
+    {
+        double probeLoss = 0.0;
+        double equityAtAdmission = AccountInfoDouble(ACCOUNT_EQUITY);
+        if(stopPrice <= 0.0 || currentLot <= 0.0 || equityAtAdmission <= 0.0 ||
+           !OrderCalcProfit(orderType, _Symbol, currentLot, price, stopPrice, probeLoss))
+        {
+            atlasRecoveryProbeFeasibilityReason = "FINAL_RISK_CALCULATION_FAILED";
+            AtlasSetDecisionReason(atlasDir, "RECOVERY_PROBE_FINAL_RISK_CALCULATION_FAILED");
+            return;
+        }
+        double finalProbeRiskAmount = MathMax(0.0, -probeLoss);
+        double finalProbeRiskPct = finalProbeRiskAmount / equityAtAdmission * 100.0;
+        atlasRecoveryProbeFeasibilityEquity = equityAtAdmission;
+        atlasRecoveryProbeFeasibilityEvaluatedAt = TimeCurrent();
+        atlasRecoveryProbeFeasibilityFresh = true;
+        if(atlasRecoveryProbeMaxExecutableRiskPct <= 0.0 ||
+           finalProbeRiskPct > atlasRecoveryProbeMaxExecutableRiskPct + 1e-9)
+        {
+            atlasRecoveryProbeMinimumExecutableRiskAmount = finalProbeRiskAmount;
+            atlasRecoveryProbeMinimumExecutableRiskPct = finalProbeRiskPct;
+            atlasRecoveryProbeFeasibilityReason = "FINAL_NORMALIZED_RISK_EXCEEDS_PROBE_CAP";
+            AtlasSetDecisionReason(atlasDir, "RECOVERY_PROBE_FINAL_RISK_EXCEEDS_CAP");
+            LogPrint("[RECOVERY PROBE] Final broker-normalized risk blocked. Risk=",
+                     DoubleToString(finalProbeRiskAmount, 2), " (",
+                     DoubleToString(finalProbeRiskPct, 4), "%) > cap ",
+                     DoubleToString(atlasRecoveryProbeMaxExecutableRiskPct, 4), "%");
+            return;
+        }
+        atlasRecoveryProbeFeasibilityReason = atlasRecoveryProbeBrokerOverrideActive
+            ? "BROKER_MINIMUM_OVERRIDE_FINAL_RISK_VERIFIED"
+            : "FINAL_RISK_VERIFIED";
+    }
+
+    // P3.44 FINAL EXECUTION REPRICE
+    // The earlier geometry/sizing pass validates strategy economics.
+    // Immediately before broker preflight, obtain a fresh executable tick,
+    // rebuild stop geometry, and re-run Atlas sizing against that geometry.
+
+    string finalPreflightGeometryReason = "";
+
+    if(
+        !AtlasBuildOrdinaryMarketGeometry(
+            orderType,
+            slPoints,
+            tpPoints,
+            price,
+            stopPrice,
+            takeProfitPrice,
+            finalPreflightGeometryReason
+        )
+    )
+    {
+        AtlasSetDecisionReason(
+            atlasDir,
+            "FINAL_FRESH_QUOTE_PREFLIGHT_" +
+            finalPreflightGeometryReason
+        );
+
+        return;
+    }
+
+    currentLot =
+        CalculateDynamicLotSize(
+            signalScore,
+            orderType,
+            price,
+            stopPrice,
+            scalpContextRiskMultiplier
+        );
+
+    if(currentLot <= 0.0)
+    {
+        AtlasSetDecisionReason(
+            atlasDir,
+            "FINAL_REPRICE_RISK_VETO"
+        );
+
+        return;
+    }
+
+    // Recovery probes must still satisfy their immutable risk cap
+    // after this final quote refresh.
+    if(orderOrigin == "RECOVERY_PROBE")
+    {
+        double repricedProbeLoss = 0.0;
+        double repricedEquity =
+            AccountInfoDouble(ACCOUNT_EQUITY);
+
+        if(
+            stopPrice <= 0.0 ||
+            repricedEquity <= 0.0 ||
+            !OrderCalcProfit(
+                orderType,
+                _Symbol,
+                currentLot,
+                price,
+                stopPrice,
+                repricedProbeLoss
+            )
+        )
+        {
+            AtlasSetDecisionReason(
+                atlasDir,
+                "RECOVERY_PROBE_FINAL_REPRICE_RISK_FAILED"
+            );
+
+            return;
+        }
+
+        double repricedRiskAmount =
+            MathMax(
+                0.0,
+                -repricedProbeLoss
+            );
+
+        double repricedRiskPct =
+            repricedRiskAmount /
+            repricedEquity *
+            100.0;
+
+        if(
+            atlasRecoveryProbeMaxExecutableRiskPct <= 0.0 ||
+            repricedRiskPct >
+                atlasRecoveryProbeMaxExecutableRiskPct +
+                1e-9
+        )
+        {
+            AtlasSetDecisionReason(
+                atlasDir,
+                "RECOVERY_PROBE_FINAL_REPRICE_RISK_EXCEEDS_CAP"
+            );
+
+            return;
+        }
+    }
     MqlTradeRequest request = {};
     MqlTradeResult result = {};
     request.action = TRADE_ACTION_DEAL;
@@ -8106,18 +9501,232 @@ void OpenPosition(
     // into an opposite-direction fallback trade.
     MqlTradeCheckResult check = {};
     ResetLastError();
-    bool checkOk = OrderCheck(request, check);
-    if(!checkOk || (check.retcode != 0 && check.retcode != TRADE_RETCODE_DONE))
+
+    bool checkOk =
+        OrderCheck(
+            request,
+            check
+        );
+
+    AtlasCapturePreflightTelemetry(
+        request,
+        check,
+        checkOk
+            ? "INITIAL_CHECK"
+            : "INITIAL_CHECK_FAILED",
+        0
+    );
+
+    bool preflightAccepted =
+        checkOk &&
+        (
+            check.retcode == 0 ||
+            check.retcode ==
+                TRADE_RETCODE_DONE
+        );
+
+    // One bounded retry only for INVALID_STOPS.
+    // Never blindly resend the same request.
+    if(
+        !preflightAccepted &&
+        (
+            check.retcode ==
+                TRADE_RETCODE_INVALID_STOPS ||
+            check.retcode == 10016
+        )
+    )
     {
-        atlasLastOrderRetcode = (long)check.retcode;
-        AtlasSetDecisionReason(atlasDir, "ORDER_PREFLIGHT_REJECTED_" + IntegerToString((int)check.retcode));
-        LogPrint("[ATLAS PREFLIGHT] OrderCheck rejected ", orderType == ORDER_TYPE_BUY ? "BUY" : "SELL",
-                 " retcode=", check.retcode, " comment=", check.comment,
-                 " entry=", DoubleToString(request.price, _Digits),
-                 " SL=", DoubleToString(request.sl, _Digits),
-                 " TP=", DoubleToString(request.tp, _Digits));
+        string retryGeometryReason = "";
+
+        bool retryGeometryOk =
+            AtlasBuildOrdinaryMarketGeometry(
+                orderType,
+                slPoints,
+                tpPoints,
+                price,
+                stopPrice,
+                takeProfitPrice,
+                retryGeometryReason
+            );
+
+        if(retryGeometryOk)
+        {
+            double retryLot =
+                CalculateDynamicLotSize(
+                    signalScore,
+                    orderType,
+                    price,
+                    stopPrice,
+                    scalpContextRiskMultiplier
+                );
+
+            if(retryLot > 0.0)
+            {
+                bool retryRiskAccepted = true;
+
+                if(orderOrigin == "RECOVERY_PROBE")
+                {
+                    double retryProbeLoss = 0.0;
+                    double retryEquity =
+                        AccountInfoDouble(
+                            ACCOUNT_EQUITY
+                        );
+
+                    if(
+                        retryEquity <= 0.0 ||
+                        !OrderCalcProfit(
+                            orderType,
+                            _Symbol,
+                            retryLot,
+                            price,
+                            stopPrice,
+                            retryProbeLoss
+                        )
+                    )
+                    {
+                        retryRiskAccepted = false;
+                    }
+                    else
+                    {
+                        double retryRiskAmount =
+                            MathMax(
+                                0.0,
+                                -retryProbeLoss
+                            );
+
+                        double retryRiskPct =
+                            retryRiskAmount /
+                            retryEquity *
+                            100.0;
+
+                        retryRiskAccepted =
+                            atlasRecoveryProbeMaxExecutableRiskPct > 0.0 &&
+                            retryRiskPct <=
+                                atlasRecoveryProbeMaxExecutableRiskPct +
+                                1e-9;
+                    }
+                }
+
+                if(retryRiskAccepted)
+                {
+                    currentLot = retryLot;
+
+                    request.volume =
+                        currentLot;
+
+                    request.price =
+                        price;
+
+                    request.sl =
+                        stopPrice;
+
+                    request.tp =
+                        takeProfitPrice;
+
+                    MqlTradeCheckResult retryCheck = {};
+                    ResetLastError();
+
+                    bool retryOk =
+                        OrderCheck(
+                            request,
+                            retryCheck
+                        );
+
+                    AtlasCapturePreflightTelemetry(
+                        request,
+                        retryCheck,
+                        retryOk
+                            ? "RECHECK_AFTER_10016"
+                            : "RECHECK_AFTER_10016_FAILED",
+                        1
+                    );
+
+                    check =
+                        retryCheck;
+
+                    checkOk =
+                        retryOk;
+
+                    preflightAccepted =
+                        retryOk &&
+                        (
+                            retryCheck.retcode == 0 ||
+                            retryCheck.retcode ==
+                                TRADE_RETCODE_DONE
+                        );
+                }
+            }
+        }
+    }
+
+    if(!preflightAccepted)
+    {
+        atlasLastOrderRetcode =
+            (long)check.retcode;
+
+        AtlasSetDecisionReason(
+            atlasDir,
+            "ORDER_PREFLIGHT_REJECTED_" +
+            IntegerToString(
+                (int)check.retcode
+            )
+        );
+
+        LogPrint(
+            "[ATLAS PREFLIGHT] rejected ",
+            orderType ==
+                ORDER_TYPE_BUY
+                    ? "BUY"
+                    : "SELL",
+            " retcode=",
+            check.retcode,
+            " comment=",
+            check.comment,
+            " entry=",
+            DoubleToString(
+                request.price,
+                _Digits
+            ),
+            " SL=",
+            DoubleToString(
+                request.sl,
+                _Digits
+            ),
+            " TP=",
+            DoubleToString(
+                request.tp,
+                _Digits
+            ),
+            " lot=",
+            DoubleToString(
+                request.volume,
+                4
+            ),
+            " bid=",
+            DoubleToString(
+                atlasPreflightBid,
+                _Digits
+            ),
+            " ask=",
+            DoubleToString(
+                atlasPreflightAsk,
+                _Digits
+            ),
+            " stops=",
+            atlasPreflightStopsLevel,
+            " freeze=",
+            atlasPreflightFreezeLevel,
+            " retry=",
+            atlasPreflightRetryCount
+        );
+
         return;
     }
+
+    atlasPreflightState =
+        atlasPreflightRetryCount > 0
+            ? "ACCEPTED_AFTER_REPRICE"
+            : "ACCEPTED_FIRST_CHECK";
 
     LockOrderSend(true);
     AtlasBeginOrderAttempt(orderType, "MARKET");
@@ -8125,6 +9734,7 @@ void OpenPosition(
     bool orderResult = OrderSend(request, result);
     atlasLastOrderRetcode = (long)result.retcode;
 
+    ulong recoveryEmergencyCloseTicket = 0;
     if(orderResult && result.retcode == TRADE_RETCODE_DONE)
     {
         atlasLastOrderSuccess = true;
@@ -8151,6 +9761,24 @@ void OpenPosition(
             entrySameDirTradesBefore, entryTotalTradesBefore, entryPolicyEpoch
         );
 
+        // P3.40: the pre-send risk check uses the request quote. Reprice once
+        // more from the ACTUAL broker fill and actual broker SL. If slippage or
+        // broker execution makes the probe exceed 0.30%, do not permit that
+        // distorted probe to remain open. Close it immediately after releasing
+        // the OrderSend lock.
+        bool postFillAccepted = true;
+        if(orderOrigin == "RECOVERY_PROBE")
+        {
+            postFillAccepted = AtlasValidateRecoveryProbeActualFill(result.order, posType);
+            if(!postFillAccepted)
+            {
+                recoveryEmergencyCloseTicket = result.order;
+                AtlasSetDecisionReason(atlasDir, "RECOVERY_PROBE_POST_FILL_RISK_BREACH");
+            }
+        }
+
+        if(postFillAccepted)
+        {
         datetime currBarTime = iTime(_Symbol, _Period, 0);
         if(currentBarTime != currBarTime)
         {
@@ -8171,6 +9799,7 @@ void OpenPosition(
             lastSellTime = TimeCurrent();
             lastSellPrice = price;
         }
+        }
     }
     else if(orderResult)
     {
@@ -8184,6 +9813,17 @@ void OpenPosition(
     }
 
     LockOrderSend(false);
+
+    if(recoveryEmergencyCloseTicket > 0)
+    {
+        // Fail closed after an adverse/slipped actual fill. This close is
+        // intentionally outside the OrderSend lock and before any future tick
+        // can authorize recovery-chain expansion.
+        if(!ClosePosition(recoveryEmergencyCloseTicket))
+            LogPrint("[RECOVERY PROBE] EMERGENCY CLOSE FAILED for ticket ", recoveryEmergencyCloseTicket);
+        else
+            LogPrint("[RECOVERY PROBE] Emergency-closed over-cap actual fill ticket ", recoveryEmergencyCloseTicket);
+    }
 }
 
 // +------------------------------------------------------------------+
@@ -8453,6 +10093,18 @@ double ComputeHedgeLot(double olderLot, double olderLoss, double atr,
 // +------------------------------------------------------------------+
 ulong OpenChainHedge(ulong chainId, ENUM_POSITION_TYPE prevType, double hedgeLot, int newLevel, double anchorLoss, int cycleNum, const AtlasRecoveryPolicySnapshot &recoveryPolicy)
 {
+    // P3.40: a recovery PROBE is deliberately a single, broker-stop-bounded
+    // diagnostic trade. It may not expand into a naked rolling-hedge chain.
+    // Ordinary recovery chains retain their existing behaviour; RP lineage is
+    // the hard discriminator.
+    if(AtlasIsRecoveryProbeRootTicket(chainId))
+    {
+        atlasRecoverySizingReason = "RECOVERY_PROBE_HEDGE_CHAIN_DISABLED";
+        LogPrint("[RECOVERY PROBE] Hedge child blocked for probe root ", chainId,
+                 ". Probe risk must remain single-leg and broker-stop bounded.");
+        return 0;
+    }
+
     if(hedgeLot <= 0)
     {
         LogPrint("[HEDGE CHAIN] Recovery hedge rejected: ", atlasRecoverySizingReason,
@@ -8794,7 +10446,12 @@ void ManageHedgeChains()
         if(openLegs == 0) continue;
         if(openLegs == 1)
         {
-            if(hedgeTicket != 0) GraduateChainLeg(hedgeTicket);
+            if(hedgeTicket != 0)
+            {
+                int survivorIndex = GetManagedPositionIndex(hedgeTicket);
+                if(survivorIndex != -1) managedPositions[survivorIndex].noRehedge = true;
+                GraduateChainLeg(hedgeTicket);
+            }
             continue;
         }
 
@@ -9128,7 +10785,7 @@ void PlaceLimitEntry(ENUM_ORDER_TYPE dir, double signalScore)
     double ref = (dir == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                                          : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-    double slPts = GetSLPoints(atlasRuntime.baseLotSize);
+    double slPts = AtlasGetScalpStructuralSLPoints(atlasRuntime.baseLotSize);
     double stopPrice = 0.0;
     if(slPts > 0)
         stopPrice = (dir == ORDER_TYPE_BUY)
@@ -9168,7 +10825,7 @@ void PlaceLimitEntry(ENUM_ORDER_TYPE dir, double signalScore)
         AtlasSetDecisionReason(atlasDir, "ATLAS_CAPITAL_RISK_VETO");
         return;
     }
-    double tpPts = GetTPPoints(currentLot);
+    double tpPts = AtlasGetScalpStructuralTPPoints(currentLot, slPts);
 
     LockOrderSend(true);
 
@@ -9903,6 +11560,42 @@ bool ModifyPosition(ulong ticket, double newSL, double newTP)
     string symbol = PositionGetString(POSITION_SYMBOL);
     double currentSL = PositionGetDouble(POSITION_SL);
     double currentTP = PositionGetDouble(POSITION_TP);
+
+    // P3.36: recovery-probe SL changes may only preserve or reduce the frozen
+    // admission risk. Removing the stop or widening beyond that envelope is forbidden.
+    int managedIndex = GetManagedPositionIndex(ticket);
+    if(managedIndex >= 0 && managedPositions[managedIndex].recoveryProbe)
+    {
+        if(newSL <= 0.0)
+        {
+            LogPrint("[RECOVERY PROBE] Refused SL removal for ticket ", ticket);
+            return false;
+        }
+        double probeEntry = PositionGetDouble(POSITION_PRICE_OPEN);
+        double probeVolume = PositionGetDouble(POSITION_VOLUME);
+        ENUM_POSITION_TYPE probeType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        ENUM_ORDER_TYPE probeOrderType = (probeType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+        double proposedLoss = 0.0;
+        if(!OrderCalcProfit(probeOrderType, symbol, probeVolume, probeEntry, newSL, proposedLoss))
+        {
+            LogPrint("[RECOVERY PROBE] Refused SL modification because risk calculation failed for ticket ", ticket);
+            return false;
+        }
+        double proposedRisk = MathMax(0.0, -proposedLoss);
+        double frozenRisk = managedPositions[managedIndex].recoveryProbeFrozenRiskAmount;
+        if(frozenRisk < 0.0)
+        {
+            double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+            frozenRisk = equity * managedPositions[managedIndex].recoveryProbeMaxRiskPct / 100.0;
+        }
+        if(frozenRisk < 0.0 || proposedRisk > frozenRisk + 0.01)
+        {
+            LogPrint("[RECOVERY PROBE] Refused SL widening for ticket ", ticket,
+                     " | proposed risk=", DoubleToString(proposedRisk, 2),
+                     " | frozen risk=", DoubleToString(frozenRisk, 2));
+            return false;
+        }
+    }
     
     // Prepare request
     MqlTradeRequest request = {};
@@ -9944,6 +11637,19 @@ bool IsAllowedToOpenPosition(bool enforceScalpSpreadFilter = true)
     if(!atlasEnabled)
     {
         atlasLastGlobalBlockReason = "ATLAS_DISABLED";
+        return false;
+    }
+    if(!atlasStartupRiskAuthorityReady)
+    {
+        atlasLastGlobalBlockReason = "STARTUP_RISK_RECONCILIATION";
+        return false;
+    }
+    // A recovery probe is an isolated experiment. Independent entry paths
+    // fail closed for the entire immutable RP lifecycle, even if Atlas backend
+    // telemetry is a few ticks behind a child close/open transaction.
+    if(AtlasRecoveryLifecycleInFlight())
+    {
+        atlasLastGlobalBlockReason = "RECOVERY_LIFECYCLE_FRESH_RISK_LOCK";
         return false;
     }
     if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
@@ -10216,8 +11922,8 @@ bool IsSpreadTooWide()
     double atr = GetCurrentATR();
     double atrPoints = (_Point > 0.0 && atr > 0.0) ? atr / _Point : 0.0;
     double cap = AtlasScalpCostCapPoints(
-        GetSLPoints(atlasRuntime.baseLotSize),
-        GetTPPoints(atlasRuntime.baseLotSize),
+        AtlasGetScalpStructuralSLPoints(atlasRuntime.baseLotSize),
+        AtlasGetScalpStructuralTPPoints(atlasRuntime.baseLotSize, AtlasGetScalpStructuralSLPoints(atlasRuntime.baseLotSize)),
         atrPoints
     );
     if(cap <= 0.0) return false;
@@ -10368,18 +12074,67 @@ double CalculateDynamicLotSize(
             ? atlasBuyEffectiveThreshold
             : atlasSellEffectiveThreshold;
         double confidenceMargin = signalScore - threshold;
-        double confidenceMultiplier = confidenceMargin >= 1.5 ? 1.0
-            : (confidenceMargin >= 0.5 ? 0.80 : 0.65);
+        // Recovery-probe authority is already deliberately tiny. Do not apply a
+        // second confidence haircut to the 0.05% target; signal qualification is
+        // still enforced by the normal score threshold before sizing.
+        double confidenceMultiplier = atlasRecoveryProbeActive ? 1.0
+            : (confidenceMargin >= 1.5 ? 1.0
+            : (confidenceMargin >= 0.5 ? 0.80 : 0.65));
         double approvedRiskPct =
             atlasApprovedScalpRiskPct *
             confidenceMultiplier *
             MathMax(0.0, MathMin(1.0, contextRiskMultiplier));
 
-        double moneyRisk =
-            AccountInfoDouble(ACCOUNT_EQUITY) *
-            approvedRiskPct /
-            100.0;
+        double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+        double moneyRisk = equity * approvedRiskPct / 100.0;
         currentLot = moneyRisk / lossPerLot;
+
+        // P3.35: a fixed 0.05% probe can be smaller than the broker's minimum
+        // executable XAUUSD lot. Measure the TRUE minimum stop risk with
+        // OrderCalcProfit. Only recovery probes may lift to min lot, and only
+        // while that minimum remains inside Atlas's separate deterministic probe cap.
+        atlasRecoveryProbeMinimumVolume = minLot;
+        atlasRecoveryProbeMinimumExecutableRiskAmount = lossPerLot * minLot;
+        atlasRecoveryProbeMinimumExecutableRiskPct = (equity > 0.0)
+            ? atlasRecoveryProbeMinimumExecutableRiskAmount / equity * 100.0
+            : 0.0;
+        atlasRecoveryProbeFeasibilityEquity = equity;
+        atlasRecoveryProbeFeasibilityEvaluatedAt = TimeCurrent();
+        atlasRecoveryProbeFeasibilityFresh = true;
+        atlasRecoveryProbeBrokerOverrideActive = false;
+        atlasRecoveryProbeFeasibilityReason = atlasRecoveryProbeActive
+            ? "TARGET_BUDGET_EXECUTABLE"
+            : "NOT_RECOVERY_PROBE";
+
+        if(currentLot < minLot && atlasRecoveryProbeActive)
+        {
+            bool withinProbeCap = (
+                atlasRecoveryProbeMaxExecutableRiskPct > 0.0 &&
+                atlasRecoveryProbeMinimumExecutableRiskPct > 0.0 &&
+                atlasRecoveryProbeMinimumExecutableRiskPct <= atlasRecoveryProbeMaxExecutableRiskPct + 1e-9
+            );
+            bool withinPortfolioCeiling = (
+                atlasMaximumTotalStrategyRiskPct <= 0.0 ||
+                atlasRecoveryProbeMinimumExecutableRiskPct <= atlasMaximumTotalStrategyRiskPct + 1e-9
+            );
+            if(withinProbeCap && withinPortfolioCeiling)
+            {
+                currentLot = minLot;
+                atlasRecoveryProbeBrokerOverrideActive = true;
+                atlasRecoveryProbeFeasibilityReason = "BROKER_MINIMUM_OVERRIDE_WITHIN_PROBE_CAP";
+                LogPrint(
+                    "[RECOVERY PROBE] Target risk ", DoubleToString(atlasApprovedScalpRiskPct, 4),
+                    "% is below broker min lot. Allowing ", DoubleToString(minLot, 8),
+                    " lot because minimum stop risk ", DoubleToString(atlasRecoveryProbeMinimumExecutableRiskPct, 4),
+                    "% <= probe cap ", DoubleToString(atlasRecoveryProbeMaxExecutableRiskPct, 4), "%"
+                );
+            }
+            else
+            {
+                atlasRecoveryProbeFeasibilityReason = "MIN_VOLUME_RISK_EXCEEDS_PROBE_CAP";
+                return 0.0;
+            }
+        }
     }
     else if(atlasRuntime.enableDynamicLots)
     {
@@ -10392,7 +12147,12 @@ double CalculateDynamicLotSize(
         ? MathMin(maxLot, ATLAS_HARD_MAX_LOT)
         : MathMin(maxLot, MathMin(atlasRuntime.maxLotSize, ATLAS_HARD_MAX_LOT));
     currentLot = MathFloor(currentLot / lotStep + 1e-9) * lotStep;
-    if(currentLot < minLot) return 0.0;
+    if(currentLot < minLot)
+    {
+        if(atlasRecoveryProbeActive)
+            atlasRecoveryProbeFeasibilityReason = "MIN_VOLUME_RISK_EXCEEDS_PROBE_CAP";
+        return 0.0;
+    }
     if(currentLot > localMax) currentLot = MathFloor(localMax / lotStep) * lotStep;
     currentLot = NormalizeDouble(currentLot, 8);
     
@@ -10700,6 +12460,60 @@ double GetTPPoints(double lotSize)
         return ConvertToPoints(TPInputType, TPValue, lotSize);
 
     return 0;
+}
+
+// +------------------------------------------------------------------+
+// | Atlas capital-sized scalp geometry                               |
+// |                                                                  |
+// | Dollar/percent SL inputs are lot-dependent. When Atlas owns      |
+// | monetary sizing, using those inputs to construct the pre-sizing  |
+// | stop creates a circular equation: money budget -> stop distance  |
+// | -> structure veto -> lot size. Atlas therefore resolves a        |
+// | lot-independent ATR stop first, then sizes volume to the         |
+// | approved monetary risk. Point/ATR inputs remain unchanged.       |
+// +------------------------------------------------------------------+
+bool AtlasScalpStopInputDependsOnLot()
+{
+    if(EnableRiskReward)
+        return (RRRiskMode == RR_RISK_MANUAL && RRRiskInputType != INPUT_POINTS);
+    return (EnableStopLoss && SLInputType != INPUT_POINTS);
+}
+
+double AtlasGetScalpStructuralSLPoints(double lotSize)
+{
+    if(!atlasCapitalSizingActive || !AtlasScalpStopInputDependsOnLot())
+        return GetSLPoints(lotSize);
+
+    double atr = GetCurrentATR();
+    if(atr <= 0.0 || _Point <= 0.0)
+        return 0.0;
+
+    // Reuse the existing ATR risk multiplier as the deterministic
+    // structural stop policy. This keeps geometry symbol-independent and
+    // prevents account size from changing the physical stop distance.
+    double multiplier = MathMax(0.25, RRAtrMultiplier);
+    return (atr / _Point) * multiplier;
+}
+
+double AtlasGetScalpStructuralTPPoints(double lotSize, double structuralSlPoints)
+{
+    if(!atlasCapitalSizingActive)
+        return GetTPPoints(lotSize);
+
+    bool lotDependent = false;
+    if(EnableRiskReward)
+        lotDependent = (RRRiskMode == RR_RISK_MANUAL && RRRiskInputType != INPUT_POINTS);
+    else if(EnableTakeProfit)
+        lotDependent = (TPInputType != INPUT_POINTS);
+
+    if(!lotDependent)
+        return GetTPPoints(lotSize);
+
+    if(structuralSlPoints <= 0.0)
+        return 0.0;
+
+    double rr = MathMax(1.0, RiskRewardRatio);
+    return structuralSlPoints * rr;
 }
 
 // +------------------------------------------------------------------+
