@@ -906,7 +906,7 @@ def run_shadow_replay(
 
     intelligence_records = intelligence_store.get("records") or []
     shadow_records = _shadow_policy_records()
-    closed = outcomes_store.get("closed") or []
+    closed = [t for t in (outcomes_store.get("closed") or []) if t.get("strategy_learning_eligible") and str(t.get("execution_integrity") or "").upper() == "CLEAN"]
 
     replay_candidates = {
         "FRESH_MARKET",

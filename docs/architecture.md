@@ -438,3 +438,27 @@ If no Atlas zone exposure exists, invalidation naturally releases zone-aware con
 ## Operator Help workspace
 
 The dashboard contains a first-class `Help & Guide` view. This is documentation-only and has no trading authority. It explains the current UI vocabulary and the separation between Atlas deterministic authority, Nyao execution, and Gemini policy learning. The guide version is kept aligned with the Atlas dashboard release.
+
+
+## P3.54 — Event-driven Atlas Brain and loss-streak review
+
+Atlas Brain is no longer fundamentally a short-interval optimizer. Material events wake the Brain; the periodic scheduler is retained only as a low-frequency health heartbeat (minimum 60 minutes).
+
+Consecutive completed losses no longer create 15/30/60-minute HARD_VETO windows or automatic 0.05% recovery-probe sizing. At the configured loss-review threshold, Atlas persists `BRAIN_REVIEW_PENDING`, pauses only fresh independent risk while Gemini/critic reasoning is in flight, and immediately runs a `LOSS_STREAK_REVIEW` cycle. A successful Brain response releases the state to `REVIEW_COMPLETE` whether the outcome is HOLD, consensus accumulation, dwell deferral, or a validated autonomous policy application. Normal deterministic drawdown, exposure, broker, market-risk and unresolved-recovery-chain gates remain authoritative.
+
+Loss streaks also no longer apply a one-way automatic lot-size decay. After Brain review, the loss-streak sizing modifier is neutral (`1.0`); Atlas may still contract risk for actual drawdown, volatility or deterministic risk state. If another completed loss occurs after the reviewed streak, a new Brain event is armed immediately. If a newer loss lands while an older review is running, the stale review cannot release it; Atlas re-arms review for the newer streak.
+
+Legacy live `RECOVERY_PROBE` lifecycles remain restorable and atomic so upgrades cannot orphan broker exposure. Legacy persisted `HARD_VETO` files migrate to `BRAIN_REVIEW_PENDING` on first read.
+
+## P3.55 — Drawdown Risk Efficiency + Event-Driven Brain UI
+
+Atlas no longer treats ordinary drawdown as a mechanical lot-size punishment. Drawdown bands are reasoning events:
+
+- `<3%` NORMAL
+- `3–<5%` REVIEW — Gemini event, trading continues
+- `5–<8%` ELEVATED — Gemini event, trading continues
+- `>=8%` EMERGENCY — deterministic Risk Governor veto remains authoritative
+
+The previous 0.75/0.50/0.25 drawdown size ladder is removed. MODERATE/ELEVATED risk labels also no longer create a second size penalty by themselves; only a genuine deterministic veto can stop risk, while volatility, broker feasibility, active exposure/capacity and recovery-chain constraints remain independent authorities.
+
+Atlas Brain is now a single event-driven validated-autonomous runtime. The dashboard no longer presents Supervised vs Autonomous modes or the Human Review workflow. A configurable >=60 minute health heartbeat remains only as a liveness/fallback mechanism; material events are the primary reasoning trigger.

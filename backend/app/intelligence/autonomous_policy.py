@@ -17,6 +17,9 @@ from backend.app.intelligence.llm_cycle_scheduler import (
     record_autonomous_application,
 )
 from backend.app.intelligence.risk_governor import assess_risk
+from backend.app.intelligence.scalping_responsiveness import analyze_scalping_responsiveness
+from backend.app.intelligence.outcome_analytics import evaluate_policy_performance
+from backend.app.intelligence.policy_liveness import assess_policy_liveness, guard_autonomous_patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -626,6 +629,141 @@ def _queue_zone_boundary_candidate(
     }
 
 
+def _liveness_guard_advisory(
+    *,
+    advisory: dict[str, Any],
+    current_status: dict[str, Any],
+    current_command: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    responsiveness = analyze_scalping_responsiveness(current_status, current_command)
+    performance = evaluate_policy_performance()
+    liveness = assess_policy_liveness(
+        current_status, current_command, responsiveness, policy_performance=performance
+    )
+    requested_patch = {
+        name: row.get("shadow")
+        for name, row in dict(advisory.get("changed_controls") or {}).items()
+        if isinstance(row, dict) and row.get("shadow") is not None
+    }
+    guard = guard_autonomous_patch(requested_patch, current_command, liveness)
+    guarded_patch = dict(guard.get("patch") or {})
+    proposed_runtime = dict(current_command)
+    proposed_runtime.update(guarded_patch)
+    for metadata_key in ("command_version", "policy_epoch", "updated_at"):
+        proposed_runtime.pop(metadata_key, None)
+
+    source_changes = dict(advisory.get("changed_controls") or {})
+    changed_controls: dict[str, Any] = {}
+    for name, value in guarded_patch.items():
+        source = dict(source_changes.get(name) or {})
+        changed_controls[name] = {
+            "current": current_command.get(name),
+            "shadow": value,
+            "rationale": source.get("rationale") or (
+                "P3.52 deterministic liveness release: remove one policy-created entry bottleneck."
+                if name in dict(guard.get("injected_changes") or {})
+                else "P3.52 liveness-guarded autonomous policy change."
+            ),
+            "expected_effect": source.get("expected_effect") or "Preserve viable opportunity flow without bypassing risk authority.",
+            "confidence": source.get("confidence") or 100.0,
+        }
+
+    guarded_advisory = {
+        **advisory,
+        "proposed_runtime": proposed_runtime,
+        "changed_controls": changed_controls,
+        "policy_liveness": liveness,
+        "liveness_guard": guard,
+    }
+    return guarded_advisory, guard
+
+
+def _apply_liveness_corrective_release(
+    *,
+    current_status: dict[str, Any],
+    current_command: dict[str, Any],
+    command_file: Path,
+) -> dict[str, Any]:
+    """Apply one deterministic liveness correction when policy is self-starving.
+
+    Priority is temporal release first. If intrabar entry is already available,
+    Atlas may lower exactly one directional threshold by a small bounded step when
+    near-threshold evidence shows that the current score gate itself is suppressing
+    viable setups. Each correction creates a new policy epoch, so another relaxation
+    cannot immediately cascade without fresh attributable outcomes.
+    """
+    risk = assess_risk(current_status)
+    if risk.get("veto_new_risk"):
+        return {"applied": False, "status": "RISK_GOVERNOR_VETO", "risk": risk}
+    responsiveness = analyze_scalping_responsiveness(current_status, current_command)
+    performance = evaluate_policy_performance()
+    liveness = assess_policy_liveness(
+        current_status, current_command, responsiveness, policy_performance=performance
+    )
+    guard = guard_autonomous_patch({}, current_command, liveness)
+    patch = dict(guard.get("injected_changes") or {})
+    if not patch:
+        return {"applied": False, "status": "NO_LIVENESS_CORRECTION", "liveness": liveness}
+
+    # Never combine temporal release and threshold relaxation in one corrective epoch.
+    if patch.get("enable_new_bar_entry_only") is False:
+        patch = {"enable_new_bar_entry_only": False}
+    else:
+        threshold_patch = {k: v for k, v in patch.items() if k in {"min_buy_signal_score", "min_sell_signal_score"}}
+        if len(threshold_patch) != 1:
+            return {"applied": False, "status": "NO_SAFE_THRESHOLD_CORRECTION", "liveness": liveness}
+        patch = threshold_patch
+
+    baseline_version = int(current_command.get("command_version") or 0)
+    baseline_epoch = int(current_command.get("policy_epoch") or 0)
+    candidate = {
+        **current_command,
+        **patch,
+        "command_version": baseline_version + 1,
+        "policy_epoch": baseline_epoch + 1,
+        "updated_at": _now(),
+    }
+    validated = Command.model_validate(candidate)
+    identity = f"{_now().strftime('%Y%m%dT%H%M%S')}_p3521_liveness_correction"
+    backup = AUTONOMOUS_BACKUP_DIR / f"{identity}_before.json"
+    _atomic_json(backup, {
+        "command_before": current_command,
+        "source": "P3.52.1_POLICY_LIVENESS_CORRECTIVE_AUTHORITY",
+        "liveness": liveness,
+        "patch": patch,
+    })
+    write_json(validated, command_file)
+    readback = read_json(command_file) or {}
+    if (
+        int(readback.get("command_version") or 0) != baseline_version + 1
+        or int(readback.get("policy_epoch") or 0) != baseline_epoch + 1
+        or any(readback.get(k) != v for k, v in patch.items())
+    ):
+        raise RuntimeError("P3.52.1 liveness correction readback did not match target policy.")
+
+    event = _event("AUTO_POLICY_LIVENESS_CORRECTION_APPLIED", {
+        "baseline_command_version": baseline_version,
+        "baseline_policy_epoch": baseline_epoch,
+        "command_version": baseline_version + 1,
+        "policy_epoch": baseline_epoch + 1,
+        "backup": str(backup),
+        "patch": patch,
+        "liveness": liveness,
+        "reason": "POLICY_STARVATION_CORRECTIVE_ADJUSTMENT",
+    })
+    record_autonomous_application(
+        status="APPLIED_LIVENESS_CORRECTION",
+        command_version=baseline_version + 1,
+        policy_epoch=baseline_epoch + 1,
+    )
+    return {
+        "applied": True,
+        "status": "APPLIED_LIVENESS_CORRECTION",
+        "event": event,
+        "liveness": liveness,
+    }
+
+
 def apply_autonomous_llm_policy(
     *,
     llm_result: dict[str, Any],
@@ -687,6 +825,14 @@ def apply_autonomous_llm_policy(
             "consensus": consensus,
             **queue_result,
         }
+
+    liveness_release = _apply_liveness_corrective_release(
+        current_status=current_status,
+        current_command=current_command,
+        command_file=command_file,
+    )
+    if liveness_release.get("applied"):
+        return liveness_release
 
     last_applied = _baseline_anchor(schedule, current_command)
     baseline_epoch_for_consensus = int(current_command.get("policy_epoch") or 0)
@@ -760,6 +906,21 @@ def apply_autonomous_llm_policy(
             consensus=consensus,
         )
 
+    advisory, liveness_guard = _liveness_guard_advisory(
+        advisory=advisory,
+        current_status=current_status,
+        current_command=current_command,
+    )
+    if liveness_guard.get("changed"):
+        _event("AUTO_POLICY_LIVENESS_GUARD", {
+            "proposal_id": advisory.get("proposal_id"),
+            "liveness_state": liveness_guard.get("liveness_state"),
+            "original_patch": liveness_guard.get("original_patch"),
+            "guarded_patch": liveness_guard.get("patch"),
+            "blocked_changes": liveness_guard.get("blocked_changes"),
+            "injected_changes": liveness_guard.get("injected_changes"),
+        })
+
     risk = assess_risk(current_status)
     if risk.get("veto_new_risk"):
         record_autonomous_application(status="RISK_GOVERNOR_VETO")
@@ -827,9 +988,14 @@ def apply_autonomous_llm_policy(
         "consensus_observation_count": consensus.get("observation_count"),
         "consensus_control_count": consensus.get("consensus_control_count"),
         "consensus_patch": consensus.get("consensus_patch"),
+        "liveness_guard": liveness_guard,
+        "effective_autonomous_patch": {
+            name: row.get("shadow")
+            for name, row in dict(advisory.get("changed_controls") or {}).items()
+        },
         "command_readback_patch": {
             name: readback.get(name)
-            for name in dict(consensus.get("consensus_patch") or {})
+            for name in dict(advisory.get("changed_controls") or {})
         },
         "minimum_dwell_overridden": dwell_override,
         "dwell_override_reason": (
@@ -838,7 +1004,7 @@ def apply_autonomous_llm_policy(
         "symbol": current_status.get("symbol"),
         "account_fingerprint": current_status.get("account_fingerprint"),
         "loss_protection_active_at_apply": bool(capital_protection.get("active")),
-        "fresh_entry_material_change": bool(consensus.get("consensus_patch")),
+        "fresh_entry_material_change": bool(advisory.get("changed_controls")),
     })
     record_autonomous_application(
         status="APPLIED",
@@ -892,6 +1058,21 @@ def apply_ready_loss_protection_consensus(
     if not patch:
         return {"status": "CONSENSUS_NOT_READY", "applied": False, "consensus": consensus}
 
+    responsiveness = analyze_scalping_responsiveness(current_status, current_command)
+    performance = evaluate_policy_performance()
+    liveness = assess_policy_liveness(
+        current_status, current_command, responsiveness, policy_performance=performance
+    )
+    liveness_guard = guard_autonomous_patch(patch, current_command, liveness)
+    patch = dict(liveness_guard.get("patch") or {})
+    if not patch:
+        return {
+            "status": "LIVENESS_GUARD_BLOCKED_CONSENSUS",
+            "applied": False,
+            "consensus": consensus,
+            "liveness_guard": liveness_guard,
+        }
+
     baseline_version = int(current_command.get("command_version") or 0)
     baseline_epoch = int(current_command.get("policy_epoch") or 0)
     candidate = {
@@ -933,7 +1114,9 @@ def apply_ready_loss_protection_consensus(
         "backup": str(backup),
         "consensus_observation_count": consensus.get("observation_count"),
         "consensus_control_count": consensus.get("consensus_control_count"),
-        "consensus_patch": patch,
+        "consensus_patch": consensus.get("consensus_patch"),
+        "effective_autonomous_patch": patch,
+        "liveness_guard": liveness_guard,
         "command_readback_patch": {name: readback.get(name) for name in patch},
         "minimum_dwell_overridden": True,
         "dwell_override_reason": "LOSS_PROTECTION_EXISTING_CONSENSUS",

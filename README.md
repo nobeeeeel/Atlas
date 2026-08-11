@@ -307,3 +307,29 @@ Atlas 1.30.44 makes zone invalidation explicit and auditable. Demand zones inval
 ### In-dashboard Help & Atlas Guide
 
 Atlas 1.30.44 adds a searchable Help & Guide workspace intended to be sufficient for a new operator to understand the dashboard without reading the source. It documents the Atlas/Nyao/Gemini authority model; every major workspace and KPI family; market signal and execution-economics terminology; zone types, context-aware scalping and invalidation lifecycle; Portfolio lifecycle P/L and risk allocation; strategic Performance metrics; Atlas Brain run/observation/consensus/policy semantics; Settings and audit concepts; common status/block reasons; and a recommended operator workflow.
+
+## P3.57 — Authoritative lifecycle telemetry (1.30.72 / NYAO 44.7.0)
+NYAO now publishes explicit lifecycle action results to Atlas. Atlas classifies outcomes as CLEAN, IMPLEMENTATION_CONTAMINATED, or UNKNOWN before allowing them into Gemini learning or loss-streak evidence. See `docs/P3.57_NYAO_ATLAS_LIFECYCLE_TELEMETRY.md`.
+
+## P3.57.2 — Zone ownership UI reconciliation (1.30.73)
+
+The Command Center now distinguishes **live zone-campaign ownership** from **new zone-entry authority**. A live `ATLAS_ZONE` position, `ATLAS_ZONE_MODE` scalp blocker, explicit scalp suspension, or committed zone directive keeps the symbol in `ZONE CAMPAIGN` ownership even when Nyao is temporarily not authorized to add another zone leg. The Zone Analysis card now reports `Campaign ownership` separately from `New entry authority`, and the Command Center timer is labelled `Health heartbeat` rather than `Next brain review` under the event-driven Brain runtime.
+
+
+## P3.56.1 — Event-driven Brain bootstrap/account-scope hardening (1.30.74)
+
+- Baseline qualification now reads the authoritative Nyao `market_session_open` and `market_quote_fresh` fields rather than obsolete aliases.
+- A symbol-level policy epoch no longer makes a newly attached MT5 account look established; qualification status is account-scoped.
+- Brand-new identified accounts remain fail-closed for fresh risk until baseline qualification completes, including while waiting for the first live quote.
+- Background Brain detection, capital review, policy bootstrap and event acknowledgement now execute inside the live MT5 account scope instead of `UNIDENTIFIED_ACCOUNT`.
+- Brain event acknowledgement history is durable across subsequent detection passes.
+- Regime changes require 120 seconds of stable classification before emitting a material P2 Brain event, reducing transition churn without delaying P0 execution-integrity events.
+- Debug integrity now checks `BASELINE_BOOTSTRAP_COHERENCE`, and preflight telemetry is explicitly labeled as the last execution attempt.
+
+
+## P3.56.2 — Settings renderer UI hotfix (1.30.75)
+
+- Restores live Settings-page command telemetry after the legacy supervised arm panel was removed from the event-driven UI.
+- Ensures Portfolio risk appetite always renders current configured percentage, hard-risk amount and Atlas operating ceiling.
+- Keeps removed legacy supervised execution widgets optional instead of allowing their absence to short-circuit the Settings renderer.
+- Adds `renderControl()` back to the normal dashboard refresh path; no trading, risk, Brain, Gemini, hedge or NYAO execution logic is changed.

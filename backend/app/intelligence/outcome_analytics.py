@@ -474,7 +474,7 @@ def evaluate_policy_performance(closed_limit: int = 2_000) -> dict[str, Any]:
     """Evaluate strategic performance by completed composite risk unit."""
     payload = get_trade_outcomes(closed_limit=closed_limit, include_active=True)
     risk_report = build_risk_units(payload)
-    completed = [u for u in (risk_report.get("units") or []) if u.get("state") == "COMPLETE"]
+    completed = [u for u in (risk_report.get("units") or []) if u.get("state") == "COMPLETE" and u.get("strategy_learning_eligible")]
     epochs: dict[str, list[dict[str, Any]]] = defaultdict(list)
     modes: dict[str, list[dict[str, Any]]] = defaultdict(list)
     types: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -525,7 +525,7 @@ def analyze_trade_outcomes(
         include_active=False,
     )
 
-    closed = payload.get("closed") or []
+    closed = [t for t in (payload.get("closed") or []) if t.get("strategy_learning_eligible") and str(t.get("execution_integrity") or "").upper() == "CLEAN"]
 
     if not closed:
         return {

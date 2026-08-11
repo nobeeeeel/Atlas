@@ -301,11 +301,18 @@ def build_risk_units(outcomes: dict[str, Any] | None) -> dict[str, Any]:
         policy_epoch = _i((root or (members[0] if members else {})).get("entry_policy_epoch"))
         zone_layers = sorted({layer for m in members for _pid, layer, _q in [_zone_lineage(m)] if layer > 0}) if unit_type == "ZONE_CAMPAIGN" else []
         lineage_qualities = sorted({q for m in members for _pid, _layer, q in [_zone_lineage(m)] if q not in {"NONE", "MISSING"}}) if unit_type == "ZONE_CAMPAIGN" else []
+        member_integrities = {str(m.get("execution_integrity") or "UNKNOWN") for m in members}
+        contaminated = "IMPLEMENTATION_CONTAMINATED" in member_integrities
+        all_clean = bool(members) and member_integrities == {"CLEAN"}
+        strategy_learning_eligible = bool(complete and all_clean and not contaminated)
+        unit_integrity = "IMPLEMENTATION_CONTAMINATED" if contaminated else ("CLEAN" if all_clean else "UNKNOWN")
         units.append({
             "unit_id": unit_id,
             "unit_type": unit_type,
             "state": "COMPLETE" if complete else ("ACTIVE" if active_members else "INCOMPLETE_HISTORY"),
-            "eligible_for_loss_streak": complete,
+            "eligible_for_loss_streak": complete and strategy_learning_eligible,
+            "strategy_learning_eligible": strategy_learning_eligible,
+            "execution_integrity": unit_integrity,
             "member_count": len(members),
             "closed_member_count": len(closed_members),
             "active_member_count": len(active_members),
@@ -358,7 +365,8 @@ def build_risk_units(outcomes: dict[str, Any] | None) -> dict[str, Any]:
         if row.get("_bucket") == "ACTIVE":
             units.append({
                 "unit_id": f"trade:{_i(row.get('ticket'))}", "unit_type": "STANDALONE_TRADE",
-                "state": "ACTIVE", "eligible_for_loss_streak": False, "member_count": 1,
+                "state": "ACTIVE", "eligible_for_loss_streak": False, "strategy_learning_eligible": False,
+                "execution_integrity": str(row.get("execution_integrity") or "UNKNOWN"), "member_count": 1,
                 "closed_member_count": 0, "active_member_count": 1,
                 "member_tickets": [_i(row.get("ticket"))], "root_ticket": _i(row.get("ticket")) or None,
                 "chain_id": None, "zone_plan_id": None, "policy_epoch": _i(row.get("entry_policy_epoch")),
@@ -390,7 +398,9 @@ def build_risk_units(outcomes: dict[str, Any] | None) -> dict[str, Any]:
         when = _trade_close_time(row)
         units.append({
             "unit_id": f"trade:{_i(row.get('ticket'))}", "unit_type": "STANDALONE_TRADE",
-            "state": "COMPLETE", "eligible_for_loss_streak": True, "member_count": 1,
+            "state": "COMPLETE", "eligible_for_loss_streak": bool(row.get("strategy_learning_eligible")),
+            "strategy_learning_eligible": bool(row.get("strategy_learning_eligible")),
+            "execution_integrity": str(row.get("execution_integrity") or "UNKNOWN"), "member_count": 1,
             "closed_member_count": 1, "active_member_count": 0,
             "member_tickets": [_i(row.get("ticket"))], "root_ticket": _i(row.get("ticket")) or None,
             "chain_id": None, "zone_plan_id": None, "policy_epoch": _i(row.get("entry_policy_epoch")),
@@ -430,6 +440,7 @@ def build_risk_units(outcomes: dict[str, Any] | None) -> dict[str, Any]:
             "Recovery-chain members score only once, when the entire chain is flat.",
             "Zone-campaign members score only once, when the entire campaign is flat.",
             "Active composite units never increment a completed-loss streak.",
+            "Only lifecycle-contract CLEAN completed units are eligible for loss-streak and strategy learning; contaminated or legacy UNKNOWN outcomes remain in account P/L but are excluded from policy evidence.",
             "Flat completed units preserve rather than reset the previous loss streak.",
             "Pre-P3.30.1 hedge children may be conservatively re-linked only when their entry overlaps a same-policy root lifecycle; Nyao 44.2+ carries immutable lineage in the hedge entry comment.",
             "Atlas zone layers sharing the same immutable AZ plan token score once as a completed ZONE_CAMPAIGN; individual layer exits are provisional while any campaign member remains active.",

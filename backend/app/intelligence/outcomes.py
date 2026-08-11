@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data"
 OUTCOMES_FILE = DATA_DIR / "trade_outcomes.json"
 
-OUTCOME_VERSION = 6
+OUTCOME_VERSION = 7
 MAX_CLOSED_TRADES = 5_000
 MAX_PROCESSED_EXIT_DEALS = 10_000
 DISAPPEARANCE_GRACE_SECONDS = 30.0
@@ -323,6 +323,7 @@ def _empty_store() -> dict[str, Any]:
         "closed": [],
         "last_account": {},
         "processed_exit_deal_tickets": [],
+        "processed_lifecycle_event_keys": [],
     }
 
 
@@ -392,6 +393,8 @@ def _read_store_unlocked() -> dict[str, Any]:
     data.setdefault("last_account", {})
     if not isinstance(data.get("processed_exit_deal_tickets"), list):
         data["processed_exit_deal_tickets"] = []
+    if not isinstance(data.get("processed_lifecycle_event_keys"), list):
+        data["processed_lifecycle_event_keys"] = []
     data.setdefault("created_at", _iso_now())
     data.setdefault("updated_at", _iso_now())
     return data
@@ -460,6 +463,47 @@ def _current_exit_deals(status: dict[str, Any]) -> list[dict[str, Any]]:
         deals.append(dict(item))
     deals.sort(key=lambda d: (_i(d.get("time_msc")), _i(d.get("deal_ticket"))))
     return deals
+
+
+def _current_lifecycle_events(status: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = status.get("recent_lifecycle_events")
+    if not isinstance(raw, list):
+        return []
+    rows = [dict(x) for x in raw if isinstance(x, dict) and _i(x.get("sequence")) > 0]
+    rows.sort(key=lambda x: _i(x.get("sequence")))
+    return rows
+
+
+def _attach_lifecycle_event(trade: dict[str, Any], event: dict[str, Any]) -> None:
+    rows = trade.setdefault("lifecycle_events", [])
+    seq = _i(event.get("sequence"))
+    if any(_i(x.get("sequence")) == seq for x in rows if isinstance(x, dict)):
+        return
+    rows.append(dict(event))
+    rows.sort(key=lambda x: _i(x.get("sequence")))
+    result = str(event.get("result") or "").upper()
+    action = str(event.get("action") or "UNKNOWN").upper()
+    if result in {"FAILED", "REJECTED"}:
+        issues = trade.setdefault("execution_integrity_issues", [])
+        issues.append({
+            "sequence": seq, "action": action, "result": result,
+            "retcode": event.get("retcode"), "terminal_error": event.get("terminal_error"),
+            "comment": event.get("comment"), "time_epoch": event.get("time_epoch"),
+        })
+        trade["execution_integrity"] = "IMPLEMENTATION_CONTAMINATED"
+        trade["strategy_learning_eligible"] = False
+
+
+def _finalize_execution_integrity(trade: dict[str, Any]) -> None:
+    if trade.get("execution_integrity") == "IMPLEMENTATION_CONTAMINATED":
+        trade["strategy_learning_eligible"] = False
+        return
+    if trade.get("lifecycle_contract_covered_from_entry"):
+        trade["execution_integrity"] = "CLEAN"
+        trade["strategy_learning_eligible"] = True
+    else:
+        trade["execution_integrity"] = "UNKNOWN"
+        trade["strategy_learning_eligible"] = False
 
 
 def _find_trade_for_position_id(
@@ -1039,6 +1083,20 @@ def _new_trade(
             "total_trades_on_entry_candle_before_this_entry"
         ),
         "lifecycle_state": "ACTIVE",
+        "lifecycle_contract_version": status.get("lifecycle_contract_version"),
+        "lifecycle_contract_started_at_epoch": _i(status.get("lifecycle_contract_started_at_epoch")),
+        "lifecycle_contract_covered_from_entry": bool(
+            status.get("lifecycle_contract_version") and
+            _i(position.get("opened_at_epoch")) >= _i(status.get("lifecycle_contract_started_at_epoch")) > 0
+        ),
+        "execution_integrity": (
+            "CLEAN_PENDING" if status.get("lifecycle_contract_version") and
+            _i(position.get("opened_at_epoch")) >= _i(status.get("lifecycle_contract_started_at_epoch")) > 0
+            else "UNKNOWN"
+        ),
+        "strategy_learning_eligible": False,
+        "execution_integrity_issues": [],
+        "lifecycle_events": [],
         "first_seen_at": now,
         "last_seen_at": now,
         "opened_at_epoch": position.get("opened_at_epoch"),
@@ -1110,11 +1168,39 @@ def _update_trade(
     trade: dict[str, Any],
     position: dict[str, Any],
     intelligence: dict[str, Any],
+    status: dict[str, Any] | None = None,
 ) -> None:
     now = _iso_now()
     net_pl = _f(position.get("net_pl"))
     distance = _f(position.get("signed_distance_points"))
     volume = _f(position.get("volume"))
+
+    status = status or {}
+    current_contract_instance = _i(status.get("lifecycle_contract_started_at_epoch"))
+    original_contract_instance = _i(trade.get("lifecycle_contract_started_at_epoch"))
+    if (
+        trade.get("lifecycle_contract_covered_from_entry")
+        and current_contract_instance > 0
+        and original_contract_instance > 0
+        and current_contract_instance != original_contract_instance
+    ):
+        # The EA restarted while this lifecycle was active. The new contract
+        # instance is authoritative from restart onward, but Atlas cannot prove
+        # that no final event was lost from the prior in-memory ring during the
+        # handoff. Preserve accounting, downgrade learning integrity to UNKNOWN.
+        trade["lifecycle_contract_covered_from_entry"] = False
+        if trade.get("execution_integrity") != "IMPLEMENTATION_CONTAMINATED":
+            trade["execution_integrity"] = "UNKNOWN"
+            trade["strategy_learning_eligible"] = False
+        gaps = trade.setdefault("lifecycle_coverage_gaps", [])
+        marker = {
+            "reason": "EA_CONTRACT_INSTANCE_CHANGED_DURING_ACTIVE_LIFECYCLE",
+            "from_instance": original_contract_instance,
+            "to_instance": current_contract_instance,
+            "observed_at": now,
+        }
+        if not any(g.get("to_instance") == current_contract_instance for g in gaps if isinstance(g, dict)):
+            gaps.append(marker)
 
     trade["last_seen_at"] = now
     trade["lifecycle_state"] = "ACTIVE"
@@ -1258,6 +1344,7 @@ def _close_trade(
     nearby_balance_delta = current_balance - previous_balance
 
     trade["lifecycle_state"] = "CLOSED_OR_DISAPPEARED"
+    _finalize_execution_integrity(trade)
     trade["disappeared_at"] = now
     trade["observed_lifetime_seconds"] = round(
         observed_seconds,
@@ -1355,6 +1442,33 @@ def track_trade_outcomes(
         processed_list = store.get("processed_exit_deal_tickets") or []
         processed = {_i(x) for x in processed_list if _i(x)}
         exit_deals = _current_exit_deals(status)
+        lifecycle_events = _current_lifecycle_events(status)
+        processed_lifecycle = {str(x) for x in (store.get("processed_lifecycle_event_keys") or []) if str(x)}
+        new_lifecycle_event_sequences: list[int] = []
+        lifecycle_instance = _i(status.get("lifecycle_contract_started_at_epoch"))
+
+        # P3.57: consume authoritative NYAO lifecycle events exactly once.
+        for event in lifecycle_events:
+            seq = _i(event.get("sequence"))
+            event_instance = _i(event.get("contract_started_at_epoch"), lifecycle_instance)
+            event_key = f"{event_instance}:{seq}"
+            if not seq or event_key in processed_lifecycle:
+                continue
+            event["contract_started_at_epoch"] = event_instance
+            ticket = _i(event.get("ticket"))
+            chain_id = _i(event.get("chain_id"))
+            target = _find_trade_for_position_id(active, closed, ticket) if ticket else None
+            if target is None and chain_id:
+                target = _find_trade_for_position_id(active, closed, chain_id)
+            if target is None:
+                # Position may have opened and closed between polls; defer until
+                # authoritative exit-deal reconstruction creates the lifecycle row.
+                continue
+            kind, key_or_idx = target
+            trade = active[key_or_idx] if kind == "active" else closed[key_or_idx]
+            _attach_lifecycle_event(trade, event)
+            processed_lifecycle.add(event_key)
+            new_lifecycle_event_sequences.append(seq)
 
         # P3.28: consume every unseen authoritative exit deal exactly once. If a
         # position opened and closed between polls, reconstruct the closed lifecycle
@@ -1415,7 +1529,7 @@ def track_trade_outcomes(
         # First process every currently visible MT5 position.
         for ticket, position in current.items():
             if ticket in active:
-                _update_trade(active[ticket], position, intelligence)
+                _update_trade(active[ticket], position, intelligence, status)
                 updated_tickets.append(ticket)
                 continue
 
@@ -1430,7 +1544,7 @@ def track_trade_outcomes(
                 active[ticket] = _merge_trade_segments(
                     closed_segment, fresh_segment, reopen=True
                 )
-                _update_trade(active[ticket], position, intelligence)
+                _update_trade(active[ticket], position, intelligence, status)
                 active[ticket]["resurrection_count"] = (
                     _i(active[ticket].get("resurrection_count")) + 1
                 )
@@ -1503,6 +1617,8 @@ def track_trade_outcomes(
         if len(processed_sorted) > MAX_PROCESSED_EXIT_DEALS:
             processed_sorted = processed_sorted[-MAX_PROCESSED_EXIT_DEALS:]
         store["processed_exit_deal_tickets"] = processed_sorted
+        processed_lifecycle_sorted = sorted(processed_lifecycle)[-4096:]
+        store["processed_lifecycle_event_keys"] = processed_lifecycle_sorted
 
         store["last_account"] = {
             "fingerprint": identity["fingerprint"],
@@ -1540,6 +1656,7 @@ def track_trade_outcomes(
             "positions_snapshot_valid": positions_snapshot_valid,
             "disappearance_grace_seconds": DISAPPEARANCE_GRACE_SECONDS,
             "new_exit_deal_tickets": new_exit_deal_tickets,
+            "new_lifecycle_event_sequences": new_lifecycle_event_sequences,
             "reconstructed_closed_tickets": reconstructed_closed_tickets,
             "repaired_processed_orphan_tickets": repaired_processed_orphan_tickets,
             "deferred_exit_deal_tickets": deferred_exit_deal_tickets,

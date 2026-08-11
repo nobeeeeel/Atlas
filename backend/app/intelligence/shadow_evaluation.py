@@ -97,7 +97,7 @@ def _load_closed_outcomes() -> list[dict[str, Any]]:
         current_account_outcomes_file(OUTCOMES_FILE),
         {"closed": []},
     )
-    closed = store.get("closed") or []
+    closed = [t for t in (store.get("closed") or []) if t.get("strategy_learning_eligible") and str(t.get("execution_integrity") or "").upper() == "CLEAN"]
 
     cleaned = []
     for trade in closed:

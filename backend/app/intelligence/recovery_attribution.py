@@ -88,7 +88,7 @@ def analyze_recovery_chains(
         closed_limit=closed_limit,
         include_active=True,
     )
-    closed = payload.get("closed") or []
+    closed = [t for t in (payload.get("closed") or []) if t.get("strategy_learning_eligible") and str(t.get("execution_integrity") or "").upper() == "CLEAN"]
     active = payload.get("active") or []
 
     all_trades = [

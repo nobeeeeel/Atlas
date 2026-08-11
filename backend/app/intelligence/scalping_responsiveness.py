@@ -81,11 +81,13 @@ def analyze_scalping_responsiveness(
         include_active=False,
     )
     records = history.get("records") or []
-    closed = trade_outcomes.get("closed") or []
+    closed = [t for t in (trade_outcomes.get("closed") or []) if t.get("strategy_learning_eligible") and str(t.get("execution_integrity") or "").upper() == "CLEAN"]
 
     block_counts: Counter[str] = Counter()
     eligible = 0
     score_gaps: list[float] = []
+    side_score_gaps: dict[str, list[float]] = {"buy": [], "sell": []}
+    near_threshold_counts: dict[str, int] = {"buy": 0, "sell": 0}
     for record in records:
         signal = record.get("signal") or {}
         for side in ("buy", "sell"):
@@ -100,7 +102,11 @@ def analyze_scalping_responsiveness(
             score = _f(signal.get(f"{side}_adjusted_score"))
             threshold = _f(signal.get(f"{side}_effective_threshold"))
             if threshold > score:
-                score_gaps.append(threshold - score)
+                gap = threshold - score
+                score_gaps.append(gap)
+                side_score_gaps[side].append(gap)
+                if gap <= 1.0:
+                    near_threshold_counts[side] += 1
 
     evaluations = len(records) * 2
     new_bar_only = bool(
@@ -198,6 +204,11 @@ def analyze_scalping_responsiveness(
             "eligible_evaluation_count": eligible,
             "eligible_rate_pct": round(eligible / evaluations * 100, 2) if evaluations else None,
             "average_score_deficit_when_blocked": round(mean(score_gaps), 3) if score_gaps else None,
+            "average_buy_score_deficit_when_blocked": round(mean(side_score_gaps["buy"]), 3) if side_score_gaps["buy"] else None,
+            "average_sell_score_deficit_when_blocked": round(mean(side_score_gaps["sell"]), 3) if side_score_gaps["sell"] else None,
+            "near_threshold_buy_block_count": near_threshold_counts["buy"],
+            "near_threshold_sell_block_count": near_threshold_counts["sell"],
+            "near_threshold_block_share_pct": round((near_threshold_counts["buy"] + near_threshold_counts["sell"]) / evaluations * 100, 2) if evaluations else 0.0,
             "dominant_block_reasons": dominant,
             "last_order": {
                 "attempted": status.get("last_order_attempted"),

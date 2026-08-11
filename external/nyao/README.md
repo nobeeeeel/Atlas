@@ -203,3 +203,6 @@ Atlas supplies dynamic zone stop/target cost ratios and may disable the legacy d
 ## Source-zone invalidation
 
 Nyao 44.5.7 consumes Atlas source-zone invalidation state. If a prospective source zone invalidates before any Atlas zone exposure exists, zone-aware/campaign authority is released by Atlas. If the exact immutable zone plan already has live `ATLAS_ZONE` exposure, Nyao enters management-only invalidated-campaign handling: existing campaign positions remain managed, ordinary campaign lineage is preserved, and no unfilled or future zone layer may open from the invalidated source zone.
+
+## P3.57 lifecycle contract
+Use `nyao_scalper.mq5` version 44.7.0 with Atlas 1.30.72. See `UPDATE_INSTRUCTIONS_P3.57.md`. The bundled historical `.ex5` is intentionally omitted from the P3.57 release; compile the new source in MetaEditor.

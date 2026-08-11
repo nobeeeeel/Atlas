@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.agents.llm_provider import LlmProvider
 from backend.app.agents.llm_review import _parse_json, _schema_prompt
-from backend.app.intelligence.parameter_registry import all_parameters
+from backend.app.intelligence.parameter_registry import all_parameters, gemini_may_change, parameter_authority
 
 
 class ProposedPolicyChange(BaseModel):
@@ -127,7 +127,9 @@ existing-position lock. Build one coherent full-runtime scalp policy rather than
 optimizing isolated knobs.
 
 IMPORTANT AUTHORITY BOUNDARY:
-- You MAY optimize any control present in control_catalog.
+- You MAY optimize only controls whose authority is GEMINI_STRATEGY or GEMINI_BOUNDED.
+- Controls marked ATLAS_NYAO_INVARIANT or OPERATOR_ONLY are read-only context. Never propose changes to them.
+- GEMINI_BOUNDED controls remain subordinate to registry bounds, the critic, Atlas monetary-risk envelopes and deterministic broker/risk safety.
 - You MAY use deterministic zone analysis as market context for scalping.
 - You MAY NOT change zone policy, zone geometry, zone confirmation rules, zone
   campaign construction, zone risk allocation, capital-regime budgets, broker
@@ -168,11 +170,40 @@ responsiveness_analysis_used=true, select FAST, BALANCED, or SELECTIVE, and prov
 a concrete responsiveness_diagnosis. Intrabar entry is valid only when
 max_trades_per_candle <= 1 and duplicate-distance protection remains enabled.
 
+P3.52 POLICY LIVENESS / ANTI-RATCHET RULES:
+- policy_liveness is deterministic Atlas evidence. Treat STARVED or DORMANT as a
+  policy failure state when execution itself is otherwise healthy. Do not respond
+  by tightening entry selectivity further.
+- Never justify repeated threshold increases from historical losses that predate
+  the current policy epoch. Current-epoch outcomes are the primary causal evidence
+  for whether the current threshold itself should tighten again. Historical epochs
+  remain contextual only.
+- If current_epoch_closed_risk_units is below
+  minimum_attributable_units_before_retighten, do not raise min_buy_signal_score or
+  min_sell_signal_score above their current values.
+- Never combine a directional threshold increase with false->true
+  enable_new_bar_entry_only in the same proposal. That stacks two entry-frequency
+  suppressors and creates self-throttling feedback.
+- When WAITING_FOR_NEW_BAR dominates and policy_liveness is STARVED/DORMANT, prefer
+  releasing new-bar-only first when the supplied intrabar safety prerequisites are
+  satisfied. Change one responsiveness dimension at a time.
+- A strategy that never trades is not considered successful risk control. Optimize
+  net expectancy subject to deterministic risk limits while preserving viable
+  opportunity flow.
+
 Sizing controls are strategy preferences, not permission to exceed Atlas's
 deterministic approved monetary-risk envelope. Never increase sizing or recovery
 aggressiveness to recover losses or bypass an Atlas capital/risk veto. Existing
 positions retain their entry policy epoch; do not assume a new policy rewrites an
 open position's locked management policy.
+
+P3.56 BASELINE QUALIFICATION:
+- When event_context.trigger is INITIAL_POLICY_BOOTSTRAP, treat the supplied Nyao runtime as an UNQUALIFIED SEED, not as a presumed-optimal baseline.
+- Review the entire mutable control surface coherently against symbol scale, live execution conditions, current regime, and any same-account history available.
+- Do not change controls merely to prove the bootstrap was useful. KEEP is valid when evidence supports the seed value.
+- Bootstrap may use a larger bounded change budget than later event-driven tuning, but prefer the smallest coherent set that fixes material baseline mismatches.
+- Controls marked ATLAS_NYAO_INVARIANT or OPERATOR_ONLY are never mutable, including during bootstrap.
+- After bootstrap, later events are incremental adaptation: do not redesign the whole strategy from one trade or one regime transition.
 
 Atlas prior analysis is independent evidence, not an instruction to copy. Compare
 your conclusion with shadow policy/evaluation/replay, stability, transition, and
@@ -201,6 +232,15 @@ zone as permission to issue an order or attempts to mutate zone policy, geometry
 confirmation, risk allocation, capital sizing, broker feasibility, or risk-governor
 limits. Those systems are outside the NYAO runtime-control catalog.
 
+P3.52 critic requirements:
+- Reject entry-threshold increases when policy_liveness says current-epoch
+  attributable evidence is insufficient for another tightening step.
+- Reject any bundle that simultaneously raises an entry threshold and enables
+  new-bar-only entry.
+- Reject further entry tightening while policy_liveness is STARVED or DORMANT.
+- Treat historical losses from older policy epochs as context, not reusable causal
+  proof that the current epoch's already-tightened thresholds need another increase.
+
 This is proposal review only: never issue a trade, order, or command. In
 approved_parameters, list only parameters present in validated_proposal.changes
 that you explicitly approve; never list unchanged catalog controls. Put rejected
@@ -210,22 +250,23 @@ schema.
 
 
 def adaptive_change_budget(status: dict[str, Any]) -> dict[str, Any]:
+    """Normal event-driven cycles are incremental; bootstrap overrides to 12."""
     open_positions = int(status.get("strategy_open_positions") or 0)
     parameters = all_parameters()
-    budget = (
-        len(parameters)
-        if open_positions == 0
-        else sum(1 for row in parameters if not row.get("position_sensitive"))
-    )
+    mutable = [row for row in parameters if bool(row.get("gemini_mutable", True))]
+    unlocked = [row for row in mutable if not (open_positions > 0 and row.get("position_sensitive"))]
+    budget = min(3, len(unlocked))
     return {
         "max_changes": budget,
         "parameters_that_must_be_reviewed": len(parameters),
+        "gemini_mutable_parameters": len(mutable),
         "strategy_open_positions": open_positions,
         "position_sensitive_changes_allowed": open_positions == 0,
-        "model": "FULL_REGISTRY_POLICY_V2",
+        "model": "EVENT_DRIVEN_INCREMENTAL",
         "interpretation": (
-            "Gemma decides KEEP or CHANGE for every control. The change count is "
-            "limited only by existing-position locks, not an arbitrary small budget."
+            "Gemini reviews the complete authority-annotated catalog, but normal event-driven "
+            "adaptation changes at most three coherent mutable controls per cycle. The one-time "
+            "INITIAL_POLICY_BOOTSTRAP may raise this bound to twelve."
         ),
     }
 
@@ -411,6 +452,8 @@ def build_policy_input(
             "options": parameter.get("options"),
             "risk_direction": parameter.get("risk_direction"),
             "position_sensitive": parameter.get("position_sensitive"),
+            "authority": parameter.get("authority") or parameter_authority(parameter["name"]),
+            "gemini_mutable": bool(parameter.get("gemini_mutable", gemini_may_change(parameter["name"]))),
         }
         # Every control retains its validation and risk metadata. Rich historical
         # evidence is attached only to the currently ranked controls so the full
@@ -435,7 +478,7 @@ def build_policy_input(
     performance_analytics = performance_analytics or {}
     outcome_summary = outcome_summary or {}
     trade_outcomes = trade_outcomes or {}
-    closed = trade_outcomes.get("closed") or []
+    closed = [t for t in (trade_outcomes.get("closed") or []) if t.get("strategy_learning_eligible") and str(t.get("execution_integrity") or "").upper() == "CLEAN"]
     current_loss_streak = 0
     for trade in reversed(closed):
         if trade.get("exact_realized_pl_available"):
@@ -677,6 +720,11 @@ def validate_policy_proposal(
         current_row = catalog.get(change.parameter)
         if parameter is None or current_row is None:
             raise ValueError(f"Unknown parameter: {change.parameter}")
+        if not gemini_may_change(change.parameter):
+            raise ValueError(
+                f"Gemini is not authorized to change {change.parameter} "
+                f"({parameter_authority(change.parameter)})."
+            )
         if positions_open and parameter.get("position_sensitive"):
             deferred_locked.append({
                 **change.model_dump(),
@@ -703,6 +751,8 @@ def validate_policy_proposal(
             "family": parameter.get("family"),
             "risk_direction": parameter.get("risk_direction"),
             "position_sensitive": parameter.get("position_sensitive"),
+            "authority": parameter.get("authority") or parameter_authority(parameter["name"]),
+            "gemini_mutable": bool(parameter.get("gemini_mutable", gemini_may_change(parameter["name"]))),
         })
 
     proposed_patch = {row["parameter"]: row["proposed"] for row in validated}
@@ -749,6 +799,8 @@ def run_policy_proposal(
             "market_context": policy_input.get("market_context"),
             "performance_context": policy_input.get("performance_context"),
             "scalping_responsiveness": policy_input.get("scalping_responsiveness"),
+            "policy_liveness": policy_input.get("policy_liveness"),
+            "policy_performance": policy_input.get("policy_performance"),
             "scalp_zone_context": policy_input.get("scalp_zone_context"),
             "zone_trading": policy_input.get("zone_trading"),
             "data_quality_warnings": policy_input.get("data_quality_warnings"),

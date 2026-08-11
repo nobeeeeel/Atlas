@@ -133,16 +133,9 @@ def generate_advice(status: dict[str, Any]) -> dict:
             "Do not increase lot size or maximum orders while risk remains elevated."
         )
 
-        if direction == "BULLISH":
-            proposed["min_buy_signal_score"] = round(
-                min(10.0, current_buy_threshold + 0.3),
-                2,
-            )
-        elif direction == "BEARISH":
-            proposed["min_sell_signal_score"] = round(
-                min(10.0, current_sell_threshold + 0.3),
-                2,
-            )
+        recommendations.append(
+            "P3.52 anti-ratchet: do not mechanically raise the current signal threshold; require current-policy attributable outcome evidence before another tightening step."
+        )
 
     elif is_chop:
         fit = "WEAK"
@@ -152,16 +145,9 @@ def generate_advice(status: dict[str, Any]) -> dict:
         recommendations.append(
             "Avoid increasing trade frequency."
         )
-        proposed["min_buy_signal_score"] = round(
-            min(10.0, current_buy_threshold + 0.5),
-            2,
+        recommendations.append(
+            "P3.52 anti-ratchet: treat tighter thresholds/new-bar-only as hypotheses for the Gemini liveness-aware policy layer, not current-value-plus deterministic mutations."
         )
-        proposed["min_sell_signal_score"] = round(
-            min(10.0, current_sell_threshold + 0.5),
-            2,
-        )
-        if current_intrabar:
-            proposed["enable_new_bar_entry_only"] = True
 
     elif market_regime == "TRANSITION":
         fit = "NEUTRAL"
@@ -180,37 +166,13 @@ def generate_advice(status: dict[str, Any]) -> dict:
             "Avoid adding further long concentration unless the BUY signal advantage is unusually strong."
         )
         if direction == "BULLISH" and not veto:
-            proposed["min_buy_signal_score"] = round(
-                min(
-                    10.0,
-                    max(
-                        proposed.get(
-                            "min_buy_signal_score",
-                            current_buy_threshold,
-                        ),
-                        current_buy_threshold + 0.3,
-                    ),
-                ),
-                2,
-            )
+            recommendations.append("P3.52: concentration may justify selectivity, but Atlas will not ratchet the live threshold upward without attributable current-epoch evidence.")
     elif exposure_bias == "SHORT_HEAVY":
         recommendations.append(
             "Avoid adding further short concentration unless the SELL signal advantage is unusually strong."
         )
         if direction == "BEARISH" and not veto:
-            proposed["min_sell_signal_score"] = round(
-                min(
-                    10.0,
-                    max(
-                        proposed.get(
-                            "min_sell_signal_score",
-                            current_sell_threshold,
-                        ),
-                        current_sell_threshold + 0.3,
-                    ),
-                ),
-                2,
-            )
+            recommendations.append("P3.52: concentration may justify selectivity, but Atlas will not ratchet the live threshold upward without attributable current-epoch evidence.")
 
     active_chains = _i(status, "active_hedge_chains", 0)
     if active_chains > 0:
@@ -249,9 +211,8 @@ def generate_advice(status: dict[str, Any]) -> dict:
 
     if current_intrabar and market_regime == "RANGE_CHOP":
         recommendations.append(
-            "Intrabar mode may over-sample noisy conditions; new-bar-only evaluation is safer for this regime."
+            "Intrabar mode may over-sample noisy conditions, but P3.52 leaves temporal gating to the liveness-aware policy layer so new-bar-only cannot become a sticky self-throttling default."
         )
-        proposed["enable_new_bar_entry_only"] = True
 
     # Never combine threshold loosening with exposure increases.
     risk_increase_fields = {

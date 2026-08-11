@@ -394,6 +394,9 @@ class Status(BaseModel):
     sell_notional_exposure: float = 0.0
     positions: List[PositionTelemetry] = Field(default_factory=list)
     recent_exit_deals: List[ExitDealTelemetry] = Field(default_factory=list)
+    lifecycle_contract_version: str = ""
+    lifecycle_contract_started_at_epoch: int = 0
+    recent_lifecycle_events: List[dict[str, Any]] = Field(default_factory=list)
     recent_exit_deal_count: int = 0
     exit_deal_sequence: int = 0
     policy_epoch: int = 1
@@ -433,6 +436,11 @@ class Status(BaseModel):
     bid: float = 0.0
     ask: float = 0.0
     spread_points: float = 0.0
+    market_quote_fresh: bool = False
+    market_quote_source: str = ""
+    market_quote_age_ms: int = 0
+    market_quote_time_msc: int = 0
+    market_quote_freshness_limit_ms: int = 2500
     effective_spread_cap_points: float = 0.0
     spread_within_limit: bool = True
 
@@ -820,6 +828,36 @@ class Status(BaseModel):
 
     preflight_sl_distance_points: float = 0.0
     preflight_tp_distance_points: float = 0.0
+    preflight_retry_safety_points: float = 0.0
+    preflight_min_distance_points: float = 0.0
+    preflight_detached_stops_fallback_attempted: bool = False
+    preflight_detached_stops_fallback_accepted: bool = False
+    preflight_detached_stops_retcode: int = 0
+    preflight_protection_state: str = "NOT_REQUIRED"
+    preflight_intended_risk_amount: float = 0.0
+    preflight_actual_fill_price: float = 0.0
+    preflight_attached_sl: float = 0.0
+    preflight_attached_tp: float = 0.0
+    preflight_protection_retcode: int = 0
+    preflight_entry_price_integrity_state: str = "NOT_EVALUATED"
+    preflight_candidate_reference_price: float = 0.0
+    preflight_send_reference_price: float = 0.0
+    preflight_send_bid: float = 0.0
+    preflight_send_ask: float = 0.0
+    preflight_fresh_tick_time_msc: int = 0
+    preflight_quote_age_ms: int = 0
+    preflight_quote_freshness_limit_ms: int = 5000
+    preflight_quote_freshness_state: str = "NOT_EVALUATED"
+    preflight_candidate_to_send_drift_points: float = 0.0
+    preflight_allowed_entry_drift_points: float = 0.0
+    preflight_send_to_fill_drift_points: float = 0.0
+    # P3.51 structure-aware initial stop authority
+    initial_stop_authority: str = "NOT_EVALUATED"
+    initial_stop_atr_floor_points: float = 0.0
+    initial_stop_swing_price: float = 0.0
+    initial_stop_swing_points: float = 0.0
+    initial_stop_buffer_points: float = 0.0
+    initial_stop_final_points: float = 0.0
     terminal_algo_trading_allowed: Optional[bool] = None
     ea_trading_allowed: Optional[bool] = None
     account_trade_allowed: Optional[bool] = None

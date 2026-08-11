@@ -418,7 +418,7 @@ def build_parameter_evidence(
     outcomes_data = _load(current_account_outcomes_file(OUTCOMES_FILE)) or {}
 
     intel_records = _records(intel_data, "records", "history", "snapshots")
-    outcomes = _records(outcomes_data, "closed", "outcomes")
+    outcomes = [row for row in _records(outcomes_data, "closed", "outcomes") if row.get("strategy_learning_eligible") and str(row.get("execution_integrity") or "").upper() == "CLEAN"]
 
     parameters = all_parameters()
     signatures: dict[str, tuple[int, ...]] = {}

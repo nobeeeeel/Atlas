@@ -12,8 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data"
 SCHEDULE_FILE = DATA_DIR / "llm_cycle_schedule.json"
 
-DEFAULT_INTERVAL_MINUTES = 240
-MIN_INTERVAL_MINUTES = 15
+DEFAULT_INTERVAL_MINUTES = 60
+MIN_INTERVAL_MINUTES = 60
 MIN_DWELL_MINUTES = 30
 MAX_INTERVAL_MINUTES = 24 * 60
 MAX_RUN_HISTORY = 300
@@ -40,10 +40,11 @@ def _parse(value: Any) -> datetime | None:
 def _default() -> dict[str, Any]:
     now = _now()
     return {
-        "version": 1,
+        "version": 2,
+        "trigger_mode": "EVENT_DRIVEN",
         "enabled": False,
         "interval_minutes": DEFAULT_INTERVAL_MINUTES,
-        "execution_mode": "SUPERVISED",
+        "execution_mode": "AUTONOMOUS",
         "minimum_dwell_minutes": DEFAULT_INTERVAL_MINUTES,
         "minimum_confidence": 70.0,
         "running": False,
@@ -79,6 +80,16 @@ def _read_unlocked() -> dict[str, Any]:
     merged = {**_default(), **value} if isinstance(value, dict) else _default()
     if not isinstance(merged.get("run_history"), list):
         merged["run_history"] = []
+
+    # P3.54 migration: the old recurring optimizer becomes a low-frequency
+    # health heartbeat. Material reasoning is now event driven. Preserve the
+    # user's execution mode/confidence/dwell settings, but never retain a
+    # sub-hour periodic Gemini loop from the legacy scheduler.
+    if int(merged.get("version") or 1) < 2 or str(merged.get("trigger_mode") or "").upper() != "EVENT_DRIVEN":
+        merged["version"] = 2
+        merged["trigger_mode"] = "EVENT_DRIVEN"
+    merged["interval_minutes"] = max(MIN_INTERVAL_MINUTES, int(merged.get("interval_minutes") or DEFAULT_INTERVAL_MINUTES))
+    merged["execution_mode"] = "AUTONOMOUS"
     return merged
 
 
@@ -137,7 +148,7 @@ def update_llm_cycle_schedule(
     *,
     enabled: bool,
     interval_minutes: int,
-    execution_mode: str = "SUPERVISED",
+    execution_mode: str = "AUTONOMOUS",
     minimum_dwell_minutes: int | None = None,
     minimum_confidence: float = 70.0,
 ) -> dict[str, Any]:
@@ -146,9 +157,10 @@ def update_llm_cycle_schedule(
         min(int(interval_minutes), MAX_INTERVAL_MINUTES),
     )
     now = _now()
-    mode = str(execution_mode or "SUPERVISED").upper()
-    if mode not in {"SUPERVISED", "AUTONOMOUS"}:
-        raise ValueError("execution_mode must be SUPERVISED or AUTONOMOUS.")
+    # P3.55: Human/Supervised versus Autonomous is no longer a Brain runtime
+    # mode. Event-driven Brain always uses validated autonomous application;
+    # deterministic safety/consensus/dwell/position-lock gates remain in force.
+    mode = "AUTONOMOUS"
     dwell = max(
         MIN_DWELL_MINUTES,
         min(int(minimum_dwell_minutes or interval), MAX_INTERVAL_MINUTES),
@@ -156,6 +168,8 @@ def update_llm_cycle_schedule(
     with _LOCK:
         value = _read_unlocked()
         value.update({
+            "version": 2,
+            "trigger_mode": "EVENT_DRIVEN",
             "enabled": bool(enabled),
             "interval_minutes": interval,
             "execution_mode": mode,

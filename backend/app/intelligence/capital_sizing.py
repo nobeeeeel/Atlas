@@ -7,12 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.app.intelligence.policy_bootstrap import evaluate_policy_bootstrap
 from backend.app.intelligence.risk_governor import assess_risk
 from backend.app.intelligence.risk_appetite import get_risk_appetite
 from backend.app.intelligence.risk_units import build_risk_units
 
 
-SIZING_VERSION = "atlas-capital-regime-v2.1"
+SIZING_VERSION = "atlas-capital-regime-v2.2"
 OPPORTUNITY_ALLOCATION_VERSION = "atlas-adaptive-opportunity-risk-v1"
 
 DEMO_CAPITAL_SIMULATION_ENV = "ATLAS_DEMO_CAPITAL_SIMULATION"
@@ -35,7 +36,7 @@ RECOVERY_PROBE_SCALP_RISK_PCT = 0.05
 # turning the operator portfolio ceiling into per-trade authority.
 RECOVERY_PROBE_MAX_EXECUTABLE_RISK_PCT = 0.30
 LOSS_PROTECTION_THRESHOLD = 4
-LOSS_PROTECTION_STATE_VERSION = 4
+LOSS_PROTECTION_STATE_VERSION = 5
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 AUTONOMOUS_EVENT_FILE = PROJECT_ROOT / "data" / "autonomous_policy_events.json"
 
@@ -496,7 +497,20 @@ def _loss_protection_state(
     outcomes: dict[str, Any] | None,
     streak: int,
 ) -> dict[str, Any]:
-    """Durable loss protection: 15m first stage, then 30m/60m only after failed probes."""
+    """Event-driven loss review state.
+
+    P3.54 removes punitive 15/30/60-minute loss-streak timeouts and the automatic
+    reduced-risk recovery probe. Reaching the loss threshold now creates a
+    BRAIN_REVIEW_PENDING event. Fresh risk pauses only while Gemini/Atlas Brain
+    reviews the new evidence. Once a successful Brain cycle returns -- whether
+    it applies changes or deliberately HOLDs -- the current strategy may resume
+    under the ordinary deterministic drawdown, risk-state, broker, exposure and
+    recovery-chain gates.
+
+    Legacy RECOVERY_PROBE positions/lifecycles are still restored atomically so
+    an upgrade cannot orphan a live recovery unit. Legacy HARD_VETO state files
+    are migrated into BRAIN_REVIEW_PENDING on first read.
+    """
     state_file = _loss_protection_state_file(outcomes)
     stored = _read_loss_protection_state(state_file)
     now = datetime.now(timezone.utc)
@@ -506,211 +520,283 @@ def _loss_protection_state(
     active_probe_position = _active_recovery_probe_position(status, outcomes)
     active_probe_lifecycle = _active_recovery_probe_lifecycle(outcomes)
 
-    def inactive(reason: str) -> dict[str, Any]:
-        value = {
+    def base_fields() -> dict[str, Any]:
+        return {
             "version": LOSS_PROTECTION_STATE_VERSION,
-            "active": False, "state": "INACTIVE", "consecutive_losses": streak,
-            "timeout_minutes": 0, "elapsed_seconds": 0.0, "remaining_seconds": 0.0,
-            "triggered_at": None, "next_review_at": None, "recovery_probe": False,
+            "timeout_minutes": 0,
+            "elapsed_seconds": 0.0,
+            "remaining_seconds": 0.0,
+            "next_review_at": None,
             "recovery_probe_scalp_risk_pct": RECOVERY_PROBE_SCALP_RISK_PCT,
             "recovery_probe_max_executable_risk_pct": RECOVERY_PROBE_MAX_EXECUTABLE_RISK_PCT,
-            "dwell_override_eligible": False, "escalation_level": 0,
-            "failed_recovery_probes": 0, "reason": reason,
+            "account_fingerprint": account_fingerprint,
+            "symbol": symbol,
             "state_file": str(state_file) if state_file else None,
-            "account_fingerprint": account_fingerprint, "symbol": symbol,
+            "latest_loss_close_at": latest_loss_time.isoformat() if latest_loss_time else None,
+        }
+
+    def inactive(reason: str) -> dict[str, Any]:
+        value = {
+            **base_fields(),
+            "active": False,
+            "state": "INACTIVE",
+            "consecutive_losses": streak,
+            "triggered_at": None,
+            "recovery_probe": False,
+            "dwell_override_eligible": False,
+            "escalation_level": 0,
+            "failed_recovery_probes": 0,
+            "brain_review_required": False,
+            "brain_review_pending": False,
+            "brain_review_requested_at": None,
+            "brain_review_requested_streak": None,
+            "brain_review_completed_at": None,
+            "brain_reviewed_streak": 0,
+            "reason": reason,
         }
         _write_loss_protection_state(state_file, value)
         return value
 
     if streak < LOSS_PROTECTION_THRESHOLD:
-        return inactive("Loss streak is below the protection threshold.")
+        return inactive("Loss streak is below the Brain review threshold.")
 
     same_scope = (
         isinstance(stored, dict)
-        and int(stored.get("version") or 0) >= LOSS_PROTECTION_STATE_VERSION
         and (not stored.get("account_fingerprint") or str(stored.get("account_fingerprint")) == account_fingerprint)
         and (not stored.get("symbol") or str(stored.get("symbol")) == symbol)
     )
-    if not same_scope or not stored.get("active"):
-        # Historical losses establish that protection is required, but they do not
-        # retroactively count as failed recovery probes. A live RP-marked broker
-        # position, however, is authoritative restart evidence that a probe was
-        # already admitted and must be restored rather than re-vetoed as fresh risk.
-        restored_probe = active_probe_position is not None
-        stored = {
-            "version": LOSS_PROTECTION_STATE_VERSION,
-            "active": True,
-            "state": "RECOVERY_PROBE" if restored_probe else "HARD_VETO",
-            "escalation_level": 1,
-            "failed_recovery_probes": 0,
-            "protection_started_at": now.isoformat(),
-            "stage_started_at": now.isoformat(),
-            "protected_policy_epoch": int(status.get("policy_epoch") or 0),
-            "streak_at_activation": streak,
-            "streak_at_stage_start": streak,
-            "recovery_probe_started_at": now.isoformat() if restored_probe else None,
-            "recovery_probe_ticket": int((active_probe_position or {}).get("ticket") or 0) if restored_probe else None,
-            "released_by_policy_epoch": int((active_probe_position or {}).get("entry_policy_epoch") or status.get("policy_epoch") or 0) if restored_probe else None,
-            "release_reason": "RECOVERY_PROBE_RESTORED_FROM_IMMUTABLE_ENTRY_LINEAGE" if restored_probe else None,
-            "streak_at_probe_start": streak if restored_probe else None,
-            "account_fingerprint": account_fingerprint,
-            "symbol": symbol,
-        }
 
-    mode = str(stored.get("state") or "HARD_VETO")
-
-    # P3.41 atomic composite repair: if an RP recovery composite is still active,
-    # no child close is allowed to finalize/increment the streak or start a new
-    # HARD_VETO stage. The whole immutable lifecycle must become flat first.
-    if active_probe_lifecycle is not None and mode != "RECOVERY_PROBE":
-        root_ticket = int(active_probe_lifecycle.get("root_ticket") or 0)
+    # Never orphan a legacy recovery probe that is actually live at the broker or
+    # still represented by an unresolved composite risk unit.
+    if active_probe_position is not None or active_probe_lifecycle is not None:
+        if not same_scope:
+            stored = {}
+        root_ticket = int((active_probe_position or active_probe_lifecycle or {}).get("ticket") or (active_probe_lifecycle or {}).get("root_ticket") or 0)
         stored.update({
+            **base_fields(),
+            "active": True,
             "state": "RECOVERY_PROBE",
+            "consecutive_losses": streak,
+            "recovery_probe": True,
             "recovery_probe_started_at": stored.get("recovery_probe_started_at") or now.isoformat(),
             "recovery_probe_ticket": root_ticket or stored.get("recovery_probe_ticket"),
-            "release_reason": "RECOVERY_LIFECYCLE_ATOMICITY_RESTORED",
-            "streak_at_probe_start": min(
-                int(stored.get("streak_at_probe_start") or streak),
-                streak,
-            ),
-            "atomic_recovery_lifecycle_unit_id": active_probe_lifecycle.get("unit_id"),
-        })
-        mode = "RECOVERY_PROBE"
-
-    # If state storage was reset or stale but an RP-marked live position exists,
-    # the broker entry lineage wins. Never create a second hard-veto window around
-    # an already-admitted probe simply because Atlas/Nyao restarted.
-    if active_probe_position is not None and mode != "RECOVERY_PROBE":
-        stored.update({
-            "state": "RECOVERY_PROBE",
-            "recovery_probe_started_at": stored.get("recovery_probe_started_at") or now.isoformat(),
-            "recovery_probe_ticket": int(active_probe_position.get("ticket") or 0),
-            "released_by_policy_epoch": int(active_probe_position.get("entry_policy_epoch") or status.get("policy_epoch") or 0),
-            "release_reason": "RECOVERY_PROBE_RESTORED_FROM_IMMUTABLE_ENTRY_LINEAGE",
             "streak_at_probe_start": int(stored.get("streak_at_probe_start") or streak),
+            "dwell_override_eligible": False,
+            "brain_review_required": False,
+            "brain_review_pending": False,
+            "release_reason": stored.get("release_reason") or "LEGACY_RECOVERY_PROBE_RESTORED",
         })
-        mode = "RECOVERY_PROBE"
-    stage = max(1, min(3, int(stored.get("escalation_level") or 1)))
+        _write_loss_protection_state(state_file, stored)
+        return dict(stored)
 
-    # A recovery probe is considered failed only when the CURRENT-ACCOUNT
-    # loss streak increases after the probe was armed. Do not compare MT5 deal
-    # wall-clock timestamps with Atlas process timestamps: broker/server clocks
-    # can be offset and made historical losses look newer than the probe.
-    #
-    # Example: streak_at_probe_start=8. While no new trade closes, streak stays
-    # 8 and the probe remains armed. A losing probe makes it 9 and escalates.
-    # A winning probe breaks the streak (< threshold) and the earlier inactive
-    # branch resets protection.
-    if mode == "RECOVERY_PROBE":
-        if active_probe_position is not None and not int(stored.get("recovery_probe_ticket") or 0):
-            stored["recovery_probe_ticket"] = int(active_probe_position.get("ticket") or 0)
-        probe_streak = int(stored.get("streak_at_probe_start") or streak)
-        if streak > probe_streak and active_probe_lifecycle is None:
-            stage = min(3, stage + 1)
-            stored.update({
-                "state": "HARD_VETO",
-                "escalation_level": stage,
-                "failed_recovery_probes": int(stored.get("failed_recovery_probes") or 0) + 1,
-                "stage_started_at": now.isoformat(),
-                "protected_policy_epoch": int(status.get("policy_epoch") or 0),
-                "streak_at_stage_start": streak,
-                "recovery_probe_started_at": None,
-                "released_by_policy_epoch": None,
-                "release_reason": "RECOVERY_PROBE_LOSS_CONFIRMED_BY_STREAK_INCREMENT",
-                "failed_probe_streak_before": probe_streak,
-                "failed_probe_streak_after": streak,
-            })
-            mode = "HARD_VETO"
+    mode = str(stored.get("state") or "").upper() if same_scope else ""
 
-    timeout_by_stage = {1: LOSS_PROTECTION_INITIAL_MINUTES, 2: LOSS_PROTECTION_SECOND_MINUTES, 3: LOSS_PROTECTION_MAX_MINUTES}
-    timeout_minutes = timeout_by_stage[stage]
+    # Migration from P3.41/P3.52 timer protection: the old timeout becomes an
+    # immediate Brain review request. No remaining wall-clock penalty is kept.
+    if mode in {"HARD_VETO", "RECOVERY_PROBE"}:
+        mode = "BRAIN_REVIEW_PENDING"
+        stored = {
+            **stored,
+            **base_fields(),
+            "version": LOSS_PROTECTION_STATE_VERSION,
+            "active": True,
+            "state": mode,
+            "consecutive_losses": streak,
+            "brain_review_required": True,
+            "brain_review_pending": True,
+            "brain_review_requested_at": now.isoformat(),
+            "brain_review_requested_streak": streak,
+            "brain_review_completed_at": None,
+            "brain_reviewed_streak": int(stored.get("brain_reviewed_streak") or 0),
+            "recovery_probe": False,
+            "dwell_override_eligible": True,
+            "release_reason": "LEGACY_TIMER_PROTECTION_MIGRATED_TO_BRAIN_REVIEW",
+            "triggered_at": now.isoformat(),
+        }
 
-    if mode == "HARD_VETO":
-        protection_anchor = (
-            _parse_iso(stored.get("stage_started_at"))
-            or _parse_iso(stored.get("protection_started_at"))
-        )
-        material_policy = _latest_runtime_confirmed_material_policy_after_protection(
-            status, protection_anchor=protection_anchor
-        )
-        protected_epoch = int(stored.get("protected_policy_epoch") or 0)
-        already_released_epoch = int(stored.get("released_by_policy_epoch") or 0)
-        if (
-            material_policy
-            # The recovery policy must be NEWER than the policy protected by this
-            # hard-veto stage. Equality would let the same already-tested epoch
-            # repeatedly release protection after a failed recovery probe.
-            and int(material_policy.get("policy_epoch") or 0) > protected_epoch
-            and int(material_policy.get("policy_epoch") or 0) > already_released_epoch
-        ):
-            stored.update({
-                "state": "RECOVERY_PROBE",
-                "recovery_probe_started_at": now.isoformat(),
-                "released_by_policy_epoch": int(material_policy.get("policy_epoch") or 0),
-                "release_reason": "MATERIAL_POLICY_RUNTIME_CONFIRMED",
-                "policy_release": material_policy,
-                "streak_at_probe_start": streak,
-            })
-            mode = "RECOVERY_PROBE"
-        else:
-            stage_started = _parse_iso(stored.get("stage_started_at")) or now
-            elapsed = max(0.0, (now - stage_started).total_seconds())
-            if elapsed >= timeout_minutes * 60:
-                stored.update({
-                    "state": "RECOVERY_PROBE",
-                    "recovery_probe_started_at": now.isoformat(),
-                    "release_reason": "PROTECTION_TIMER_COMPLETED",
-                    "policy_release": None,
-                    "streak_at_probe_start": streak,
-                })
-                mode = "RECOVERY_PROBE"
+    reviewed_streak = int(stored.get("brain_reviewed_streak") or 0) if same_scope else 0
+    requested_streak = int(stored.get("brain_review_requested_streak") or 0) if same_scope else 0
 
-    stage_started = _parse_iso(stored.get("stage_started_at")) or now
-    elapsed_seconds = max(0.0, (now - stage_started).total_seconds()) if mode == "HARD_VETO" else 0.0
-    remaining_seconds = max(0.0, timeout_minutes * 60 - elapsed_seconds) if mode == "HARD_VETO" else 0.0
-    next_review = (
-        datetime.fromtimestamp(stage_started.timestamp() + timeout_minutes * 60, tz=timezone.utc).isoformat()
-        if mode == "HARD_VETO" else None
-    )
-    stored.update({
-        "version": LOSS_PROTECTION_STATE_VERSION,
-        "active": True,
-        "state": mode,
-        "consecutive_losses": streak,
-        "timeout_minutes": timeout_minutes,
-        "elapsed_seconds": round(elapsed_seconds, 3),
-        "remaining_seconds": round(remaining_seconds, 3),
-        "triggered_at": stored.get("stage_started_at"),
-        "next_review_at": next_review,
-        "recovery_probe": mode == "RECOVERY_PROBE",
-        "recovery_probe_scalp_risk_pct": RECOVERY_PROBE_SCALP_RISK_PCT,
-        "recovery_probe_max_executable_risk_pct": RECOVERY_PROBE_MAX_EXECUTABLE_RISK_PCT,
-        "dwell_override_eligible": mode == "HARD_VETO",
-        "escalation_level": stage,
-        "state_file": str(state_file) if state_file else None,
-        "account_fingerprint": account_fingerprint,
-        "symbol": symbol,
-        "latest_loss_close_at": latest_loss_time.isoformat() if latest_loss_time else None,
-    })
+    # A new loss after the last completed Brain review is itself a new reasoning
+    # event. This is deliberately event-count based, not time based.
+    if not same_scope or not mode or streak > max(reviewed_streak, requested_streak):
+        stored = {
+            **base_fields(),
+            "active": True,
+            "state": "BRAIN_REVIEW_PENDING",
+            "consecutive_losses": streak,
+            "protection_started_at": stored.get("protection_started_at") if same_scope else now.isoformat(),
+            "stage_started_at": now.isoformat(),
+            "protected_policy_epoch": int(status.get("policy_epoch") or 0),
+            "streak_at_activation": int(stored.get("streak_at_activation") or streak) if same_scope else streak,
+            "streak_at_stage_start": streak,
+            "failed_recovery_probes": int(stored.get("failed_recovery_probes") or 0) if same_scope else 0,
+            "recovery_probe": False,
+            "dwell_override_eligible": True,
+            "brain_review_required": True,
+            "brain_review_pending": True,
+            "brain_review_requested_at": now.isoformat(),
+            "brain_review_requested_streak": streak,
+            "brain_review_completed_at": stored.get("brain_review_completed_at") if same_scope else None,
+            "brain_reviewed_streak": reviewed_streak,
+            "brain_review_trigger": "LOSS_STREAK_THRESHOLD" if reviewed_streak == 0 else "ADDITIONAL_COMPLETED_LOSS",
+            "release_reason": None,
+            "triggered_at": now.isoformat(),
+        }
+        mode = "BRAIN_REVIEW_PENDING"
+
+    elif mode == "REVIEW_COMPLETE" and streak <= reviewed_streak:
+        stored.update({
+            **base_fields(),
+            "version": LOSS_PROTECTION_STATE_VERSION,
+            "active": False,
+            "state": "REVIEW_COMPLETE",
+            "consecutive_losses": streak,
+            "recovery_probe": False,
+            "dwell_override_eligible": False,
+            "brain_review_required": False,
+            "brain_review_pending": False,
+        })
+
+    elif mode == "BRAIN_REVIEW_PENDING":
+        stored.update({
+            **base_fields(),
+            "version": LOSS_PROTECTION_STATE_VERSION,
+            "active": True,
+            "state": "BRAIN_REVIEW_PENDING",
+            "consecutive_losses": streak,
+            "recovery_probe": False,
+            "dwell_override_eligible": True,
+            "brain_review_required": True,
+            "brain_review_pending": True,
+        })
+
     _write_loss_protection_state(state_file, stored)
     return dict(stored)
+
+
+def acknowledge_loss_streak_brain_review(
+    status: dict[str, Any],
+    outcomes: dict[str, Any] | None,
+    *,
+    llm_proposal_id: str | None = None,
+    advisory_proposal_id: str | None = None,
+    cycle_status: str | None = None,
+) -> dict[str, Any]:
+    """Release a pending loss-streak review after a successful Brain response.
+
+    If another completed loss arrived after the reviewed snapshot was requested,
+    the newer streak is re-armed instead of being accidentally released by stale
+    reasoning.
+    """
+    report = build_risk_units(outcomes)
+    live_streak = int(report.get("consecutive_completed_loss_units") or 0)
+    state_file = _loss_protection_state_file(outcomes)
+    current = _read_loss_protection_state(state_file)
+    now = datetime.now(timezone.utc)
+    requested_streak = int(current.get("brain_review_requested_streak") or 0)
+
+    if str(current.get("state") or "").upper() != "BRAIN_REVIEW_PENDING":
+        return {**dict(current or {}), "acknowledged": False, "ack_reason": "NO_PENDING_BRAIN_REVIEW"}
+
+    if live_streak > requested_streak:
+        current.update({
+            "version": LOSS_PROTECTION_STATE_VERSION,
+            "active": True,
+            "state": "BRAIN_REVIEW_PENDING",
+            "consecutive_losses": live_streak,
+            "brain_review_required": True,
+            "brain_review_pending": True,
+            "brain_review_requested_at": now.isoformat(),
+            "brain_review_requested_streak": live_streak,
+            "brain_review_trigger": "ADDITIONAL_COMPLETED_LOSS_DURING_REVIEW",
+            "last_completed_review_streak": requested_streak,
+            "last_completed_review_at": now.isoformat(),
+            "last_completed_review_llm_proposal_id": llm_proposal_id,
+            "last_completed_review_advisory_proposal_id": advisory_proposal_id,
+            "last_completed_review_cycle_status": cycle_status,
+            "dwell_override_eligible": True,
+            "recovery_probe": False,
+        })
+        _write_loss_protection_state(state_file, current)
+        return {**current, "acknowledged": False, "ack_reason": "NEWER_LOSS_REARMED"}
+
+    current.update({
+        "version": LOSS_PROTECTION_STATE_VERSION,
+        "active": False,
+        "state": "REVIEW_COMPLETE",
+        "consecutive_losses": live_streak,
+        "brain_review_required": False,
+        "brain_review_pending": False,
+        "brain_review_completed_at": now.isoformat(),
+        "brain_reviewed_streak": max(requested_streak, live_streak),
+        "brain_review_llm_proposal_id": llm_proposal_id,
+        "brain_review_advisory_proposal_id": advisory_proposal_id,
+        "brain_review_cycle_status": cycle_status,
+        "dwell_override_eligible": False,
+        "recovery_probe": False,
+        "release_reason": "BRAIN_REVIEW_COMPLETED",
+        "remaining_seconds": 0.0,
+        "timeout_minutes": 0,
+        "next_review_at": None,
+    })
+    _write_loss_protection_state(state_file, current)
+    return {**current, "acknowledged": True, "ack_reason": "BRAIN_REVIEW_COMPLETED"}
+
+
+
+def release_loss_protection_test_probe(
+    status: dict[str, Any],
+    outcomes: dict[str, Any] | None,
+    *,
+    actor: str = "operator",
+    reason: str = "Execution-path testing",
+) -> dict[str, Any]:
+    """Operator-only P3.54 test bypass for a pending Brain review.
+
+    Kept under the legacy function/API name for compatibility with existing
+    dashboard tooling. It no longer arms a reduced-risk recovery probe and does
+    not create a timer. Production flow should let the LOSS_STREAK_REVIEW event
+    complete normally.
+    """
+    positions = [p for p in list(status.get("positions") or []) if isinstance(p, dict)]
+    if positions:
+        raise ValueError("Brain-review test bypass requires the account to be flat.")
+    if _active_recovery_lifecycles(outcomes):
+        raise ValueError("Cannot bypass Brain review while a recovery composite is unresolved.")
+
+    report = build_risk_units(outcomes)
+    streak = int(report.get("consecutive_completed_loss_units") or 0)
+    current = _loss_protection_state(status, outcomes, streak)
+    if str(current.get("state") or "").upper() != "BRAIN_REVIEW_PENDING":
+        raise ValueError(f"Loss review is not pending (current={current.get('state')}).")
+
+    released = acknowledge_loss_streak_brain_review(
+        status,
+        outcomes,
+        cycle_status="OPERATOR_TEST_BYPASS",
+    )
+    released.update({
+        "release_reason": "OPERATOR_TEST_BRAIN_REVIEW_BYPASS",
+        "release_actor": str(actor or "operator"),
+        "release_note": str(reason or "Execution-path testing")[:500],
+    })
+    state_file = _loss_protection_state_file(outcomes)
+    _write_loss_protection_state(state_file, released)
+    return released
 
 
 def _drawdown_multiplier(
     drawdown_pct: float,
 ) -> float:
-    if drawdown_pct >= 5.0:
-        return 0.0
+    """P3.55 risk-efficiency rule.
 
-    if drawdown_pct >= 3.0:
-        return 0.25
-
-    if drawdown_pct >= 2.0:
-        return 0.50
-
-    if drawdown_pct >= 1.0:
-        return 0.75
-
+    Ordinary drawdown is evidence for Atlas Brain, not a deterministic lot-size
+    punishment. Cutting every subsequent winner after losses creates negative
+    recovery convexity: large pre-drawdown losses can overpower many artificially
+    tiny wins. The Risk Governor remains the hard safety authority and vetoes new
+    risk at emergency drawdown (currently >=8%) or other account-danger states.
+    """
     return 1.0
 
 
@@ -1377,6 +1463,7 @@ def build_capital_sizing_plan(
         )
     )
     loss_protection = _loss_protection_state(status, outcomes, loss_streak)
+    policy_bootstrap = evaluate_policy_bootstrap(status, outcomes)
 
     risk = assess_risk(
         status
@@ -1389,15 +1476,20 @@ def build_capital_sizing_plan(
         or "LOW"
     ).upper()
 
+    # P3.55: do not double-penalize opportunity size merely because drawdown
+    # contributed to a MODERATE/ELEVATED classification. The governor's actual
+    # veto_new_risk flag remains authoritative for basket risk, margin, emergency
+    # drawdown and stressed recovery conditions. Non-veto risk states therefore
+    # keep full opportunity sizing; volatility/capacity still constrain independently.
     risk_multiplier = {
         "LOW": 1.0,
-        "MODERATE": 0.80,
-        "ELEVATED": 0.60,
+        "MODERATE": 1.0,
+        "ELEVATED": 1.0,
         "HIGH": 0.0,
         "CRITICAL": 0.0,
     }.get(
         risk_state,
-        0.60,
+        1.0,
     )
 
     exposure_count = (
@@ -1413,9 +1505,11 @@ def build_capital_sizing_plan(
 
     modifiers = {
         "drawdown": _drawdown_multiplier(drawdown),
+        # Loss streaks are reasoning events, not automatic size decay. Drawdown,
+        # volatility and deterministic risk state still contract risk normally.
+        # Fresh risk pauses only while the Brain review itself is outstanding.
         "loss_streak": (
-            0.0 if loss_protection["state"] == "HARD_VETO"
-            else (1.0 if loss_protection["state"] == "RECOVERY_PROBE" else _loss_multiplier(loss_streak))
+            0.0 if loss_protection["state"] == "BRAIN_REVIEW_PENDING" else 1.0
         ),
         "risk_state": risk_multiplier,
         "volatility": _volatility_multiplier(_f(status, "volatility_ratio")),
@@ -1431,12 +1525,16 @@ def build_capital_sizing_plan(
     if risk_capital <= 0:
         veto_reasons.append("Usable account risk capital is unavailable.")
 
-    if loss_protection["state"] == "HARD_VETO":
+    if loss_protection["state"] == "BRAIN_REVIEW_PENDING":
         veto_reasons.append(
-            "Loss-streak capital protection is active for "
-            f"{loss_protection['timeout_minutes']} minutes; "
-            f"{loss_protection['remaining_seconds']:.0f} seconds remain before "
-            "a reduced-risk recovery probe may be considered."
+            "Loss-streak Brain review is pending; fresh risk resumes immediately "
+            "after Gemini returns a successful reviewed cycle, with or without policy changes."
+        )
+
+    if bool(policy_bootstrap.get("fresh_trading_pause_required")):
+        veto_reasons.append(
+            "Initial Nyao seed policy has not yet been Gemini+Critic qualified for this new account/symbol. "
+            "Fresh autonomous risk remains paused only until the one-time live-market baseline qualification completes."
         )
 
     # A recovery probe is deliberately a single experimental risk unit. Once it
@@ -1765,6 +1863,7 @@ def build_capital_sizing_plan(
             loss_streak
         ),
         "loss_protection": loss_protection,
+        "policy_bootstrap": policy_bootstrap,
 
         "risk_state": (
             risk_state
@@ -1887,6 +1986,25 @@ def build_capital_sizing_plan(
         },
 
         "opportunity_allocation": opportunity_allocation,
+
+        "risk_efficiency": {
+            "version": "atlas-drawdown-risk-efficiency-v1",
+            "mode": "EVENT_DRIVEN_NO_SIZE_DECAY",
+            "drawdown_pct": round(drawdown, 6),
+            "ordinary_drawdown_size_multiplier": 1.0,
+            "loss_streak_size_multiplier": 1.0 if loss_protection["state"] != "BRAIN_REVIEW_PENDING" else 0.0,
+            "emergency_drawdown_veto_pct": 8.0,
+            "brain_review_band": (
+                "EMERGENCY" if drawdown >= 8.0
+                else "ELEVATED" if drawdown >= 5.0
+                else "REVIEW" if drawdown >= 3.0
+                else "NORMAL"
+            ),
+            "principle": (
+                "Ordinary drawdown informs Brain reasoning but does not automatically shrink the next opportunity. "
+                "Only genuine deterministic safety vetoes can stop fresh risk."
+            ),
+        },
 
         "modifiers": {
             key: round(

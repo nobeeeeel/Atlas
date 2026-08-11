@@ -28,8 +28,8 @@ def registry_summary() -> dict[str, Any]:
         "position_sensitive_count": locked,
         "change_budget": CHANGE_BUDGET,
         "domains": domains,
-        "execution_authority": "NONE_DIRECT",
-        "recommendation_mode": "SUPERVISED_ONLY",
+        "execution_authority": "EVENT_DRIVEN_VALIDATED_AUTONOMOUS",
+        "recommendation_mode": "AUTHORITY_TIERED",
     }
 
 
@@ -165,3 +165,60 @@ for _parameter in PARAMETERS:
         _parameter["domain"],
     )
     _parameter["evidence_model"] = "DESCRIPTIVE_ASSOCIATION_NOT_CAUSAL"
+
+# P3.56 — explicit autonomous ownership for the 157-control Nyao surface.
+# Nyao defaults are seed values, not automatically trusted strategy truth.
+OPERATOR_ONLY_PARAMETERS = {
+    "enable_discord_alerts", "enable_reports", "send_report_every_hour", "enable_logging",
+}
+
+# These controls are part of Nyao's runtime surface but autonomous Gemini must not
+# weaken their safety invariant. Atlas remains the final risk authority outside
+# this catalog as well.
+INVARIANT_PARAMETERS = {
+    "enable_stop_loss",
+    "enable_max_spread_filter",
+    "enable_duplicate_distance_filter",
+}
+
+# Gemini may reason about these, but every proposal remains constrained by the
+# registry bounds, critic, Atlas monetary-risk envelope and interaction rules.
+BOUNDED_SAFETY_PARAMETERS = {
+    "base_lot_size", "max_open_orders", "max_trades_per_candle",
+    "enable_dynamic_lots", "equity_drop_percent", "max_equity_drop_lot_steps",
+    "min_signal_strength_for_lot", "lot_step_size", "max_lot_size",
+    "enable_hedge_chain", "hedge_trigger_atr", "hedge_require_signal",
+    "hedge_min_signal_score", "hedge_auto_lot", "hedge_recovery_atr",
+    "hedge_lot_multiplier", "hedge_max_lot", "hedge_recovery_pct",
+    "hedge_roll_min_profit", "hedge_cycle_levels", "enable_hedge_cycle_reset",
+    "hedge_cycle_partial_pct", "hedge_max_cycles", "hedge_max_chain_loss_usd",
+    "hedge_max_chain_loss_pct", "hedge_clear_root_sl", "hedge_trail_atr",
+    "enable_basket_stop", "max_basket_loss_pct", "min_equity_percent",
+    "max_drawdown_from_peak", "minimum_equity",
+    "sl_input_type", "sl_value", "enable_risk_reward", "rr_risk_mode",
+    "rr_risk_input_type", "rr_risk_value", "rr_atr_multiplier", "risk_reward_ratio",
+    "enable_market_close_filter", "minutes_before_close", "enable_news_filter",
+    "news_minutes_before", "news_minutes_after", "enable_leverage_pause",
+}
+
+
+def parameter_authority(name: str) -> str:
+    if name in OPERATOR_ONLY_PARAMETERS:
+        return "OPERATOR_ONLY"
+    if name in INVARIANT_PARAMETERS:
+        return "ATLAS_NYAO_INVARIANT"
+    if name in BOUNDED_SAFETY_PARAMETERS:
+        return "GEMINI_BOUNDED"
+    return "GEMINI_STRATEGY"
+
+
+def gemini_may_change(name: str) -> bool:
+    return parameter_authority(name) in {"GEMINI_STRATEGY", "GEMINI_BOUNDED"}
+
+
+for _parameter in PARAMETERS:
+    _parameter["authority"] = parameter_authority(_parameter["name"])
+    _parameter["gemini_mutable"] = gemini_may_change(_parameter["name"])
+    _parameter["recommendation_permission"] = "AUTONOMOUS_BOUNDED" if _parameter["gemini_mutable"] else "READ_ONLY"
+    if _parameter["name"] in INVARIANT_PARAMETERS:
+        _parameter["invariant_value"] = True

@@ -122,6 +122,7 @@ from backend.app.intelligence.parameter_evidence import (
 from backend.app.intelligence.scalping_responsiveness import (
     analyze_scalping_responsiveness,
 )
+from backend.app.intelligence.policy_liveness import assess_policy_liveness
 from backend.app.intelligence.market_candles import (
     build_market_candle_report,
     load_market_candle_export,
@@ -136,8 +137,24 @@ from backend.app.intelligence.zone_policy import (
     apply_zone_policy,
     get_zone_policy,
 )
-from backend.app.intelligence.capital_sizing import build_capital_sizing_plan
+from backend.app.intelligence.capital_sizing import (
+    acknowledge_loss_streak_brain_review,
+    build_capital_sizing_plan,
+    release_loss_protection_test_probe,
+)
 from backend.app.intelligence.risk_appetite import get_risk_appetite, update_risk_appetite
+from backend.app.intelligence.policy_bootstrap import (
+    acknowledge_policy_bootstrap,
+    evaluate_policy_bootstrap,
+)
+from backend.app.intelligence.brain_events import (
+    acknowledge_brain_event,
+    next_brain_event,
+)
+from backend.app.intelligence.risk_efficiency import (
+    acknowledge_drawdown_review,
+    evaluate_drawdown_review,
+)
 from backend.app.intelligence.autonomous_policy import (
     apply_autonomous_llm_policy,
     apply_pending_autonomous_policy,
@@ -170,7 +187,7 @@ from backend.app.agents.policy_proposal import (
 
 app = FastAPI(
     title="Atlas",
-    version="1.30.58",
+    version="1.30.75",
 )
 
 
@@ -219,7 +236,7 @@ class LlmReviewRequest(BaseModel):
 class LlmCycleScheduleRequest(BaseModel):
     enabled: bool
     interval_minutes: int = Field(default=240, ge=15, le=1440)
-    execution_mode: str = Field(default="SUPERVISED", pattern="^(SUPERVISED|AUTONOMOUS)$")
+    execution_mode: str = Field(default="AUTONOMOUS", pattern="^(SUPERVISED|AUTONOMOUS)$")
     minimum_dwell_minutes: int = Field(default=240, ge=30, le=1440)
     minimum_confidence: float = Field(default=70.0, ge=0.0, le=100.0)
 
@@ -238,6 +255,11 @@ class RiskAppetiteUpdateRequest(BaseModel):
 class ConsensusResetRequest(BaseModel):
     actor: str = Field(default="human_operator", min_length=1, max_length=120)
     reason: str = Field(default="Operator requested a fresh learning window.", min_length=1, max_length=500)
+
+class LossProtectionTestReleaseRequest(BaseModel):
+    actor: str = "Nobel"
+    reason: str = "Execution-path testing"
+
 
 
 def _raise_review_workflow_error(exc: ReviewWorkflowError) -> None:
@@ -380,7 +402,7 @@ def root() -> dict[str, str]:
 def health() -> dict[str, str]:
     return {
         "status": "running",
-        "version": "1.30.58",
+        "version": "1.30.75",
         "strategy": "nyao",
         "execution_model": "account_environment_agnostic",
     }
@@ -668,6 +690,36 @@ def get_zone_execution_plan() -> dict[str, Any]:
     )
     return plan
 
+
+
+
+@app.post("/api/v1/atlas/capital/loss-protection/release-test-probe")
+def release_atlas_loss_protection_test_probe(request: LossProtectionTestReleaseRequest) -> dict[str, Any]:
+    """Operator-only test bypass for a pending event-driven Brain review."""
+    status = read_json(STATUS_FILE) or {}
+    if not status:
+        raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
+    outcomes = get_trade_outcomes(closed_limit=5000, include_active=True)
+    try:
+        released = release_loss_protection_test_probe(
+            status, outcomes, actor=request.actor, reason=request.reason
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # Rebuild/persist the directive immediately so Nyao can consume the release
+    # on its next bridge read without waiting for the ordinary dashboard cycle.
+    plan = get_zone_execution_plan()
+    return {
+        "released": True,
+        "mode": released.get("state"),
+        "release_reason": released.get("release_reason"),
+        "consecutive_losses_preserved": released.get("consecutive_losses"),
+        "brain_reviewed_streak": released.get("brain_reviewed_streak"),
+        "brain_review_pending": released.get("brain_review_pending"),
+        "directive_state": (plan.get("capital_sizing") or {}).get("loss_protection", {}).get("state"),
+        "note": "Historical P/L and loss streak are preserved. This testing bypass does not create a timer or reduced-risk probe.",
+    }
 
 @app.get("/api/v1/atlas/zone-policy")
 def get_atlas_zone_policy() -> dict[str, Any]:
@@ -1420,6 +1472,24 @@ def get_atlas_risk_units() -> dict:
     outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
     return build_risk_units(outcomes)
 
+@app.get("/api/v1/atlas/brain-events")
+def get_atlas_brain_events() -> dict:
+    status_data = read_json(STATUS_FILE) or {}
+    if not status_data:
+        return {"bootstrap": {}, "event_bus": {}, "parameter_authority": {}}
+    status = Status.model_validate(status_data).model_dump(mode="json")
+    outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+    bootstrap = evaluate_policy_bootstrap(status, outcomes)
+    # Detection establishes/updates the durable event watermark without consuming it.
+    from backend.app.intelligence.brain_events import detect_brain_events
+    event_bus = detect_brain_events(status, outcomes)
+    params = all_parameters()
+    counts = {}
+    for row in params:
+        key = str(row.get("authority") or "UNKNOWN")
+        counts[key] = counts.get(key, 0) + 1
+    return {"bootstrap": bootstrap, "event_bus": event_bus, "parameter_authority": {"total": len(params), "counts": counts}}
+
 
 @app.get("/api/v1/atlas/risk-appetite")
 def get_atlas_risk_appetite() -> dict:
@@ -1624,12 +1694,20 @@ def get_atlas_scalping_responsiveness() -> dict[str, Any]:
     if not status_data:
         raise HTTPException(status_code=503, detail="Nyao status is not available yet.")
     status_payload = Status.model_validate(status_data).model_dump(mode="json")
-    return analyze_scalping_responsiveness(
+    current_command = read_json(COMMANDS_FILE) or {}
+    responsiveness = analyze_scalping_responsiveness(
         status_payload,
-        read_json(COMMANDS_FILE) or {},
+        current_command,
         history=get_history(limit=720),
         trade_outcomes=get_trade_outcomes(closed_limit=2_000, include_active=False),
     )
+    responsiveness["policy_liveness"] = assess_policy_liveness(
+        status_payload,
+        current_command,
+        responsiveness,
+        policy_performance=evaluate_policy_performance(),
+    )
+    return responsiveness
 
 
 @app.get("/api/v1/atlas/llm/status")
@@ -1761,6 +1839,14 @@ def _build_scoped_llm_policy_input(
         history=get_history(limit=720),
         trade_outcomes=trade_outcomes,
     )
+    policy_performance = evaluate_policy_performance()
+    liveness = assess_policy_liveness(
+        status_payload,
+        current_command,
+        responsiveness,
+        policy_performance=policy_performance,
+    )
+    responsiveness["policy_liveness"] = liveness
     policy_input = build_policy_input(
         status_payload,
         parameter_result,
@@ -1770,6 +1856,8 @@ def _build_scoped_llm_policy_input(
         atlas_prior_analysis=atlas_prior_analysis,
         responsiveness_analysis=responsiveness,
     )
+    policy_input["policy_liveness"] = liveness
+    policy_input["policy_performance"] = policy_performance
     policy_input["account_identity"] = {
         "ready": identity["ready"],
         "fingerprint": identity["fingerprint"],
@@ -1946,6 +2034,8 @@ async def run_atlas_llm_policy_proposal() -> dict[str, Any]:
 _LLM_CYCLE_TASKS: dict[str, asyncio.Task[Any]] = {}
 _LLM_SCHEDULE_LOOP_TASK: asyncio.Task[Any] | None = None
 _ZONE_DIRECTIVE_LOOP_TASK: asyncio.Task[Any] | None = None
+_BRAIN_EVENT_LOOP_TASK: asyncio.Task[Any] | None = None
+_BRAIN_EVENT_LAST_ATTEMPT: dict[str, float] = {}
 
 
 def _gemini_cycle_run_record(
@@ -2008,7 +2098,7 @@ def _gemini_cycle_run_record(
     }
 
 
-async def _execute_claimed_llm_cycle(symbol: str) -> None:
+async def _execute_claimed_llm_cycle(symbol: str, *, trigger: str) -> None:
     """Run Gemini outside the namespace lock, then atomically persist its result."""
     command_file, status_file, _runtime_file = symbol_bridge_paths(
         _ATLAS_BRIDGE_DIR,
@@ -2028,6 +2118,9 @@ async def _execute_claimed_llm_cycle(symbol: str) -> None:
                     status_payload,
                     current_command,
                 )
+                policy_input["event_context"] = {"trigger": trigger}
+                policy_input.setdefault("budget", {})["max_changes"] = 12 if trigger == "INITIAL_POLICY_BOOTSTRAP" else 3
+                policy_input["budget"]["model"] = "BASELINE_BOOTSTRAP" if trigger == "INITIAL_POLICY_BOOTSTRAP" else "EVENT_DRIVEN_INCREMENTAL"
 
         provider = build_configured_provider()
         result = await asyncio.to_thread(
@@ -2057,54 +2150,121 @@ async def _execute_claimed_llm_cycle(symbol: str) -> None:
                     live_status = Status.model_validate(live_status_data).model_dump(
                         mode="json"
                     )
-                    live_capital = build_capital_sizing_plan(
-                        live_status,
-                        get_trade_outcomes(closed_limit=200, include_active=False),
-                    )
-                    live_status["_atlas_capital_protection"] = dict(
-                        live_capital.get("loss_protection") or {}
-                    )
-                    context = llm_advisory_context_status(
-                        advisory,
-                        current_status=live_status,
-                        current_command=live_command,
-                    )
-                    if context.get("phase") != "PRE_APPLY":
-                        cycle_status = "STALE_NOT_PERSISTED"
-                    else:
-                        persist_advisory_policy_proposal(advisory)
-                        reconcile_advisory_review_state(advisory)
-                        advisory_id = advisory.get("proposal_id")
-                        autonomous = apply_autonomous_llm_policy(
-                            llm_result=result,
-                            advisory=advisory,
+                    # Background Brain execution does not pass through FastAPI's
+                    # account-scoping middleware.  Scope every outcome/capital/
+                    # event mutation to the live MT5 account explicitly.
+                    with scoped_account_performance(live_status):
+                        live_capital = build_capital_sizing_plan(
+                            live_status,
+                            get_trade_outcomes(closed_limit=200, include_active=False),
+                        )
+                        live_status["_atlas_capital_protection"] = dict(
+                            live_capital.get("loss_protection") or {}
+                        )
+                        context = llm_advisory_context_status(
+                            advisory,
                             current_status=live_status,
                             current_command=live_command,
-                            command_file=command_file,
                         )
-                        if autonomous.get("active_proposal_id"):
-                            advisory_id = str(autonomous["active_proposal_id"])
-                        result["autonomous_application"] = autonomous
-                        cycle_status = (
-                            "AUTONOMOUS_POLICY_APPLIED"
-                            if autonomous.get("applied")
-                            else str(autonomous.get("status") or "READY_FOR_HUMAN_REVIEW")
-                        )
+                        if context.get("phase") != "PRE_APPLY":
+                            cycle_status = "STALE_NOT_PERSISTED"
+                        else:
+                            persist_advisory_policy_proposal(advisory)
+                            reconcile_advisory_review_state(advisory)
+                            advisory_id = advisory.get("proposal_id")
+                            autonomous = apply_autonomous_llm_policy(
+                                llm_result=result,
+                                advisory=advisory,
+                                current_status=live_status,
+                                current_command=live_command,
+                                command_file=command_file,
+                            )
+                            if autonomous.get("active_proposal_id"):
+                                advisory_id = str(autonomous["active_proposal_id"])
+                            result["autonomous_application"] = autonomous
+                            cycle_status = (
+                                "AUTONOMOUS_POLICY_APPLIED"
+                                if autonomous.get("applied")
+                                else str(autonomous.get("status") or "READY_FOR_HUMAN_REVIEW")
+                            )
 
         async with _SYMBOL_REQUEST_LOCK:
             with scoped_symbol_storage(symbol):
-                complete_llm_cycle(
-                    status=cycle_status,
-                    llm_proposal_id=result.get("proposal_id"),
-                    advisory_proposal_id=advisory_id,
-                    critic_verdict=critic_verdict,
-                    run_record=_gemini_cycle_run_record(
-                        result=result,
-                        advisory=advisory,
-                        autonomous=autonomous,
-                        baseline_policy_epoch=int(current_command.get("policy_epoch") or 0),
-                    ),
-                )
+                reviewed_status_data = read_json(status_file) or status_payload
+                reviewed_status = Status.model_validate(reviewed_status_data).model_dump(mode="json")
+                with scoped_account_performance(reviewed_status):
+                    complete_llm_cycle(
+                        status=cycle_status,
+                        llm_proposal_id=result.get("proposal_id"),
+                        advisory_proposal_id=advisory_id,
+                        critic_verdict=critic_verdict,
+                        run_record=_gemini_cycle_run_record(
+                            result=result,
+                            advisory=advisory,
+                            autonomous=autonomous,
+                            baseline_policy_epoch=int(current_command.get("policy_epoch") or 0),
+                        ),
+                    )
+
+                    # P3.54: a successful event-driven loss-streak review is the
+                    # release condition. HOLD / CONSENSUS_NOT_READY / dwell deferral
+                    # are still valid Brain responses: trading resumes under the
+                    # current deterministic policy unless another genuine gate exists.
+                    if trigger == "LOSS_STREAK_REVIEW" and cycle_status not in {
+                        "FAILED", "CANCELLED", "STALE_NOT_PERSISTED"
+                    }:
+                        reviewed_status_data = read_json(status_file) or {}
+                        reviewed_status = Status.model_validate(reviewed_status_data).model_dump(mode="json")
+                        reviewed_outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+                        acknowledge_loss_streak_brain_review(
+                            reviewed_status,
+                            reviewed_outcomes,
+                            llm_proposal_id=result.get("proposal_id"),
+                            advisory_proposal_id=advisory_id,
+                            cycle_status=cycle_status,
+                        )
+
+                    if trigger == "DRAWDOWN_RISK_REVIEW" and cycle_status not in {
+                        "FAILED", "CANCELLED", "STALE_NOT_PERSISTED"
+                    }:
+                        reviewed_status_data = read_json(status_file) or {}
+                        reviewed_status = Status.model_validate(reviewed_status_data).model_dump(mode="json")
+                        reviewed_outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+                        acknowledge_drawdown_review(
+                            reviewed_status,
+                            reviewed_outcomes,
+                            llm_proposal_id=result.get("proposal_id"),
+                            cycle_status=cycle_status,
+                        )
+
+                    if trigger == "INITIAL_POLICY_BOOTSTRAP" and cycle_status not in {
+                        "FAILED", "CANCELLED", "STALE_NOT_PERSISTED"
+                    }:
+                        reviewed_status_data = read_json(status_file) or {}
+                        reviewed_status = Status.model_validate(reviewed_status_data).model_dump(mode="json")
+                        reviewed_outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+                        acknowledge_policy_bootstrap(
+                            reviewed_status,
+                            reviewed_outcomes,
+                            llm_proposal_id=result.get("proposal_id"),
+                            cycle_status=cycle_status,
+                        )
+
+                    if trigger.startswith("EVENT_") and cycle_status not in {
+                        "FAILED", "CANCELLED", "STALE_NOT_PERSISTED"
+                    }:
+                        reviewed_outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+                        try:
+                            event_sequence = int(trigger.rsplit("_", 1)[-1])
+                        except (TypeError, ValueError):
+                            event_sequence = 0
+                        if event_sequence:
+                            acknowledge_brain_event(
+                                reviewed_outcomes,
+                                event_sequence,
+                                llm_proposal_id=result.get("proposal_id"),
+                                cycle_status=cycle_status,
+                            )
     except asyncio.CancelledError:
         async with _SYMBOL_REQUEST_LOCK:
             with scoped_symbol_storage(symbol):
@@ -2136,9 +2296,9 @@ async def _execute_claimed_llm_cycle(symbol: str) -> None:
                 )
 
 
-def _start_claimed_llm_cycle(symbol: str) -> None:
+def _start_claimed_llm_cycle(symbol: str, *, trigger: str) -> None:
     task = asyncio.create_task(
-        _execute_claimed_llm_cycle(symbol),
+        _execute_claimed_llm_cycle(symbol, trigger=trigger),
         name=f"atlas-llm-cycle-{safe_symbol(symbol)}",
     )
     _LLM_CYCLE_TASKS[symbol] = task
@@ -2241,6 +2401,14 @@ def get_atlas_debug_snapshot(full: bool = False) -> dict[str, Any]:
     check("SPREAD_COST_GATE", bool(status.get("scalp_cost_ratio_feasible", True)), f'spread={status.get("spread_points")} cap={status.get("effective_spread_cap_points")}')
     check("CLOSED_LIFECYCLE_PL", all(abs(float(r.get("floating_net_pl") or 0)) < 1e-9 for r in list(outcomes.get("closed") or [])), "Closed outcomes must carry zero floating P/L.")
     check("MARKET_SESSION_TELEMETRY", bool(status.get("market_session_state")), str(status.get("market_session_state") or "Telemetry unavailable until Nyao 44.6.0 is running."))
+    bootstrap = dict(capital.get("policy_bootstrap") or {})
+    live_market_ready = bool(status.get("market_session_open")) and bool(status.get("market_quote_fresh")) and float(status.get("bid") or 0.0) > 0.0 and float(status.get("ask") or 0.0) >= float(status.get("bid") or 0.0)
+    bootstrap_coherent = not (live_market_ready and str(bootstrap.get("state") or "").upper() == "WAITING_FOR_LIVE_MARKET")
+    check(
+        "BASELINE_BOOTSTRAP_COHERENCE",
+        bootstrap_coherent,
+        f'market_open={bool(status.get("market_session_open"))}; quote_fresh={bool(status.get("market_quote_fresh"))}; state={bootstrap.get("state")}; account={bootstrap.get("account_fingerprint") or "UNIDENTIFIED"}',
+    )
     if bool(capital.get("recovery_probe_active")):
         probe_reason = str(status.get("recovery_probe_feasibility_reason") or "NOT_EVALUATED")
         probe_fresh = bool(status.get("recovery_probe_feasibility_fresh", False))
@@ -2321,13 +2489,14 @@ def get_atlas_debug_snapshot(full: bool = False) -> dict[str, Any]:
         ),
     )
     payload={
-      "meta":{"atlas_version":"1.30.58","timestamp":datetime.now(timezone.utc).isoformat(),"symbol":status.get("symbol"),"mode":"FULL" if full else "COMPACT"},
+      "meta":{"atlas_version":"1.30.75","timestamp":datetime.now(timezone.utc).isoformat(),"symbol":status.get("symbol"),"mode":"FULL" if full else "COMPACT"},
       "account":{"balance":status.get("balance"),"equity":status.get("equity"),"floating_profit":status.get("floating_profit"),"drawdown_pct":status.get("equity_drawdown_pct"),"ledger":status.get("account_ledger",{})},
-      "market":{"bid":status.get("bid"),"ask":status.get("ask"),"spread_points":status.get("spread_points"),"atr":status.get("current_atr"),"session_state":status.get("market_session_state"),"session_open":status.get("market_session_open"),"next_close_epoch":status.get("market_next_close_epoch"),"next_open_epoch":status.get("market_next_open_epoch")},
-      "execution":{"buy_score":status.get("buy_score"),"sell_score":status.get("sell_score"),"buy_adjusted_score":status.get("buy_adjusted_score"),"sell_adjusted_score":status.get("sell_adjusted_score"),"buy_threshold":status.get("buy_effective_threshold"),"sell_threshold":status.get("sell_effective_threshold"),"buy_block_reason":status.get("buy_block_reason"),"sell_block_reason":status.get("sell_block_reason"),"global_blocker":status.get("last_global_block_reason"),"structure_feasible":status.get("scalp_structure_feasible"),"structure_reason":status.get("scalp_structure_reason"),"cost_ratio_feasible":status.get("scalp_cost_ratio_feasible"),"recovery_probe":{"active":status.get("recovery_probe_active"),"target_risk_pct":status.get("recovery_probe_target_risk_pct"),"max_executable_risk_pct":status.get("recovery_probe_max_executable_risk_pct"),"minimum_executable_risk_pct":status.get("recovery_probe_minimum_executable_risk_pct"),"minimum_executable_risk_amount":status.get("recovery_probe_minimum_executable_risk_amount"),"minimum_volume":status.get("recovery_probe_minimum_volume"),"broker_override_active":status.get("recovery_probe_broker_override_active"),"feasibility_reason":status.get("recovery_probe_feasibility_reason"),"feasibility_fresh":status.get("recovery_probe_feasibility_fresh"),"feasibility_equity":status.get("recovery_probe_feasibility_equity"),"feasibility_evaluated_at_epoch":status.get("recovery_probe_feasibility_evaluated_at_epoch")},"positions":status.get("positions",[]),"startup_risk_authority":{"ready":startup_ready,"directive_state":directive.get("state"),"generated_at_epoch":directive.get("generated_at_epoch")}},
+      "market":{"bid":status.get("bid"),"ask":status.get("ask"),"spread_points":status.get("spread_points"),"quote_fresh":status.get("market_quote_fresh"),"quote_source":status.get("market_quote_source"),"quote_age_ms":status.get("market_quote_age_ms"),"quote_time_msc":status.get("market_quote_time_msc"),"quote_freshness_limit_ms":status.get("market_quote_freshness_limit_ms"),"atr":status.get("current_atr"),"session_state":status.get("market_session_state"),"session_open":status.get("market_session_open"),"next_close_epoch":status.get("market_next_close_epoch"),"next_open_epoch":status.get("market_next_open_epoch")},
+      "execution":{"buy_score":status.get("buy_score"),"sell_score":status.get("sell_score"),"buy_adjusted_score":status.get("buy_adjusted_score"),"sell_adjusted_score":status.get("sell_adjusted_score"),"buy_threshold":status.get("buy_effective_threshold"),"sell_threshold":status.get("sell_effective_threshold"),"buy_block_reason":status.get("buy_block_reason"),"sell_block_reason":status.get("sell_block_reason"),"global_blocker":status.get("last_global_block_reason"),"structure_feasible":status.get("scalp_structure_feasible"),"structure_reason":status.get("scalp_structure_reason"),"cost_ratio_feasible":status.get("scalp_cost_ratio_feasible"),"preflight":{"telemetry_semantics":"LAST_EXECUTION_ATTEMPT","state":status.get("preflight_state"),"retry_count":status.get("preflight_retry_count"),"retcode":status.get("preflight_retcode"),"comment":status.get("preflight_comment"),"request_price":status.get("preflight_request_price"),"request_sl":status.get("preflight_request_sl"),"request_tp":status.get("preflight_request_tp"),"request_volume":status.get("preflight_request_volume"),"bid":status.get("preflight_bid"),"ask":status.get("preflight_ask"),"stops_level":status.get("preflight_stops_level"),"freeze_level":status.get("preflight_freeze_level"),"sl_distance_points":status.get("preflight_sl_distance_points"),"tp_distance_points":status.get("preflight_tp_distance_points"),"retry_safety_points":status.get("preflight_retry_safety_points"),"min_distance_points":status.get("preflight_min_distance_points"),"detached_stops_fallback_attempted":status.get("preflight_detached_stops_fallback_attempted"),"detached_stops_fallback_accepted":status.get("preflight_detached_stops_fallback_accepted"),"detached_stops_retcode":status.get("preflight_detached_stops_retcode"),"protection_state":status.get("preflight_protection_state"),"intended_risk_amount":status.get("preflight_intended_risk_amount"),"actual_fill_price":status.get("preflight_actual_fill_price"),"attached_sl":status.get("preflight_attached_sl"),"attached_tp":status.get("preflight_attached_tp"),"protection_retcode":status.get("preflight_protection_retcode"),"entry_price_integrity_state":status.get("preflight_entry_price_integrity_state"),"candidate_reference_price":status.get("preflight_candidate_reference_price"),"send_reference_price":status.get("preflight_send_reference_price"),"send_bid":status.get("preflight_send_bid"),"send_ask":status.get("preflight_send_ask"),"fresh_tick_time_msc":status.get("preflight_fresh_tick_time_msc"),"quote_age_ms":status.get("preflight_quote_age_ms"),"quote_freshness_limit_ms":status.get("preflight_quote_freshness_limit_ms"),"quote_freshness_state":status.get("preflight_quote_freshness_state"),"candidate_to_send_drift_points":status.get("preflight_candidate_to_send_drift_points"),"allowed_entry_drift_points":status.get("preflight_allowed_entry_drift_points"),"send_to_fill_drift_points":status.get("preflight_send_to_fill_drift_points"),"initial_stop_authority":status.get("initial_stop_authority"),"initial_stop_atr_floor_points":status.get("initial_stop_atr_floor_points"),"initial_stop_swing_price":status.get("initial_stop_swing_price"),"initial_stop_swing_points":status.get("initial_stop_swing_points"),"initial_stop_buffer_points":status.get("initial_stop_buffer_points"),"initial_stop_final_points":status.get("initial_stop_final_points")},"recovery_probe":{"active":status.get("recovery_probe_active"),"target_risk_pct":status.get("recovery_probe_target_risk_pct"),"max_executable_risk_pct":status.get("recovery_probe_max_executable_risk_pct"),"minimum_executable_risk_pct":status.get("recovery_probe_minimum_executable_risk_pct"),"minimum_executable_risk_amount":status.get("recovery_probe_minimum_executable_risk_amount"),"minimum_volume":status.get("recovery_probe_minimum_volume"),"broker_override_active":status.get("recovery_probe_broker_override_active"),"feasibility_reason":status.get("recovery_probe_feasibility_reason"),"feasibility_fresh":status.get("recovery_probe_feasibility_fresh"),"feasibility_equity":status.get("recovery_probe_feasibility_equity"),"feasibility_evaluated_at_epoch":status.get("recovery_probe_feasibility_evaluated_at_epoch")},"positions":status.get("positions",[]),"startup_risk_authority":{"ready":startup_ready,"directive_state":directive.get("state"),"generated_at_epoch":directive.get("generated_at_epoch")}},
       "capital":capital, "zone":zone_plan, "risk_units":risk_units, "performance":evaluate_policy_performance(),
       "brain":{"consensus":consensus,"applications":applications,"observations":observations,"schedule":get_llm_cycle_schedule()},
       "outcomes":outcomes,
+      "lifecycle_contract":{"version":status.get("lifecycle_contract_version"),"started_at_epoch":status.get("lifecycle_contract_started_at_epoch"),"recent_events":status.get("recent_lifecycle_events",[]),"recent_failure_count":sum(1 for e in list(status.get("recent_lifecycle_events") or []) if isinstance(e,dict) and str(e.get("result") or "").upper() in {"FAILED","REJECTED"})},
       "integrity":{"healthy":all(x["status"]=="PASS" for x in integrity),"checks":integrity,"warnings":[x["detail"] for x in integrity if x["status"]!="PASS"]},
     }
     return _redact_debug(payload)
@@ -2441,7 +2610,7 @@ async def run_atlas_llm_cycle_now() -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="Nyao symbol is not available.")
     claim = claim_llm_cycle(trigger="HUMAN_RUN_NOW", force=True)
     if claim.get("claimed"):
-        _start_claimed_llm_cycle(symbol)
+        _start_claimed_llm_cycle(symbol, trigger="HUMAN_RUN_NOW")
     return claim
 
 
@@ -2455,17 +2624,88 @@ async def _llm_schedule_loop() -> None:
                 async with _SYMBOL_REQUEST_LOCK:
                     with scoped_symbol_storage(symbol):
                         claim = claim_llm_cycle(
-                            trigger="SCHEDULED_INTERVAL",
+                            trigger="HEALTH_HEARTBEAT",
                             force=False,
                         )
                 if claim.get("claimed"):
-                    _start_claimed_llm_cycle(symbol)
+                    _start_claimed_llm_cycle(symbol, trigger="HEALTH_HEARTBEAT")
         except asyncio.CancelledError:
             raise
         except Exception:
             # One malformed/offline symbol must not stop schedules for all symbols.
             pass
         await asyncio.sleep(15)
+
+
+async def _brain_event_loop() -> None:
+    """Wake Atlas Brain for material reasoning events instead of wall-clock optimization.
+
+    Phase P3.54 starts with the highest-value event: a completed-loss streak that
+    reaches or extends the review threshold. The capital engine persists the
+    BRAIN_REVIEW_PENDING state; this loop claims Gemini immediately and retries
+    transient provider failures with a short debounce rather than imposing a
+    trading timeout. Additional market/regime/recovery events can use the same
+    coordinator without reintroducing a fixed optimization cadence.
+    """
+    retry_cooldown_seconds = 30.0
+    while True:
+        try:
+            loop_now = asyncio.get_running_loop().time()
+            for item in discover_bridge_symbols(_ATLAS_BRIDGE_DIR):
+                symbol = str(item.get("symbol") or "").strip()
+                if not symbol or symbol in _LLM_CYCLE_TASKS:
+                    continue
+                last_attempt = float(_BRAIN_EVENT_LAST_ATTEMPT.get(symbol) or 0.0)
+                if loop_now - last_attempt < retry_cooldown_seconds:
+                    continue
+
+                async with _SYMBOL_REQUEST_LOCK:
+                    with scoped_symbol_storage(symbol):
+                        _command_file, status_file, _runtime_file = symbol_bridge_paths(
+                            _ATLAS_BRIDGE_DIR, symbol
+                        )
+                        status_data = read_json(status_file) or {}
+                        if not status_data:
+                            continue
+                        status = Status.model_validate(status_data).model_dump(mode="json")
+                        with scoped_account_performance(status):
+                            outcomes = get_trade_outcomes(closed_limit=2_000, include_active=True)
+                            capital = build_capital_sizing_plan(status, outcomes)
+                            protection = dict(capital.get("loss_protection") or {})
+                            drawdown_review = evaluate_drawdown_review(status, outcomes)
+
+                            trigger = None
+                            bootstrap = evaluate_policy_bootstrap(status, outcomes)
+                            if bool(bootstrap.get("pending")):
+                                trigger = "INITIAL_POLICY_BOOTSTRAP"
+                            elif str(protection.get("state") or "").upper() == "BRAIN_REVIEW_PENDING":
+                                trigger = "LOSS_STREAK_REVIEW"
+                            elif bool(drawdown_review.get("pending")):
+                                trigger = "DRAWDOWN_RISK_REVIEW"
+                            else:
+                                material_event = next_brain_event(status, outcomes)
+                                if material_event:
+                                    trigger = f"EVENT_{material_event.get('event')}_{int(material_event.get('sequence') or 0)}"
+                                else:
+                                    continue
+
+                            claim = claim_llm_cycle(
+                                trigger=trigger,
+                                force=True,
+                            )
+                            if claim.get("claimed"):
+                                _BRAIN_EVENT_LAST_ATTEMPT[symbol] = loop_now
+
+                if claim.get("claimed"):
+                    _start_claimed_llm_cycle(symbol, trigger=trigger)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A malformed/offline symbol or transient provider precondition must
+            # not kill the event coordinator. Pending state remains durable and
+            # will be retried after the debounce window.
+            pass
+        await asyncio.sleep(1)
 
 
 def _refresh_zone_directive_for_symbol(symbol: str) -> None:
@@ -2633,7 +2873,7 @@ async def _zone_directive_loop() -> None:
 
 @app.on_event("startup")
 async def start_llm_cycle_scheduler() -> None:
-    global _LLM_SCHEDULE_LOOP_TASK, _ZONE_DIRECTIVE_LOOP_TASK
+    global _LLM_SCHEDULE_LOOP_TASK, _ZONE_DIRECTIVE_LOOP_TASK, _BRAIN_EVENT_LOOP_TASK
     symbols = [str(item.get("symbol") or "").strip() for item in discover_bridge_symbols(_ATLAS_BRIDGE_DIR)]
     symbols = [symbol for symbol in symbols if symbol]
 
@@ -2653,7 +2893,11 @@ async def start_llm_cycle_scheduler() -> None:
 
     _LLM_SCHEDULE_LOOP_TASK = asyncio.create_task(
         _llm_schedule_loop(),
-        name="atlas-llm-cycle-scheduler",
+        name="atlas-brain-health-heartbeat",
+    )
+    _BRAIN_EVENT_LOOP_TASK = asyncio.create_task(
+        _brain_event_loop(),
+        name="atlas-brain-event-coordinator",
     )
     _ZONE_DIRECTIVE_LOOP_TASK = asyncio.create_task(
         _zone_directive_loop(),
@@ -2675,6 +2919,9 @@ async def stop_llm_cycle_scheduler() -> None:
     if _LLM_SCHEDULE_LOOP_TASK and not _LLM_SCHEDULE_LOOP_TASK.done():
         _LLM_SCHEDULE_LOOP_TASK.cancel()
         tasks.append(_LLM_SCHEDULE_LOOP_TASK)
+    if _BRAIN_EVENT_LOOP_TASK and not _BRAIN_EVENT_LOOP_TASK.done():
+        _BRAIN_EVENT_LOOP_TASK.cancel()
+        tasks.append(_BRAIN_EVENT_LOOP_TASK)
     if _ZONE_DIRECTIVE_LOOP_TASK and not _ZONE_DIRECTIVE_LOOP_TASK.done():
         _ZONE_DIRECTIVE_LOOP_TASK.cancel()
         tasks.append(_ZONE_DIRECTIVE_LOOP_TASK)
@@ -2734,7 +2981,7 @@ button{cursor:pointer}
 .content{padding:28px 30px 60px;max-width:1540px;margin:0 auto}
 .view{display:none}.view.active{display:block}
 .page-head{margin-bottom:22px}.page-head h2{margin:0;font-size:25px}.page-head p{margin:6px 0 0;color:var(--muted)}
-.grid{display:grid;gap:16px}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.grid{display:grid;gap:16px}.g5{grid-template-columns:repeat(5,minmax(0,1fr))}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px}
 .card h3{margin:0 0 14px;font-size:14px}.label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.value{font-size:25px;font-weight:760;margin-top:5px}.value.small{font-size:16px}.muted{color:var(--muted)}
 .hero{padding:22px;display:grid;grid-template-columns:1.5fr 1fr;gap:18px}
@@ -2815,8 +3062,8 @@ table{width:100%;border-collapse:collapse}th{text-align:left;color:var(--muted);
 details.raw summary{cursor:pointer;color:var(--muted);font-weight:650}pre{white-space:pre-wrap;word-break:break-word;background:#090d13;border:1px solid var(--border);padding:12px;border-radius:11px;max-height:430px;overflow:auto}
 .toast{position:fixed;right:22px;bottom:22px;max-width:430px;padding:12px 14px;border-radius:12px;background:#151e2a;border:1px solid var(--border);box-shadow:var(--shadow);display:none;z-index:60}.toast.show{display:block}.toast.bad{border-color:rgba(255,111,125,.45)}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.68);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}.modal.show{display:flex}.modal-card{width:min(640px,100%);max-height:88vh;overflow:auto;background:#101722;border:1px solid var(--border);border-radius:18px;padding:20px}.modal-card h3{margin-top:0}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
-@media(max-width:1050px){.g4,.g3{grid-template-columns:repeat(2,1fr)}.control-grid{grid-template-columns:repeat(2,1fr)}.hero{grid-template-columns:1fr}}
-@media(max-width:760px){.shell{grid-template-columns:1fr}.sidebar{height:auto;position:static;border-right:0;border-bottom:1px solid var(--border)}.sidebar-bottom{position:static;margin-top:14px}.nav{grid-template-columns:repeat(3,1fr)}.nav button{text-align:center;font-size:11px;padding:9px 4px}.topbar{padding:0 16px}.content{padding:20px 14px 50px}.g4,.g3,.g2{grid-template-columns:1fr}.control-grid{grid-template-columns:1fr}.top-meta{display:none}.event{grid-template-columns:1fr}}
+@media(max-width:1050px){.g5,.g4,.g3{grid-template-columns:repeat(2,1fr)}.control-grid{grid-template-columns:repeat(2,1fr)}.hero{grid-template-columns:1fr}}
+@media(max-width:760px){.shell{grid-template-columns:1fr}.sidebar{height:auto;position:static;border-right:0;border-bottom:1px solid var(--border)}.sidebar-bottom{position:static;margin-top:14px}.nav{grid-template-columns:repeat(3,1fr)}.nav button{text-align:center;font-size:11px;padding:9px 4px}.topbar{padding:0 16px}.content{padding:20px 14px 50px}.g5,.g4,.g3,.g2{grid-template-columns:1fr}.control-grid{grid-template-columns:1fr}.top-meta{display:none}.event{grid-template-columns:1fr}}
 
 /* Atlas operator experience v2 */
 :root{
@@ -2909,6 +3156,11 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 /* Atlas 1.30.44 portfolio risk allocation */
 .risk-allocation-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin:4px 0 13px}.risk-allocation-total{font-size:26px;font-weight:800;letter-spacing:-.03em;margin:4px 0}.risk-allocation-hard{display:grid;text-align:right;gap:3px}.risk-allocation-hard strong{font-size:18px}.risk-allocation-bar{height:15px;border:1px solid var(--border);border-radius:999px;overflow:hidden;display:flex;background:#081018}.risk-segment{height:100%;transition:width .25s ease}.risk-segment.active{background:rgba(101,161,255,.85)}.risk-segment.zone{background:rgba(241,190,79,.9)}.risk-segment.free{background:rgba(72,221,164,.8)}.risk-allocation-legend{display:flex;flex-wrap:wrap;gap:16px;margin:9px 0 14px;color:var(--muted);font-size:10px}.risk-allocation-legend span{display:flex;align-items:center;gap:6px}.risk-dot{width:8px;height:8px;border-radius:50%;display:inline-block}.risk-dot.active{background:rgba(101,161,255,.9)}.risk-dot.zone{background:rgba(241,190,79,.95)}.risk-dot.free{background:rgba(72,221,164,.9)}.risk-allocation-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.risk-allocation-card{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--panel3);display:grid;gap:8px;min-width:0}.risk-allocation-card .risk-card-head{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.risk-allocation-card .risk-card-head strong{font-size:12px}.risk-allocation-card .risk-amount{font-size:19px;font-weight:800}.risk-allocation-card .risk-detail{display:grid;grid-template-columns:1fr auto;gap:7px;border-top:1px solid rgba(255,255,255,.055);padding-top:7px;font-size:10px}.risk-allocation-card .risk-detail span{color:var(--muted)}.opportunity-item.qualifying{border-color:rgba(241,190,79,.32);background:linear-gradient(90deg,rgba(241,190,79,.035),transparent 45%)}@media(max-width:900px){.risk-allocation-cards{grid-template-columns:1fr}.risk-allocation-hero{align-items:flex-start;flex-direction:column}.risk-allocation-hard{text-align:left}}
 
+/* Atlas Brain operator-first revamp — UI only */
+.atlas-brain-head h2{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.brain-mode-chip{display:inline-flex;align-items:center;padding:4px 8px;border:1px solid rgba(101,161,255,.34);border-radius:999px;background:rgba(101,161,255,.08);color:#83b6ff;font-size:9px;letter-spacing:.08em;font-weight:850;vertical-align:middle}.brain-status-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:9px;margin-top:14px}.brain-status-card{min-width:0;padding:12px 13px;border:1px solid var(--border);border-radius:12px;background:linear-gradient(145deg,rgba(17,28,43,.96),rgba(8,14,22,.92));display:grid;gap:4px}.brain-status-card strong{font-size:13px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brain-status-card span{font-size:9px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brain-primary-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(360px,.8fr);gap:14px}.brain-now-banner{border:1px solid rgba(72,221,164,.18);background:linear-gradient(100deg,rgba(72,221,164,.055),rgba(101,161,255,.025));border-radius:12px;padding:14px 15px;margin-top:12px}.brain-now-banner strong{font-size:15px}.brain-now-banner p{margin:5px 0 0;color:var(--muted);line-height:1.5}.brain-now-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}.brain-now-grid>div{padding:10px 11px;border:1px solid rgba(255,255,255,.055);border-radius:10px;background:#091018;min-width:0}.brain-now-grid span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.055em}.brain-now-grid strong{display:block;margin-top:4px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brain-runtime-changes:empty{display:none}.brain-runtime-note{margin-top:10px}.brain-activity-list{display:grid;gap:0;margin-top:8px}.brain-activity-item{display:grid;grid-template-columns:12px 70px minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.055)}.brain-activity-item:last-child{border-bottom:0}.brain-activity-dot{width:8px;height:8px;margin-top:4px;border-radius:50%;background:var(--blue);box-shadow:0 0 0 3px rgba(101,161,255,.08)}.brain-activity-time{font-size:9px;color:var(--muted)}.brain-activity-main strong{font-size:11px}.brain-activity-main p{margin:3px 0 0;font-size:10px;color:var(--muted);line-height:1.45}.brain-learning-signals .section-head{margin-bottom:8px}.consensus-compact{grid-template-columns:repeat(3,minmax(0,1fr));max-height:none;overflow:visible}.consensus-compact .consensus-card{padding:11px;gap:9px}.consensus-compact .consensus-gate{font-size:9px}.brain-details{margin-top:10px;border-top:1px solid rgba(255,255,255,.055);padding-top:8px}.brain-details summary{cursor:pointer;color:var(--soft);font-size:10px;font-weight:750}.brain-history-card{overflow:hidden}.brain-history-viewport{max-height:430px;overflow:auto;padding-right:3px;margin-top:4px}.brain-history-viewport .brain-tab-panel{margin-top:8px}.brain-history-viewport .gemini-run-history,.brain-history-viewport .policy-timeline{gap:7px}.brain-history-viewport .gemini-run-row,.brain-history-viewport .policy-record{padding:10px}.brain-history-viewport .observation-list{max-height:none}.brain-history-viewport::-webkit-scrollbar{width:7px}.brain-history-viewport::-webkit-scrollbar-thumb{background:#24364d;border-radius:99px}
+@media(max-width:1280px){.brain-status-strip{grid-template-columns:repeat(3,minmax(0,1fr))}.brain-primary-grid{grid-template-columns:1fr}.consensus-compact{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.brain-status-strip,.consensus-compact{grid-template-columns:1fr}.brain-now-grid{grid-template-columns:1fr 1fr}.brain-activity-item{grid-template-columns:12px 58px minmax(0,1fr)}.brain-activity-item>.badge{grid-column:3}.brain-history-viewport{max-height:520px}}
+
 /* Atlas Brain policy lifecycle — 1.30.43 */
 .gemini-run-history,.policy-window-list{display:grid;gap:9px}
 .gemini-run-row,.policy-window-row{border:1px solid var(--border);border-radius:12px;background:var(--panel3);padding:12px;cursor:pointer}
@@ -2920,7 +3172,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 .zone-card.invalidated{opacity:.82;border-color:rgba(255,91,116,.28);background:linear-gradient(90deg,rgba(255,91,116,.045),var(--panel3) 36%)}
 .zone-plan.invalidated{border-color:rgba(255,91,116,.35);background:linear-gradient(90deg,rgba(255,91,116,.05),var(--panel2) 45%)}
 
-/* Atlas Help & Guide — 1.30.58 */
+/* Atlas Help & Guide — 1.30.75 */
 .help-hero{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(280px,.7fr);gap:14px;align-items:stretch}
 .help-hero-copy{padding:24px}.help-hero-copy h3{font-size:22px;margin:0 0 8px}.help-hero-copy p{max-width:840px;line-height:1.7}
 .help-search-wrap{display:flex;gap:10px;align-items:center;margin-top:16px}.help-search-wrap .search{flex:1;min-width:0}
@@ -3061,7 +3313,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
             <div class="kpi"><div class="label">Trading mode</div><div class="value small" id="hero-risk">—</div></div>
             <div class="kpi"><div class="label">Campaign risk</div><div class="value small" id="hero-policy">—</div></div>
             <div class="kpi"><div class="label">Live / staged</div><div class="value small" id="hero-open">—</div></div>
-            <div class="kpi"><div class="label">Next brain review</div><div class="value small" id="hero-chains">—</div></div>
+            <div class="kpi"><div class="label">Health heartbeat</div><div class="value small" id="hero-chains">—</div></div>
           </div></div>
           </div>
         </div>
@@ -3283,7 +3535,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
       </section>
 
       <section id="view-positions" class="view">
-        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><div class="row"><span class="badge info">NYAO EXECUTION</span><span class="badge ok">RISK UI · 1.30.58</span></div></div>
+        <div class="page-head"><div><h2>Portfolio</h2><p>Live exposure, account impact, and position management.</p></div><div class="row"><span class="badge info">NYAO EXECUTION</span><span class="badge ok">RISK UI · 1.30.75</span></div></div>
         <div class="grid g3">
           <div class="card"><div class="label">Strategy positions</div><div class="value" id="p-count">0</div></div>
           <div class="card"><div class="label">Total lots remaining</div><div class="value" id="p-lots">0.00</div></div>
@@ -3377,44 +3629,59 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
       </section>
 
       <section id="view-atlas" class="view">
-        <div class="page-head"><div><h2>Atlas Brain</h2><p>See what policy is active, what Gemini is learning, how consensus is forming, and how policy evolves over time.</p></div><span class="badge info">GEMINI + DETERMINISTIC LAYER</span></div>
-        <div class="brain-section-label"><span>01</span><div><strong>Policy Control Center</strong><p>Active runtime authority and the next candidate policy window belong together.</p></div></div>
-        <div class="brain-policy-control-grid">
-          <div class="card">
-            <div class="section-head"><div><h3>Runtime policy</h3><p>Authoritative Nyao policy actually active now. This card never displays reasoning from a newer Gemini observation.</p></div><span id="runtime-policy-badge" class="badge">—</span></div>
-            <div class="grid g4">
-              <div class="kpi"><div class="label">Policy epoch</div><div class="value small" id="runtime-policy-epoch">—</div></div>
-              <div class="kpi"><div class="label">Command</div><div class="value small" id="runtime-policy-command">—</div></div>
-              <div class="kpi"><div class="label">Runtime controls</div><div class="value small" id="runtime-policy-count">—</div></div>
-              <div class="kpi"><div class="label">Reconciliation</div><div class="value small" id="runtime-policy-reconciliation">—</div></div>
-            </div>
-            <div id="runtime-policy-changes" class="changes" style="margin-top:12px"></div>
-            <div id="runtime-policy-rationale" class="callout" style="margin-top:12px">Loading active runtime policy lineage.</div>
-            <div class="policy-actions"><button class="btn primary" onclick="openActivePolicyInspector()">Inspect all runtime controls</button><button class="btn" onclick="brainTab('history')">Policy history</button></div>
-          </div>
-          <div class="card">
-            <div class="section-head">
-              <div><h3>Candidate consensus</h3><p>Accepted Gemini observations for the active policy baseline. Gemini runs and accepted observations are tracked separately.</p></div>
-              <span class="badge info">LEARNING WINDOW</span>
-            </div>
-            <div id="policy-consensus-summary" class="callout">Consensus window is loading.</div>
-            <div id="policy-consensus-controls" class="consensus-table consensus-full"></div>
-            <div id="policy-window-history" class="policy-window-history"></div>
-          </div>
-        </div>
-        <div class="card section">
-          <div class="section-head"><div><h3>Policy lineage</h3><p>Inspect every applied policy epoch and the accepted Gemini observations that fed policy learning.</p></div><span class="badge info">AUDITABLE LINEAGE</span></div>
-          <div class="brain-tabs">
-            <button id="brain-tab-runs" class="brain-tab active" onclick="brainTab('runs')">Gemini run history</button>
-            <button id="brain-tab-observations" class="brain-tab" onclick="brainTab('observations')">Accepted observations</button>
-            <button id="brain-tab-history" class="brain-tab" onclick="brainTab('history')">Applied policy epochs</button>
-          </div>
-          <div id="brain-panel-runs" class="brain-tab-panel active"><div id="gemini-run-history" class="gemini-run-history"></div></div>
-          <div id="brain-panel-observations" class="brain-tab-panel"><div id="policy-observation-list" class="observation-list"></div></div>
-          <div id="brain-panel-history" class="brain-tab-panel"><div id="policy-registry-list" class="policy-timeline"></div></div>
+        <div class="page-head atlas-brain-head"><div><h2>Atlas Brain <span class="brain-mode-chip">EVENT-DRIVEN</span></h2><p>Operational status first. Learning and audit detail stay available without taking over the page.</p></div><span class="badge info">GEMINI + DETERMINISTIC LAYER</span></div>
+
+        <div class="brain-status-strip">
+          <div class="brain-status-card"><div class="label">Brain mode</div><strong>EVENT-DRIVEN</strong><span>Material events wake Gemini</span></div>
+          <div class="brain-status-card"><div class="label">Runtime</div><strong id="brain-hero-runtime">—</strong><span>Active NYAO authority</span></div>
+          <div class="brain-status-card"><div class="label">Qualification</div><strong id="brain-hero-qualification">—</strong><span id="brain-hero-qualification-sub">Account state</span></div>
+          <div class="brain-status-card"><div class="label">Trading</div><strong id="brain-hero-trading">—</strong><span>Fresh risk permission</span></div>
+          <div class="brain-status-card"><div class="label">Last trigger</div><strong id="brain-hero-trigger">—</strong><span id="brain-hero-trigger-time">No Brain run yet</span></div>
+          <div class="brain-status-card"><div class="label">Pending events</div><strong id="brain-hero-queue">0</strong><span id="brain-hero-queue-sub">Queue clear</span></div>
         </div>
 
-        <div class="brain-section-label"><span>02</span><div><strong>Learning & Market Evidence</strong><p>What Gemini currently sees and whether scalp execution is responsive enough.</p></div></div>
+        <div class="brain-primary-grid section">
+          <div class="card brain-operational-card">
+            <div class="section-head"><div><h3>What matters now</h3><p>The operator view: can Atlas act, what policy is live, and is anything asking for attention?</p></div><span id="runtime-policy-badge" class="badge">—</span></div>
+            <div class="brain-now-banner"><div><strong id="brain-now-title">Checking Atlas Brain…</strong><p id="brain-now-copy">Waiting for runtime and account state.</p></div></div>
+            <div class="brain-now-grid">
+              <div><span>Policy epoch</span><strong id="runtime-policy-epoch">—</strong></div>
+              <div><span>Command</span><strong id="runtime-policy-command">—</strong></div>
+              <div><span>Runtime controls</span><strong id="runtime-policy-count">—</strong></div>
+              <div><span>Reconciliation</span><strong id="runtime-policy-reconciliation">—</strong></div>
+            </div>
+            <div id="runtime-policy-changes" class="changes brain-runtime-changes"></div>
+            <div id="runtime-policy-rationale" class="callout brain-runtime-note">Loading active runtime policy lineage.</div>
+            <div class="policy-actions"><button class="btn primary" onclick="openActivePolicyInspector()">Inspect runtime controls</button><button class="btn" onclick="brainTab('history');document.getElementById('brain-history-card')?.scrollIntoView({behavior:'smooth'})">View applied epochs</button></div>
+          </div>
+          <div class="card brain-activity-card">
+            <div class="section-head"><div><h3>Recent Brain activity</h3><p>Only the latest meaningful events. Full audit history is below.</p></div><span class="badge info">LIVE TIMELINE</span></div>
+            <div id="brain-recent-activity" class="brain-activity-list"><div class="callout">Waiting for Brain activity.</div></div>
+          </div>
+        </div>
+
+        <div class="card section brain-learning-signals">
+          <div class="section-head"><div><h3>Learning signals</h3><p>Candidate recommendations are evidence building toward a future policy. They are not the active runtime.</p></div><span class="badge info">SECONDARY</span></div>
+          <div id="policy-consensus-summary" class="callout">Learning window is loading.</div>
+          <div id="policy-consensus-controls" class="consensus-table consensus-compact"></div>
+          <details class="brain-details"><summary>Policy learning windows</summary><div id="policy-window-history" class="policy-window-history"></div></details>
+        </div>
+
+        <div id="brain-history-card" class="card section brain-history-card">
+          <div class="section-head"><div><h3>Brain history & policy lineage</h3><p>Compact audit trail. Open an item only when you need the detail.</p></div><span class="badge info">AUDITABLE</span></div>
+          <div class="brain-tabs">
+            <button id="brain-tab-runs" class="brain-tab active" onclick="brainTab('runs')">Recent runs</button>
+            <button id="brain-tab-observations" class="brain-tab" onclick="brainTab('observations')">Accepted observations</button>
+            <button id="brain-tab-history" class="brain-tab" onclick="brainTab('history')">Applied epochs</button>
+          </div>
+          <div class="brain-history-viewport">
+            <div id="brain-panel-runs" class="brain-tab-panel active"><div id="gemini-run-history" class="gemini-run-history"></div></div>
+            <div id="brain-panel-observations" class="brain-tab-panel"><div id="policy-observation-list" class="observation-list"></div></div>
+            <div id="brain-panel-history" class="brain-tab-panel"><div id="policy-registry-list" class="policy-timeline"></div></div>
+          </div>
+        </div>
+
+        <div class="brain-section-label"><span>02</span><div><strong>Analysis & Evidence</strong><p>Deeper reasoning for when you want to inspect what Gemini sees, not the first thing you have to scroll through.</p></div></div>
         <div class="brain-learning-grid">
           <div class="card">
             <div class="section-head"><div><h3>Latest Gemini analysis</h3><p>Newest proposal/observation. This may be newer than the active runtime policy and is not treated as active evidence.</p></div><span id="latest-analysis-badge" class="badge info">LATEST</span></div>
@@ -3451,33 +3718,59 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
         </div>
         
 
-        <div class="brain-section-label"><span>03</span><div><strong>Policy Automation & Intelligence</strong><p>Control review cadence and inspect the evidence Atlas uses to investigate parameter changes.</p></div></div>
+        <div class="brain-section-label"><span>03</span><div><strong>Event-Driven Brain Runtime</strong><p>Atlas wakes Gemini on material trading events. The periodic timer is only a low-frequency health heartbeat.</p></div></div>
         <div class="card">
-          <div class="section-head"><div><h3>Gemini policy cycle</h3><p>Optimizes the full Nyao scalp runtime policy using live state, performance, responsiveness and deterministic zone context. Zone policy remains read-only.</p></div><span id="cycle-badge" class="badge">—</span></div>
+          <div class="section-head"><div><h3>Brain event runtime</h3><p>Material events trigger Gemini immediately. Validated reasoning is autonomous; deterministic execution and account-safety gates remain authoritative.</p></div><span id="cycle-badge" class="badge">—</span></div>
           <div class="grid g4">
             <div class="kpi"><div class="label">Last run</div><div class="value small" id="cycle-last">—</div></div>
-            <div class="kpi"><div class="label">Next run</div><div class="value small" id="cycle-next">—</div></div>
+            <div class="kpi"><div class="label">Health heartbeat</div><div class="value small" id="cycle-next">—</div></div>
             <div class="kpi"><div class="label">Run count</div><div class="value small" id="cycle-count">0</div></div>
             <div class="kpi"><div class="label">Last critic</div><div class="value small" id="cycle-critic">—</div></div>
           </div>
           <div class="row" style="margin-top:14px;align-items:flex-end;flex-wrap:wrap">
-            <div style="min-width:170px"><div class="label" style="margin-bottom:6px">Interval (minutes)</div><input id="cycle-interval" class="search" type="number" min="15" max="1440" step="15" value="240"></div>
-            <div style="min-width:170px"><div class="label" style="margin-bottom:6px">Application mode</div><select id="cycle-mode" class="search"><option value="SUPERVISED">Supervised</option><option value="AUTONOMOUS">Autonomous</option></select></div>
+            <div style="min-width:170px"><div class="label" style="margin-bottom:6px">Health heartbeat (minutes)</div><input id="cycle-interval" class="search" type="number" min="60" max="1440" step="60" value="60"></div>
             <div style="min-width:170px"><div class="label" style="margin-bottom:6px">Minimum dwell (minutes)</div><input id="cycle-dwell" class="search" type="number" min="30" max="1440" step="30" value="240"></div>
             <div style="min-width:160px"><div class="label" style="margin-bottom:6px">Minimum confidence</div><input id="cycle-confidence" class="search" type="number" min="0" max="100" step="1" value="70"></div>
-            <label class="callout" style="display:flex;align-items:center;gap:9px;margin:0"><input id="cycle-enabled" type="checkbox"> Enable scheduled policy cycles</label>
-            <div class="actions"><button id="btn-save-cycle" class="btn" onclick="saveLlmCycleSchedule()">Save schedule</button><button id="btn-run-cycle" class="btn primary" onclick="runLlmCycleNow()">Run analysis now</button></div>
+            <label class="callout" style="display:flex;align-items:center;gap:9px;margin:0"><input id="cycle-enabled" type="checkbox"> Enable health heartbeat</label>
+            <div class="actions"><button id="btn-save-cycle" class="btn" onclick="saveLlmCycleSchedule()">Save Brain runtime</button><button id="btn-run-cycle" class="btn primary" onclick="runLlmCycleNow()">Run analysis now</button></div>
           </div>
-          <div id="cycle-detail" class="callout" style="margin-top:12px">Schedule is loading. Application authority remains manual.</div>
+          <div id="cycle-detail" class="callout" style="margin-top:12px">Event runtime is loading.</div>
         </div>
         
+        <div class="grid g2 section">
+          <div class="card">
+            <div class="section-head"><div><h3>Baseline Qualification</h3><p>NYAO defaults are seed values only. Atlas qualifies the initial 157-control policy with Gemini + Critic under explicit authority tiers.</p></div><span id="bootstrap-badge" class="badge">—</span></div>
+            <div class="grid g3">
+              <div class="kpi"><div class="label">Baseline state</div><div class="value small" id="bootstrap-state">—</div></div>
+              <div class="kpi"><div class="label">Bootstrap budget</div><div class="value small" id="bootstrap-budget">12</div></div>
+              <div class="kpi"><div class="label">Seed authority</div><div class="value small" id="bootstrap-authority">—</div></div>
+            </div>
+            <div id="bootstrap-copy" class="callout" style="margin-top:12px">Loading baseline qualification state.</div>
+          </div>
+          <div class="card">
+            <div class="section-head"><div><h3>Brain Event Queue</h3><p>Only material state transitions wake Gemini; first observation establishes a watermark instead of replaying historical activity.</p></div><span id="event-queue-badge" class="badge info">0 PENDING</span></div>
+            <div id="event-queue" class="changes"><div class="callout">No pending material events.</div></div>
+          </div>
+        </div>
+
+        <div class="card section">
+          <div class="section-head"><div><h3>NYAO Lifecycle Telemetry Contract</h3><p>Authoritative execution and management outcomes from the EA. Atlas uses these events to separate strategy losses from implementation-contaminated outcomes.</p></div><span id="lifecycle-contract-badge" class="badge">—</span></div>
+          <div class="grid g4">
+            <div class="kpi"><div class="label">Contract</div><div class="value small" id="lifecycle-contract-version">—</div></div>
+            <div class="kpi"><div class="label">EA instance</div><div class="value small" id="lifecycle-contract-instance">—</div></div>
+            <div class="kpi"><div class="label">Recent events</div><div class="value small" id="lifecycle-contract-events">0</div></div>
+            <div class="kpi"><div class="label">Recent failures</div><div class="value small" id="lifecycle-contract-failures">0</div></div>
+          </div>
+          <div id="lifecycle-contract-copy" class="callout" style="margin-top:12px">Waiting for NYAO lifecycle telemetry.</div>
+        </div>
+
         <div class="card section">
           <div class="section-head"><div><h3>Parameter Intelligence</h3><p>P2.2 ranks all 157 controls using parameter-specific evidence, observed runtime variation and descriptive outcome associations.</p></div><span id="pi-mode" class="badge info">P2.2</span></div>
           <div class="grid g4">
             <div class="kpi"><div class="label">Registry</div><div class="value small" id="pi-count">157</div></div>
             <div class="kpi"><div class="label">Position-sensitive</div><div class="value small" id="pi-locked">53</div></div>
             <div class="kpi"><div class="label">Change budget</div><div class="value small" id="pi-budget">3</div></div>
-            <div class="kpi"><div class="label">Validated auto apply</div><div class="value small" id="pi-exec">SUPERVISED</div></div>
+            <div class="kpi"><div class="label">Brain authority</div><div class="value small" id="pi-exec">EVENT DRIVEN</div></div>
           </div>
           <div class="grid g2" style="margin-top:14px">
             <div class="kpi"><div class="label">Validated numeric changes</div><div class="value small" id="pi-real-changes">0</div></div>
@@ -3491,44 +3784,12 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
 
         
 
-        <div class="brain-section-label"><span>04</span><div><strong>Human Review & Application</strong><p>Manual approval workflow when Atlas is operating in supervised mode.</p></div></div>
-        <div class="card section">
-          <div class="section-head"><div><h3>Human review workflow</h3><p>The backend still validates exact fingerprint, epoch and review snapshot. The UI carries them automatically.</p></div></div>
-          <div id="review-workflow" class="workflow"></div>
-          <div class="actions" style="margin-top:14px">
-            <button id="btn-request-review" class="btn" onclick="requestReview()">Request review</button>
-            <button id="btn-approve" class="btn primary" onclick="approveCurrent()">Approve</button>
-            <button id="btn-reject" class="btn danger" onclick="rejectCurrent()">Reject</button>
-            <button id="btn-build-command" class="btn" onclick="buildSupervisedCommand()">Build command package</button>
-          </div>
-        </div>
-      
       </section>
 
       <section id="view-control" class="view">
         <div class="page-head"><div><h2>Settings</h2><p>Execution authority and advanced runtime controls. Most trading sessions should not require this page.</p></div><span class="badge warn">ADVANCED</span></div>
 
         <div class="grid g2">
-          <div class="card">
-            <div class="section-head"><div><h3>Supervised execution</h3><p>Same safety pipeline regardless of whether MT5 is connected to demo or live.</p></div><span id="exec-badge" class="badge">NO PACKAGE</span></div>
-            <div class="callout" style="margin-bottom:12px">
-              <div class="row">
-                <div><strong>Operator execution arm</strong><div class="muted" id="arm-detail">Disarmed</div></div>
-                <div class="actions">
-                  <span id="arm-badge" class="badge bad">DISARMED</span>
-                  <button id="btn-arm" class="btn" onclick="armExecution()">Arm 30 min</button>
-                  <button id="btn-disarm" class="btn danger" onclick="disarmExecution()">Disarm</button>
-                </div>
-              </div>
-            </div>
-            <div id="exec-summary" class="callout">Build an approved command package from the Atlas page first.</div>
-            <div id="exec-workflow" class="workflow" style="margin-top:12px"></div>
-            <div class="actions" style="margin-top:14px">
-              <button id="btn-preflight" class="btn" onclick="runPreflight()">Run preflight</button>
-              <button id="btn-execute" class="btn primary" onclick="executePackage()">Execute policy</button>
-              <button id="btn-ack" class="btn" onclick="refreshAck()">Refresh Nyao ACK</button>
-            </div>
-          </div>
           <div class="card">
             <div class="section-head"><div><h3>Current command</h3><p>Requested policy currently on the bridge.</p></div></div>
             <div class="grid g2">
@@ -3607,7 +3868,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
             <p>Atlas separates <strong>market interpretation</strong>, <strong>deterministic risk authority</strong>, <strong>Nyao execution</strong>, and <strong>Gemini policy learning</strong>. This guide explains the dashboard in that same order so a new operator can understand why a trade is or is not allowed without reading the source code.</p>
             <div class="help-flow"><span>Market evidence</span><b>→</b><span>Atlas risk & zone authority</span><b>→</b><span>Nyao execution gates</span><b>→</b><span>Position lifecycle</span><b>→</b><span>Performance evidence</span><b>→</b><span>Gemini policy learning</span></div>
             <div class="help-search-wrap"><input id="help-search" class="search" placeholder="Search: spread cap, zone invalidated, lifecycle P/L, consensus, MFE…" oninput="filterHelp(this.value)"><button class="btn" onclick="clearHelpSearch()">Clear</button></div>
-            <div class="help-version">Guide aligned to Atlas 1.30.58 · Nyao 44.6.3</div>
+            <div class="help-version">Guide aligned to Atlas 1.30.75 · Nyao 44.7.0</div>
           </div>
           <div class="card help-quick">
             <div class="label">Jump to a live workspace</div>
@@ -3667,7 +3928,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
               <div class="help-definition"><dt>BUY / SELL state</dt><dd>Human-readable result of the current gate chain. A low score should normally appear as watching rather than a deterministic block.</dd></div>
               <div class="help-definition"><dt>Global blocker</dt><dd>A market-wide veto affecting both directions, such as trading pause, account safety, committed zone ownership or another global execution condition.</dd></div>
               <div class="help-definition"><dt>New-bar gate</dt><dd>Whether entry is restricted to a new candle. When disabled, qualified intrabar entries may be evaluated.</dd></div>
-              <div class="help-definition"><dt>Cooldown</dt><dd>Temporary protection after configured loss sequences or other timing conditions. It prevents repeated immediate re-entry.</dd></div>
+              <div class="help-definition"><dt>Cooldown</dt><dd>Strategy-level timing guard for configured execution conditions. Loss streaks no longer create timed Atlas Brain vetoes; they trigger an immediate Brain review event instead.</dd></div>
               <div class="help-definition"><dt>Spread cost gate</dt><dd>Whether bid/ask cost itself is affordable for the planned scalp geometry. This is separate from Structure Feasibility; a structurally invalid stop can block entry even when spread cost passes.</dd></div>
               <div class="help-definition"><dt>Market bias</dt><dd>Atlas's current directional interpretation. It explains context; it is not execution authority by itself.</dd></div>
               <div class="help-definition"><dt>Volatility / volatility ratio</dt><dd>Current ATR conditions compared with recent average ATR. The ratio helps Atlas scale risk and judge whether current movement is unusual.</dd></div>
@@ -3788,8 +4049,8 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
               <div class="help-definition"><dt>Confidence</dt><dd>Gemini's reported confidence; deterministic minimum-confidence requirements can prevent advancement.</dd></div>
               <div class="help-definition"><dt>Critic</dt><dd>The review layer evaluating whether the proposal is sufficiently grounded/safe to proceed into the deterministic policy pipeline.</dd></div>
               <div class="help-definition"><dt>Minimum dwell</dt><dd>Minimum time a policy must remain active before another autonomous policy replacement can normally occur.</dd></div>
-              <div class="help-definition"><dt>Supervised mode</dt><dd>Gemini may propose and validate, but a human approval workflow is required before command application.</dd></div>
-              <div class="help-definition"><dt>Autonomous mode</dt><dd>Atlas may apply a validated proposal only after all configured confidence, consensus, dwell, safety and position-lock rules pass.</dd></div>
+              <div class="help-definition"><dt>Event-driven authority</dt><dd>Gemini is invoked by material Atlas events; validated policy changes pass critic, consensus, dwell and safety gates before autonomous application.</dd></div>
+              <div class="help-definition"><dt>Health heartbeat</dt><dd>A low-frequency fallback check for liveness and missed state transitions. It is not the primary optimization trigger.</dd></div>
               <div class="help-definition"><dt>Deferred locked change</dt><dd>A position-sensitive parameter suggested while exposure is open. Atlas records the suggestion but does not mutate that control for already-managed positions.</dd></div>
               <div class="help-definition"><dt>Scalping responsiveness</dt><dd>Evidence about opportunity latency, blocker pressure, hold duration and favorable-excursion capture. It measures quality/speed rather than encouraging more trades.</dd></div>
               <div class="help-definition"><dt>Parameter Intelligence</dt><dd>Ranks registered controls using parameter-specific evidence, observed runtime variation and outcome associations. Position-sensitive controls receive additional activation protection.</dd></div>
@@ -3803,7 +4064,6 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
           <summary><span>8 · Settings — operator authority and advanced controls</span><span class="badge warn">ADVANCED</span></summary>
           <div class="help-section-body">
             <dl>
-              <div class="help-definition"><dt>Supervised execution</dt><dd>Human-review pipeline for building and applying an approved policy command. Backend fingerprint/epoch/review checks remain authoritative.</dd></div>
               <div class="help-definition"><dt>Current command</dt><dd>The policy command package currently requested on the Atlas↔Nyao bridge.</dd></div>
               <div class="help-definition"><dt>Base lot</dt><dd>Runtime base lot control. When dynamic sizing/capital sizing is active, final Nyao volume can differ because broker-risk calculations remain authoritative.</dd></div>
               <div class="help-definition"><dt>Global enabled</dt><dd>Master Atlas/Nyao strategy switch for fresh execution. Position management can remain relevant even when fresh entries are disabled.</dd></div>
@@ -3876,7 +4136,7 @@ body{background:radial-gradient(circle at 80% -10%,rgba(45,105,170,.10),transpar
               <div class="help-definition"><dt>Spread outside limit</dt><dd>Current cost exceeds the adaptive strategy-specific spread cap. Zone and scalp limits can disagree because their geometry is different.</dd></div>
               <div class="help-definition"><dt>Capital veto / constrained</dt><dd>Atlas risk authority has no permitted capacity for new risk or has intentionally reduced it below a feasible opportunity size.</dd></div>
               <div class="help-definition"><dt>Duplicate distance</dt><dd>New same-direction exposure is too close to existing exposure under the active duplicate-distance policy.</dd></div>
-              <div class="help-definition"><dt>Cooldown</dt><dd>A temporary timing/loss-protection rule prevents immediate re-entry.</dd></div>
+              <div class="help-definition"><dt>Cooldown</dt><dd>A temporary strategy timing rule. Consecutive-loss handling is event-driven and reviewed by Atlas Brain rather than released by a countdown.</dd></div>
               <div class="help-definition"><dt>Broker infeasible</dt><dd>Minimum lot/volume step or calculated loss cannot fit within Atlas's approved monetary risk. Nyao OrderCalcProfit remains final authority.</dd></div>
               <div class="help-definition"><dt><code>ZONE_INVALIDATED_MANAGEMENT_ONLY</code></dt><dd>The campaign's source zone invalidated after exposure existed; no new zone layers may open, but existing positions remain managed.</dd></div>
             </dl>
@@ -3992,7 +4252,7 @@ function testNotificationSound(){playNotificationSound("IMPORTANT")}
 function pushAtlasNotification(severity,title,body,key){const now=Date.now(),ns=getNotifications();if(ns.some(n=>n.key===key&&now-new Date(n.at).getTime()<300000))return;const n={id:`${now}-${Math.random().toString(16).slice(2)}`,key,severity,title,body,at:new Date(now).toISOString(),read:false};if(notificationSettings.inApp)setNotifications([n,...ns]);playNotificationSound(severity);if(notificationSettings.browser&&("Notification" in window)&&Notification.permission==="granted"&&document.hidden){try{new Notification(`Atlas · ${title}`,{body,icon:"/assets/atlas-app-icon.png",tag:key})}catch{}}}
 function notificationSnapshot(){const s=state.status||{},z=state.zonePlan||{},lp=z?.capital_sizing?.loss_protection||{};return{connected:!!s.connected,open:Number(s.strategy_open_positions||s.open_positions||0),lastTicket:Number(s.last_order_ticket||0),lastSuccess:!!s.last_order_success,zoneState:String(s.zone_directive_state||z.execution_lane||""),zoneSide:String(s.zone_side||z.side||"NONE"),zoneSuspended:!!s.zone_scalp_suspended,capitalVeto:!!s.capital_veto_new_risk,lossState:String(lp.state||"INACTIVE"),policyEpoch:Number(s.policy_epoch||0),appliedCommand:Number(s.applied_command_version||0),recoveryChains:Number(s.active_hedge_chains||0)}}
 function evaluateNotifications(){const cur=notificationSnapshot(),prev=state.notificationBaseline;state.notificationBaseline=cur;if(!prev)return;if(prev.connected&&!cur.connected)pushAtlasNotification("CRITICAL","Nyao disconnected","Atlas lost the live Nyao bridge.","nyao-disconnected");if(!prev.connected&&cur.connected)pushAtlasNotification("INFO","Nyao connected","Live execution telemetry is available again.","nyao-connected");if(cur.lastSuccess&&cur.lastTicket&&cur.lastTicket!==prev.lastTicket)pushAtlasNotification("IMPORTANT","Trade opened",`${cur.zoneSide!=="NONE"?cur.zoneSide+" · ":""}Ticket ${cur.lastTicket} · ${state.selectedSymbol||"symbol"}.`,`trade-${cur.lastTicket}`);if(cur.open<prev.open)pushAtlasNotification("INFO","Position closed",`${prev.open-cur.open} strategy position${prev.open-cur.open===1?"":"s"} closed on ${state.selectedSymbol||"symbol"}.`,`close-${Date.now()}`);if(cur.zoneState!==prev.zoneState){if(cur.zoneState==="ZONE_AWARE_SCALP")pushAtlasNotification("INFO",`${cur.zoneSide} zone watching`,`Zone-aware scalping is active while the campaign waits for commit gates.`,`zone-watch-${cur.zoneSide}`);else if(cur.zoneState.includes("ZONE_CAMPAIGN"))pushAtlasNotification("IMPORTANT",`${cur.zoneSide} zone committed`,`Atlas granted the zone campaign execution priority.`,`zone-commit-${cur.zoneSide}`);else if(prev.zoneState&&cur.zoneState==="OUTSIDE_PRIORITY_ZONE")pushAtlasNotification("INFO","Priority zone released","Normal scalp authority restored outside the priority zone.","zone-released")}
-if(!prev.capitalVeto&&cur.capitalVeto)pushAtlasNotification("WARNING","New risk vetoed","Atlas capital authority is blocking fresh risk.","capital-veto");if(prev.lossState!==cur.lossState&&cur.lossState&&cur.lossState!=="INACTIVE")pushAtlasNotification(cur.lossState==="HARD_VETO"?"CRITICAL":"WARNING","Loss protection changed",`Protection state is now ${pretty(cur.lossState)}.`,`loss-${cur.lossState}`);if(cur.recoveryChains>prev.recoveryChains)pushAtlasNotification("WARNING","Recovery chain active",`${cur.recoveryChains} recovery chain${cur.recoveryChains===1?"":"s"} now active.`,`recovery-${cur.recoveryChains}`);if(cur.policyEpoch!==prev.policyEpoch&&cur.policyEpoch>0)pushAtlasNotification("INFO","Policy epoch changed",`Nyao is now reporting policy epoch ${cur.policyEpoch}.`,`epoch-${cur.policyEpoch}`)}
+if(!prev.capitalVeto&&cur.capitalVeto)pushAtlasNotification("WARNING","New risk paused","Atlas capital authority is temporarily blocking fresh risk.","capital-veto");if(prev.lossState!==cur.lossState&&cur.lossState&&cur.lossState!=="INACTIVE")pushAtlasNotification(cur.lossState==="BRAIN_REVIEW_PENDING"?"WARNING":"INFO","Loss review changed",`Brain review state is now ${pretty(cur.lossState)}.`,`loss-${cur.lossState}`);if(cur.recoveryChains>prev.recoveryChains)pushAtlasNotification("WARNING","Recovery chain active",`${cur.recoveryChains} recovery chain${cur.recoveryChains===1?"":"s"} now active.`,`recovery-${cur.recoveryChains}`);if(cur.policyEpoch!==prev.policyEpoch&&cur.policyEpoch>0)pushAtlasNotification("INFO","Policy epoch changed",`Nyao is now reporting policy epoch ${cur.policyEpoch}.`,`epoch-${cur.policyEpoch}`)}
 
 function scopedUrl(url){
   if(!state.selectedSymbol || !url.startsWith("/api/v1/") || url.startsWith("/api/v1/atlas/symbols"))return url;
@@ -4049,7 +4309,7 @@ function evaluateDecisionTimeline(){
   for(const side of ["buy","sell"]){const S=side.toUpperCase(),pe=prev[`${side}Eligible`],ce=cur[`${side}Eligible`],pr=prev[`${side}Reason`],cr=cur[`${side}Reason`];if(!pe&&ce)addDecisionEvent("READY",`${S} scalp became eligible`,`${S} score ${fmt(cur[`${side}Score`],2)} / ${fmt(cur[`${side}Threshold`],2)} and all current Nyao entry gates passed.`,"market",`${side}-eligible`);else if(pe&&!ce)addDecisionEvent("BLOCK",`${S} scalp eligibility lost`,pretty(cr||"BLOCKED"),"market",`${side}-blocked-${cr}`);else if(pr!==cr&&cr)addDecisionEvent("GATE",`${S} blocker changed`,`${pretty(pr||"NONE")} → ${pretty(cr)}`,"market",`${side}-reason-${cr}`)}
   if(!prev.capitalVeto&&cur.capitalVeto)addDecisionEvent("RISK","Fresh-risk capital veto activated","Atlas has temporarily closed new independent risk authority.","overview","capital-veto-on");
   if(prev.capitalVeto&&!cur.capitalVeto)addDecisionEvent("READY","Fresh-risk capital authority restored",`${money(cur.available)} operating capacity is currently available.`,"overview","capital-veto-off");
-  if(prev.lossState!==cur.lossState)addDecisionEvent(cur.lossState==="HARD_VETO"?"CRITICAL":"RISK",`Loss protection → ${pretty(cur.lossState)}`,`Previous state: ${pretty(prev.lossState)}.`,"overview",`loss-${cur.lossState}`);
+  if(prev.lossState!==cur.lossState)addDecisionEvent(cur.lossState==="BRAIN_REVIEW_PENDING"?"RISK":"READY",`Loss review → ${pretty(cur.lossState)}`,`Previous state: ${pretty(prev.lossState)}.`,"overview",`loss-${cur.lossState}`);
   if(cur.policyEpoch&&prev.policyEpoch&&cur.policyEpoch!==prev.policyEpoch)addDecisionEvent("POLICY",`Nyao policy epoch ${cur.policyEpoch} active`,`Atlas/Nyao moved from policy epoch ${prev.policyEpoch} to ${cur.policyEpoch}.`,"atlas",`epoch-${cur.policyEpoch}`);
   if(cur.lastSuccess&&cur.lastTicket&&cur.lastTicket!==prev.lastTicket)addDecisionEvent("TRADE","Order execution confirmed",`Ticket ${cur.lastTicket} opened on ${state.selectedSymbol||"the selected symbol"}.`,"positions",`trade-${cur.lastTicket}`);
   if(cur.open<prev.open)addDecisionEvent("TRADE","Position lifecycle changed",`${prev.open-cur.open} strategy position${prev.open-cur.open===1?"":"s"} closed; Atlas will reconcile the authoritative outcome ledger.`,"positions",`close-${Date.now()}`);
@@ -4099,7 +4359,8 @@ function scalpOpportunity(side){
 }
 function zoneOpportunity(){
   const s=state.status||{},zp=state.zonePlan||{},plan=zp.zone_plan||null,cap=zp.capital_sizing||{};if(!plan&&!s.zone_plan_id)return opportunityRow("ZONE CAMPAIGN","NO PRIORITY ZONE","WATCHING","Wait for Atlas to detect and qualify higher-timeframe structure.",`Current zone opportunity limit ${money(cap.approved_zone_risk_amount||0)}`,"analysis");
-  const side=String(plan?.side||s.zone_side||"ZONE"),confirm=Number(s.zone_confirmation_score??plan?.confirmation?.zone_confirmation?.combined_score??0),ct=Number(s.zone_confirmation_threshold??plan?.confirmation?.zone_confirmation?.threshold??0),dir=Number(s.zone_directional_score||0),dt=Number(s.zone_minimum_directional_score||0),spreadOk=s.zone_spread_within_limit!==false,stateName=String(s.zone_directive_state||zp.execution_lane||""),committed=stateName.includes("ZONE_CAMPAIGN")&&s.zone_scalp_suspended;
+  const ownership=zoneOwnershipState(s);
+  const side=String(plan?.side||s.zone_side||ownership.liveZonePositions[0]?.type||"ZONE"),confirm=Number(s.zone_confirmation_score??plan?.confirmation?.zone_confirmation?.combined_score??0),ct=Number(s.zone_confirmation_threshold??plan?.confirmation?.zone_confirmation?.threshold??0),dir=Number(s.zone_directional_score||0),dt=Number(s.zone_minimum_directional_score||0),spreadOk=s.zone_spread_within_limit!==false,stateName=String(s.zone_directive_state||zp.execution_lane||""),committed=ownership.owns;
   let status=committed?"ACTIVE":"WATCHING",needs=[];if(ct>0&&confirm<ct)needs.push(`confirmation ${fmt(confirm,1)} → ${fmt(ct,1)}`);if(dt>0&&dir<dt)needs.push(`directional ${fmt(dir,2)} → ${fmt(dt,2)}`);if(!spreadOk)needs.push(`spread must return inside adaptive cap`);if(s.capital_veto_new_risk)needs.push("capital authority");if(!needs.length&&!committed){status="READY";needs.push("Atlas/Nyao commit boundary")}
   return opportunityRow(`${side} ZONE CAMPAIGN`,ct>0?`${fmt(confirm,1)} / ${fmt(ct,1)}`:pretty(stateName||"DETECTED"),status,committed?"Campaign has committed execution priority.":needs.join(" · "),`Directional ${fmt(dir,2)} / ${fmt(dt,2)} · ${spreadOk?"cost PASS":"cost BLOCK"} · limit ${money(cap.approved_zone_risk_amount||0)}`,"analysis")
 }
@@ -4200,6 +4461,24 @@ function currentRisk(){
   const i=state.intelligence||{};
   return p.risk?.state||p.review_summary?.risk_state||i.risk_governor?.state||i.risk?.state||"—";
 }
+function zoneOwnershipState(s){
+  const positions=Array.isArray(s.positions)?s.positions:[];
+  const liveZonePositions=positions.filter(p=>{
+    const origin=String(p?.order_origin||"").toUpperCase();
+    const gate=String(p?.entry_gate_mode||"").toUpperCase();
+    return origin==="ATLAS_ZONE"||gate==="ATLAS_ZONE"||Boolean(p?.zone_plan_id);
+  });
+  const blockers=[s.buy_block_reason,s.sell_block_reason].map(x=>String(x||"").toUpperCase());
+  const directive=String(s.zone_directive_state||"").toUpperCase();
+  const scalpSuspended=Boolean(s.zone_scalp_suspended);
+  const owns=Boolean(
+    liveZonePositions.length ||
+    scalpSuspended ||
+    blockers.includes("ATLAS_ZONE_MODE") ||
+    directive.includes("ZONE_CAMPAIGN")
+  );
+  return {owns,liveZonePositions,scalpSuspended,directive};
+}
 function renderOverview(){
   const s=state.status||{}, c=state.command||{}, p=state.proposal||{};
   const zp=state.zonePlan||{}, activePlan=zp.zone_plan||null, capital=zp.capital_sizing||{};
@@ -4216,7 +4495,10 @@ function renderOverview(){
       ["ZONE_AWARE_SCALP","ZONE_CAPITAL_INFEASIBLE"].includes(String(s.zone_directive_state||"").toUpperCase())
     )
   );
-  const zoneMode=Boolean(s.zone_mode_active&&!zoneAware), side=text(activePlan?.side||s.zone_side,"ZONE");
+  const zoneOwnership=zoneOwnershipState(s);
+  const zoneMode=Boolean(zoneOwnership.owns&&!zoneAware);
+  const liveZoneSide=zoneOwnership.liveZonePositions[0]?.type;
+  const side=text(activePlan?.side||s.zone_side||liveZoneSide,"ZONE");
   const executionLane=zoneAware?"ZONE-AWARE SCALP":zoneMode?"ZONE CAMPAIGN":"NORMAL SCALP";
   const liveCount=Number(s.strategy_open_positions??s.open_positions??0), stagedCount=Number(s.working_limit_orders||0);
   const permissionsOk=s.terminal_algo_trading_allowed!==false&&s.ea_trading_allowed!==false&&s.account_trade_allowed!==false&&s.account_expert_trading_allowed!==false;
@@ -4369,11 +4651,14 @@ function renderOverview(){
   const scalpPct=Number(capital.approved_scalp_risk_pct||0), zonePct=Number(capital.approved_zone_risk_pct||0);
   const lossProtection=capital.loss_protection||{};
   const protectionState=text(lossProtection.state,"INACTIVE");
-  if(!capitalSyncing&&protectionState==="HARD_VETO"){
-    const remaining=countdownAge(lossProtection.remaining_seconds||0);
-    capitalBadge.textContent=`LOSS VETO · ${remaining}`;
-    capitalBadge.className="badge bad";
-    document.getElementById("capital-risk-copy").textContent=`${text(lossProtection.consecutive_losses,0)} consecutive losses · stage ${text(lossProtection.escalation_level,1)} of 3 · ${text(lossProtection.timeout_minutes,15)}m protection · recovery probe in ${remaining}. Historical losses do not escalate stages; only failed recovery probes do. Qualified Gemini consensus may bypass policy dwell, but not consensus/confidence/safety gates.`;
+  if(!capitalSyncing&&protectionState==="BRAIN_REVIEW_PENDING"){
+    capitalBadge.textContent="BRAIN REVIEW · PENDING";
+    capitalBadge.className="badge warn";
+    document.getElementById("capital-risk-copy").textContent=`${text(lossProtection.consecutive_losses,0)} consecutive completed losses triggered an immediate Gemini review. Fresh risk is paused only while the review is in flight; there is no 15/30/60-minute timeout and no automatic reduced-lot probation trade. HOLD or a validated policy update releases normal opportunity sizing.`;
+  }else if(!capitalSyncing&&protectionState==="REVIEW_COMPLETE"){
+    capitalBadge.textContent="BRAIN REVIEW · COMPLETE";
+    capitalBadge.className="badge ok";
+    document.getElementById("capital-risk-copy").textContent=`Loss-streak review completed at ${text(lossProtection.brain_reviewed_streak,lossProtection.consecutive_losses||0)} losses. Trading may continue under normal deterministic drawdown, exposure, broker and market-risk gates.`;
   }else if(!capitalSyncing&&protectionState==="RECOVERY_PROBE"){
     const release=lossProtection.policy_release||{};
     const adapted=lossProtection.release_reason==="MATERIAL_POLICY_RUNTIME_CONFIRMED";
@@ -4396,11 +4681,11 @@ function renderOverview(){
   document.getElementById("capital-scalp-budget").textContent=capitalSyncing?"SYNCING":capitalExplicitVeto?"0.000% · VETOED":scalpAmount>0?`${money(scalpAmount)} · ${fmt(scalpPct,3)}%`:`${fmt(scalpPct,3)}%`;
   document.getElementById("capital-zone-budget").textContent=capitalSyncing?"SYNCING":capitalExplicitVeto?"0.000% · VETOED":zoneAmount>0?`${money(zoneAmount)} · ${fmt(zonePct,3)}%`:`${fmt(zonePct,3)}%`;
 
-  const auto=cycle.execution_mode==="AUTONOMOUS";
+  const auto=true;
   const brainBadge=document.getElementById("brain-mode-badge");
-  brainBadge.textContent=auto?"AUTONOMOUS NYAO POLICY":"SUPERVISED";
-  brainBadge.className="badge "+(auto?"ok":"info");
-  const brainLifecycle=text(auto?(cycle.last_auto_apply_status||p.lifecycle?.state||p.review_state):(p.lifecycle?.state||p.review_state||cycle.last_auto_apply_status),"NO CHANGE");
+  brainBadge.textContent="EVENT-DRIVEN AUTONOMOUS";
+  brainBadge.className="badge ok";
+  const brainLifecycle=text(cycle.last_auto_apply_status||p.lifecycle?.state||p.review_state,"NO CHANGE");
   const brainStateLabel=brainLifecycle==="MINIMUM_DWELL_ACTIVE"?"STABILITY HOLD":brainLifecycle==="CONSENSUS_NOT_READY"?"BUILDING CONSENSUS":brainLifecycle==="DEFERRED_ACTIVE_ZONE_PLAN"?"ACTIVATION DEFERRED":brainLifecycle==="APPLIED"?"POLICY ACTIVE":pretty(brainLifecycle);
   document.getElementById("brain-policy-state").textContent=brainStateLabel;
   document.getElementById("brain-policy-copy").textContent=zoneMode
@@ -4443,7 +4728,7 @@ function renderOverview(){
   document.getElementById("overview-decision-list").innerHTML=[
     permissionsOk?"MT5 execution permissions are available":"MT5 execution permissions need attention",
     zoneMode?`${liveCount} live and ${stagedCount} staged zone entries`:capitalSyncing?"Scalp capital state is syncing":`Scalp capital gate ${capitalExplicitVeto?"is closed":"is available"}`,
-    cycle.enabled?`Atlas Brain reviews every ${text(cycle.interval_minutes)} minutes`:"Scheduled Brain reviews are disabled"
+    cycle.enabled?`Atlas Brain is event-driven · ${text(cycle.interval_minutes)}m health heartbeat enabled`:"Atlas Brain is event-driven · health heartbeat disabled"
   ].map(item=>`<div class="decision-item">${esc(item)}</div>`).join("");
   renderProposalChanges("overview-changes",p.changed_controls);
   const pb=document.getElementById("proposal-badge");pb.textContent=p.lifecycle?.state||p.review_state||"NO PROPOSAL";pb.className="badge "+badgeClass(pb.textContent);
@@ -4539,6 +4824,16 @@ function renderLiveAnalysis(){
     };
     const raw=String(reason||"NONE").toUpperCase();
     if(reasonMap[raw])return reasonMap[raw];
+    if(code===10016){
+      const retry=Number(s.preflight_retry_count||0);
+      const slDist=Number(s.preflight_sl_distance_points||0);
+      const minDist=Number(s.preflight_min_distance_points||0);
+      const safety=Number(s.preflight_retry_safety_points||0);
+      const detail=retry?` · retry ${retry} · SL ${fmt(slDist,0)} pts / min ${fmt(minDist,0)} pts · safety +${fmt(safety,0)} pts`:"";
+      const detached=s.preflight_detached_stops_fallback_attempted?` · detached-stop test ${s.preflight_detached_stops_fallback_accepted?"PASS":"FAIL"}`:"";
+      const protection=s.preflight_protection_state&&s.preflight_protection_state!=="NOT_REQUIRED"?` · ${pretty(s.preflight_protection_state)}`:"";
+      return `Invalid stops (MT5 10016)${detail}${detached}${protection}`;
+    }
     return descriptions[code]?`${descriptions[code]} (MT5 ${code})`:`${pretty(text(reason,"NONE"))}${code?` (MT5 ${code})`:""}`;
   };
   [["buy",Boolean(s.buy_entry_eligible),s.buy_block_reason],["sell",Boolean(s.sell_entry_eligible),s.sell_block_reason]].forEach(([side,ready,reason])=>{
@@ -4558,9 +4853,11 @@ function renderLiveAnalysis(){
   else if(s.account_trade_allowed===false||s.account_expert_trading_allowed===false)block="ACCOUNT_ALGO_TRADING_DISABLED";
   else if(capitalHardVeto)block="ATLAS_CAPITAL_RISK_VETO";
   const clear=block==="NONE"||block==="CLEAR";
+  const executionIssue=[s.buy_block_reason,s.sell_block_reason].some(r=>/ORDER_(SEND_ERROR|REJECTED|PREFLIGHT_REJECTED)|LOCAL_STOP_PREFLIGHT|FINAL_FRESH_QUOTE_PREFLIGHT|POST_FILL_PROTECTION/.test(String(r||""))) || /FAILED|EMERGENCY_CLOSE/.test(String(s.preflight_protection_state||""));
   const g=document.getElementById("signal-global-status");
-  g.textContent=capitalHardVeto?"CAPITAL PROTECTION ACTIVE":recoveryProbe?"RECOVERY PROBE ARMED":clear?"ENTRY SYSTEM CLEAR":"ENTRY SYSTEM BLOCKED";
-  g.className="badge "+(capitalHardVeto?"bad":recoveryProbe?"warn":clear?"ok":"bad");
+  const brainReview=String(capital.loss_protection?.state||"").toUpperCase()==="BRAIN_REVIEW_PENDING";
+  g.textContent=brainReview?"BRAIN REVIEW IN FLIGHT":capitalHardVeto?"CAPITAL RISK GATE ACTIVE":recoveryProbe?"LEGACY RECOVERY PROBE ARMED":executionIssue?"BROKER EXECUTION BLOCKED":clear?"ENTRY SYSTEM CLEAR":"ENTRY SYSTEM BLOCKED";
+  g.className="badge "+(brainReview?"warn":capitalHardVeto?"bad":recoveryProbe?"warn":executionIssue?"bad":clear?"ok":"bad");
   document.getElementById("signal-global-block").textContent=pretty(block);
   document.getElementById("signal-newbar").textContent=s.new_bar_entry_only?(s.new_bar_ready?"READY":"WAITING"):"INTRABAR";
   document.getElementById("signal-cooldown").textContent=s.cooldown_active?"ACTIVE":"INACTIVE";
@@ -4732,7 +5029,9 @@ function renderAnalysis(){
       ["ZONE_AWARE_SCALP","ZONE_CAPITAL_INFEASIBLE"].includes(String(s.zone_directive_state||"").toUpperCase())
     )
   );
-  const zoneModeLive=Boolean(s.zone_mode_active&&!analysisZoneAware);
+  const analysisZoneOwnership=zoneOwnershipState(s);
+  const zoneModeLive=Boolean(analysisZoneOwnership.owns&&!analysisZoneAware);
+  const zoneNewEntryAuthority=Boolean(s.zone_mode_active&&!analysisZoneAware);
   const candleState=text(candles.state,"WAITING_FOR_NYAO_EXPORT");
   const zoneBadge=document.getElementById("an-zone-status");
   zoneBadge.textContent=zonesDetected?"ZONE MAP DETECTED":candleReady?"CANDLES VALIDATED":pretty(candleState);
@@ -4771,7 +5070,7 @@ function renderAnalysis(){
   const zoneSpread=activePlan.confirmation?.spread_assessment||{};
   const sourceInvalidated=Boolean(zonePlan.source_zone_invalidated||zonePlan.campaign_lock?.source_zone_invalidated);
   const zoneLifecycleLabel=sourceInvalidated?"INVALIDATED · MANAGEMENT ONLY":(zonePlan.zone_aware_scalping_active?"ZONE-AWARE SCALP":"ZONE CAMPAIGN");
-  zoneExecution.innerHTML=`<div class="zone-plan ${sourceInvalidated?"invalidated":""}"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE · ${esc(text(activePlan.plan_id))}</div><div class="zone-price" style="margin-top:5px">${esc(activePlan.side)} ${esc(zoneLifecycleLabel)} · ${sourceInvalidated?"source thesis failed; new campaign layers disabled while existing exposure remains managed":zonePlan.zone_aware_scalping_active?"zone context retained; ordinary scalp engine released":"ordinary scalping suspended"}</div><div class="muted" style="margin-top:5px">${esc(quoteLabel)} ${fmt(zonePlan.live_price,3)} is inside ${esc(activePlan.source_zone?.timeframe||"")} ${esc(pretty(activePlan.source_zone?.kind||"ZONE"))}. MT5 bid ${fmt(zonePlan.live_bid,3)} · ask ${fmt(zonePlan.live_ask,3)} · closed M30 reference ${fmt(zonePlan.closed_m30_reference,3)}. Zone spread ${fmt(zoneSpread.spread_price,3)} / adaptive cap ${fmt(zoneSpread.effective_cap_price,3)}${zoneSpread.limiting_factor?` · ${esc(pretty(zoneSpread.limiting_factor))} limited`:""}; scalp cost gate is separate. ${zoneExecutorInstalled?`Nyao executor: ${esc(pretty(s.zone_last_execution_reason||"READY"))}.`:"Install the newly compiled Nyao build to enforce this directive."}</div></div><span class="badge ${sourceInvalidated?"bad":zoneModeLive?"ok":"warn"}">${esc(sourceInvalidated?"ZONE INVALIDATED":zoneModeLive?"LIVE IN NYAO":pretty(zonePlan.state))}</span></div><div class="zone-plan-grid">${entries.map((entry,index)=>`<div class="zone-plan-leg"><div class="label">ENTRY ${entry.leg} · ${fmt(entry.risk_allocation_pct,0)}% · ${esc(pretty(entry.order_type))}</div><strong>${entry.order_type==="MARKET_ON_CONFIRMATION"?`LIVE (ref ${fmt(entry.entry_price,3)})`:fmt(entry.entry_price,3)}</strong><div class="muted">${targets[index]?`TP${targets[index].target} ${fmt(targets[index].price,3)} · close ${fmt(targets[index].close_allocation_pct,0)}%`:"Target pending"}</div></div>`).join("")}</div><div class="grid g4" style="margin-top:9px"><div class="kpi"><div class="label">Shared stop</div><div class="value small neg">${fmt(activePlan.stop_loss,3)}</div></div><div class="kpi"><div class="label">Total account risk</div><div class="value small">${fmt(activePlan.risk?.account_risk_pct,2)}%</div></div><div class="kpi"><div class="label">Zone confirmation</div><div class="value small ${zc.eligible?"pos":""}">${fmt(zc.combined_score,1)} / ${fmt(zc.threshold,1)}</div><div class="muted">Directional ${fmt(zc.directional_score,2)} / ${fmt(zc.minimum_directional_score,2)} · policy ${text(zc.policy_epoch)}</div></div><div class="kpi"><div class="label">Execution authority</div><div class="value small ${zoneModeLive?"pos":"neg"}">${zoneModeLive?"ACTIVE":"NOT ACTIVE"}</div></div></div>${(zonePlan.blockers||[]).length?`<div class="callout" style="margin-top:9px">${esc(zonePlan.blockers.join(" "))}</div>`:""}</div>`;
+  zoneExecution.innerHTML=`<div class="zone-plan ${sourceInvalidated?"invalidated":""}"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE · ${esc(text(activePlan.plan_id))}</div><div class="zone-price" style="margin-top:5px">${esc(activePlan.side)} ${esc(zoneLifecycleLabel)} · ${sourceInvalidated?"source thesis failed; new campaign layers disabled while existing exposure remains managed":zonePlan.zone_aware_scalping_active?"zone context retained; ordinary scalp engine released":"ordinary scalping suspended"}</div><div class="muted" style="margin-top:5px">${esc(quoteLabel)} ${fmt(zonePlan.live_price,3)} is inside ${esc(activePlan.source_zone?.timeframe||"")} ${esc(pretty(activePlan.source_zone?.kind||"ZONE"))}. MT5 bid ${fmt(zonePlan.live_bid,3)} · ask ${fmt(zonePlan.live_ask,3)} · closed M30 reference ${fmt(zonePlan.closed_m30_reference,3)}. Zone spread ${fmt(zoneSpread.spread_price,3)} / adaptive cap ${fmt(zoneSpread.effective_cap_price,3)}${zoneSpread.limiting_factor?` · ${esc(pretty(zoneSpread.limiting_factor))} limited`:""}; scalp cost gate is separate. ${zoneExecutorInstalled?`Nyao executor: ${esc(pretty(s.zone_last_execution_reason||"READY"))}.`:"Install the newly compiled Nyao build to enforce this directive."}</div></div><span class="badge ${sourceInvalidated?"bad":zoneModeLive?"ok":"warn"}">${esc(sourceInvalidated?"ZONE INVALIDATED":zoneModeLive?"LIVE IN NYAO":pretty(zonePlan.state))}</span></div><div class="zone-plan-grid">${entries.map((entry,index)=>`<div class="zone-plan-leg"><div class="label">ENTRY ${entry.leg} · ${fmt(entry.risk_allocation_pct,0)}% · ${esc(pretty(entry.order_type))}</div><strong>${entry.order_type==="MARKET_ON_CONFIRMATION"?`LIVE (ref ${fmt(entry.entry_price,3)})`:fmt(entry.entry_price,3)}</strong><div class="muted">${targets[index]?`TP${targets[index].target} ${fmt(targets[index].price,3)} · close ${fmt(targets[index].close_allocation_pct,0)}%`:"Target pending"}</div></div>`).join("")}</div><div class="grid g5" style="margin-top:9px"><div class="kpi"><div class="label">Shared stop</div><div class="value small neg">${fmt(activePlan.stop_loss,3)}</div></div><div class="kpi"><div class="label">Total account risk</div><div class="value small">${fmt(activePlan.risk?.account_risk_pct,2)}%</div></div><div class="kpi"><div class="label">Zone confirmation</div><div class="value small ${zc.eligible?"pos":""}">${fmt(zc.combined_score,1)} / ${fmt(zc.threshold,1)}</div><div class="muted">Directional ${fmt(zc.directional_score,2)} / ${fmt(zc.minimum_directional_score,2)} · policy ${text(zc.policy_epoch)}</div></div><div class="kpi"><div class="label">Campaign ownership</div><div class="value small ${zoneModeLive?"pos":"neg"}">${zoneModeLive?"ACTIVE":"NOT ACTIVE"}</div><div class="muted">${zoneModeLive?"Ordinary scalping suspended":"No live zone campaign owns the symbol"}</div></div><div class="kpi"><div class="label">New entry authority</div><div class="value small ${zoneNewEntryAuthority?"pos":"warn"}">${zoneNewEntryAuthority?"ACTIVE":"WAITING"}</div><div class="muted">${zoneNewEntryAuthority?"Nyao may add the next approved zone leg":"Existing exposure remains managed; no additional zone entry is authorized"}</div></div></div>${(zonePlan.blockers||[]).length?`<div class="callout" style="margin-top:9px">${esc(zonePlan.blockers.join(" "))}</div>`:""}</div>`;
   }else{
     const sizingNote=capital.version?` Atlas capital budget: ${fmt(capital.approved_scalp_risk_pct,3)}% equity per qualified scalp (${esc(pretty(capital.decision))}); current-account loss streak ${text(capital.consecutive_losses,0)}.`:"";
     zoneExecution.innerHTML=`<div class="zone-plan"><div class="zone-plan-head"><div><div class="label">ATLAS MODE DIRECTIVE</div><div class="zone-price" style="margin-top:5px">${esc(pretty(zonePlan.mode||"WAITING"))}</div><div class="muted" style="margin-top:5px">${zonePlan.mode==="SCALP_MODE"?"Live price is outside the priority zones, so the ordinary scalp strategy remains the proposed mode.":esc((zonePlan.blockers||[])[0]||"Waiting for the live zone execution plan.")}${sizingNote}</div></div><span class="badge ${capital.veto_new_risk?"bad":zonePlan.mode==="SCALP_MODE"?"info":"warn"}">${esc(capital.veto_new_risk?"CAPITAL VETO":pretty(zonePlan.state||"PENDING"))}</span></div></div>`;
@@ -5077,37 +5376,30 @@ function renderPerformance(){
 function renderLlmCycle(){
   const c=state.llmCycle||{};
   const models=state.llmStatus?.model_chain||[];
-  const status=c.running?"RUNNING":c.enabled?"SCHEDULED":"DISABLED";
+  const status=c.running?"REASONING":c.enabled?"EVENT DRIVEN":"EVENT DRIVEN";
   const badge=document.getElementById("cycle-badge");if(!badge)return;
-  badge.textContent=status;badge.className="badge "+(c.running?"info":c.enabled?"ok":"warn");
+  badge.textContent=status;badge.className="badge "+(c.running?"info":"ok");
   document.getElementById("cycle-last").textContent=c.last_completed_at?new Date(c.last_completed_at).toLocaleString():"Never";
   const seconds=Number(c.seconds_until_next_run);
-  document.getElementById("cycle-next").textContent=c.running?"Running now":c.enabled&&Number.isFinite(seconds)?age(seconds):"Not scheduled";
+  document.getElementById("cycle-next").textContent=c.running?"Reasoning now":c.enabled&&Number.isFinite(seconds)?age(seconds):"Disabled";
   document.getElementById("cycle-count").textContent=text(c.run_count,0);
   document.getElementById("cycle-critic").textContent=text(c.last_critic_verdict);
   const interval=document.getElementById("cycle-interval");
   if(interval && document.activeElement!==interval)interval.value=text(c.interval_minutes,240);
   const enabled=document.getElementById("cycle-enabled");
   if(enabled && document.activeElement!==enabled)enabled.checked=Boolean(c.enabled);
-  const mode=document.getElementById("cycle-mode");if(mode&&document.activeElement!==mode)mode.value=text(c.execution_mode,"SUPERVISED");
   const dwell=document.getElementById("cycle-dwell");if(dwell&&document.activeElement!==dwell)dwell.value=text(c.minimum_dwell_minutes,240);
   const confidence=document.getElementById("cycle-confidence");if(confidence&&document.activeElement!==confidence)confidence.value=text(c.minimum_confidence,70);
   document.getElementById("btn-run-cycle").disabled=Boolean(c.running);
-  const autoWait=Number(c.seconds_until_auto_apply_eligible||0);
   const consensus=state.autoConsensus||{};
-  const consensusText=c.execution_mode==="AUTONOMOUS"
-    ? ` Consensus window: ${text(consensus.observation_count,0)} current observations (${text(consensus.lifetime_observation_count??consensus.observation_count,0)} lifetime) · ${text(consensus.consensus_control_count,0)} controls currently meet ≥${fmt(Number(consensus.minimum_support_ratio||0.6)*100,0)}% support${consensus.ready?" · READY":""}.`
-    : "";
+  const consensusText=` Consensus: ${text(consensus.observation_count,0)} current observations · ${text(consensus.consensus_control_count,0)} controls supported${consensus.ready?" · READY":""}.`;
+  const trigger=pretty(c.last_trigger||"NO EVENT YET");
   const detail=c.running
-    ? `Gemini is analyzing ${text(state.selectedSymbol)}. This may take a few minutes.`
+    ? `Gemini is reasoning about ${text(state.selectedSymbol)} from ${trigger}.`
     : c.last_error
       ? `${pretty(c.last_status)}: ${c.last_error}`
-      : c.execution_mode==="AUTONOMOUS"&&c.last_auto_apply_status==="MINIMUM_DWELL_ACTIVE"
-        ? `AUTO APPLY DEFERRED · current policy minimum dwell${autoWait>0?` · eligible in ${age(autoWait)}`:" complete"}. Gemini observations continue accumulating during the hold.`
-        : c.execution_mode==="AUTONOMOUS"&&c.last_auto_apply_status==="CONSENSUS_NOT_READY"
-          ? `AUTO APPLY DEFERRED · dwell is complete, but the accumulated Gemini observations have not reached policy consensus yet.`
-          : `${pretty(c.last_status||"NEVER_RUN")} · ${c.execution_mode==="AUTONOMOUS"?`validated Nyao scalp-policy autonomous activation; last apply ${pretty(c.last_auto_apply_status||"NEVER_APPLIED")}`:"human approval and application required"}.`;
-  document.getElementById("cycle-detail").textContent=`${detail}${consensusText}${models.length?` Configured model chain: ${models.join(" → ")}.`:""}`;
+      : `Last trigger: ${trigger} · ${pretty(c.last_status||"NEVER_RUN")} · validated event-driven policy authority.`;
+  document.getElementById("cycle-detail").textContent=`${detail}${consensusText}${models.length?` Model chain: ${models.join(" → ")}.`:""}`;
 }
 
 function renderAutonomousConsensus(){
@@ -5322,6 +5614,67 @@ function renderAtlas(){
     }).join(""):`<div class="consensus-empty">No control mutations are currently accumulating consensus. The active runtime policy remains unchanged.</div>`;
   }
 
+  const brainEvents=state.brainEvents||{};
+  const bootstrap=brainEvents.bootstrap||{};
+  const bb=document.getElementById("bootstrap-badge");
+  if(bb){bb.textContent=pretty(bootstrap.state||"UNKNOWN");bb.className="badge "+(bootstrap.qualified?"ok":bootstrap.pending?"warn":"info");}
+  const bs=document.getElementById("bootstrap-state");if(bs)bs.textContent=pretty(bootstrap.state||"—");
+  const bbud=document.getElementById("bootstrap-budget");if(bbud)bbud.textContent=text(bootstrap.bootstrap_change_budget,12);
+  const ba=document.getElementById("bootstrap-authority");if(ba)ba.textContent=pretty(bootstrap.seed_configuration_authority||"UNQUALIFIED SEED");
+  const bc=document.getElementById("bootstrap-copy");if(bc)bc.textContent=bootstrap.qualified
+    ?"The starting Nyao runtime has been explicitly qualified by Gemini + Critic. Future changes use the normal event-driven incremental budget."
+    :bootstrap.state==="WAITING_FOR_ACCOUNT_IDENTITY"
+      ?"Atlas is waiting for Nyao to publish the MT5 account identity before it can decide whether this account needs first-run qualification. Fresh risk remains fail-closed."
+    :bootstrap.state==="WAITING_FOR_LIVE_MARKET"
+      ?"Atlas will not calibrate the initial baseline from stale closed-market quotes. Qualification arms when a fresh tradable market snapshot is available. Existing established accounts continue trading; brand-new accounts remain paused until qualification completes."
+      :"Initial policy qualification is pending. Nyao defaults are treated as seed values, not presumed-correct strategy truth.";
+  const pendingEvents=(brainEvents.event_bus?.pending_events||[]);
+  const eqb=document.getElementById("event-queue-badge");if(eqb){eqb.textContent=`${pendingEvents.length} PENDING`;eqb.className="badge "+(pendingEvents.some(e=>e.priority==="P0")?"bad":pendingEvents.length?"warn":"ok");}
+  const eq=document.getElementById("event-queue");if(eq)eq.innerHTML=pendingEvents.length?pendingEvents.slice(0,8).map(e=>`<div class="change"><div><strong>${esc(pretty(e.event))}</strong><div class="muted">${esc(pretty(e.priority))} · ${esc((e.created_at||"").replace("T"," ").slice(0,19))}</div></div><span>${esc(pretty(e.payload?.from||e.payload?.failure_type||e.payload?.unit?.result_class||"MATERIAL"))}</span><span>→ BRAIN</span></div>`).join(""):`<div class="callout">No pending material events. Atlas is observing without spending Gemini cycles.</div>`;
+
+  // Operator-first Atlas Brain summary. This is presentation only; no authority or policy semantics change here.
+  const cycle=state.llmCycle||{};
+  const heroRuntime=document.getElementById("brain-hero-runtime");if(heroRuntime){heroRuntime.textContent=pretty(reconciliation);heroRuntime.className=String(reconciliation).includes("CONFIRMED")?"pos":String(reconciliation).includes("MISMATCH")?"neg":"";}
+  const heroQual=document.getElementById("brain-hero-qualification");if(heroQual){heroQual.textContent=pretty(bootstrap.state||"—");heroQual.className=bootstrap.qualified?"pos":bootstrap.pending?"":"";}
+  const heroQualSub=document.getElementById("brain-hero-qualification-sub");if(heroQualSub)heroQualSub.textContent=bootstrap.qualified?"Account qualified":bootstrap.pending?"Qualification in progress":"Account not qualified";
+  const globalBlock=String(state.status?.last_global_block_reason||"NONE");
+  const tradingAllowed=Boolean(bootstrap.qualified)&&!Boolean(bootstrap.fresh_trading_pause_required)&&["","NONE","NO_BLOCK"].includes(globalBlock.toUpperCase());
+  const heroTrading=document.getElementById("brain-hero-trading");if(heroTrading){heroTrading.textContent=tradingAllowed?"ALLOWED":"BLOCKED";heroTrading.className=tradingAllowed?"pos":"neg";}
+  const heroQueue=document.getElementById("brain-hero-queue");if(heroQueue){heroQueue.textContent=String(pendingEvents.length);heroQueue.className=pendingEvents.some(e=>e.priority==="P0")?"neg":pendingEvents.length?"":"pos";}
+  const heroQueueSub=document.getElementById("brain-hero-queue-sub");if(heroQueueSub)heroQueueSub.textContent=pendingEvents.length?`${pendingEvents.length} material event${pendingEvents.length===1?"":"s"} waiting`:"Queue clear";
+  const latestRuns=Array.isArray(cycle.run_history)?[...cycle.run_history].reverse():[];
+  const latestRun=latestRuns[0]||null;
+  const heroTrigger=document.getElementById("brain-hero-trigger");if(heroTrigger)heroTrigger.textContent=pretty(latestRun?.trigger||cycle.last_trigger||"—");
+  const heroTriggerTime=document.getElementById("brain-hero-trigger-time");if(heroTriggerTime)heroTriggerTime.textContent=latestRun?.completed_at?latestRun.completed_at.replace("T"," ").slice(0,19):"No Brain run yet";
+  const nowTitle=document.getElementById("brain-now-title");
+  const nowCopy=document.getElementById("brain-now-copy");
+  if(nowTitle&&nowCopy){
+    if(!bootstrap.qualified){nowTitle.textContent="Atlas is not ready for fresh risk.";nowCopy.textContent=`Baseline state is ${pretty(bootstrap.state||"UNKNOWN")}. Fresh risk remains under bootstrap authority until qualification completes.`;}
+    else if(String(reconciliation).includes("MISMATCH")||!String(reconciliation).includes("CONFIRMED")){nowTitle.textContent="Runtime reconciliation needs attention.";nowCopy.textContent=`Policy and runtime are not fully aligned (${pretty(reconciliation)}). Atlas keeps deterministic execution authority in control.`;}
+    else if(pendingEvents.some(e=>e.priority==="P0")){nowTitle.textContent="A critical Brain event is waiting.";nowCopy.textContent="Atlas is operational, but a P0 material event requires Brain processing. Review the event queue before treating the system as quiet.";}
+    else if(!tradingAllowed){nowTitle.textContent="Atlas Brain is healthy, but fresh trading is currently blocked.";nowCopy.textContent=globalBlock&&globalBlock!=="NONE"?`Current execution blocker: ${pretty(globalBlock)}.`:"A deterministic safety gate is preventing fresh risk.";}
+    else{nowTitle.textContent="Atlas Brain is operational and aligned.";nowCopy.textContent="Runtime is confirmed, the account is qualified, fresh trading is allowed, and no critical Brain event is waiting.";}
+  }
+  const activity=document.getElementById("brain-recent-activity");
+  if(activity){
+    const runItems=latestRuns.slice(0,5).map((run,i)=>({kind:"run",time:run.completed_at||run.started_at,title:pretty(run.trigger||"BRAIN RUN"),detail:Object.keys(run.changes||{}).length?`${Object.keys(run.changes||{}).length} control recommendation${Object.keys(run.changes||{}).length===1?"":"s"} · ${fmt(run.overall_confidence||0,0)}% confidence`:`No material runtime change · ${fmt(run.overall_confidence||0,0)}% confidence`,badge:pretty(run.outcome||run.status||"OBSERVED"),cls:String(run.outcome||run.status)==="APPLIED"?"ok":String(run.outcome||run.status)==="FAILED"?"bad":"info",runIndex:i}));
+    const eventItems=pendingEvents.slice(0,3).map(e=>({kind:"event",time:e.created_at,title:pretty(e.event||"MATERIAL EVENT"),detail:`${pretty(e.priority||"P2")} · waiting for Brain`,badge:"PENDING",cls:e.priority==="P0"?"bad":"warn"}));
+    const items=[...eventItems,...runItems].sort((a,b)=>String(b.time||"").localeCompare(String(a.time||""))).slice(0,6);
+    activity.innerHTML=items.length?items.map(item=>`<div class="brain-activity-item" ${item.kind==="run"?`onclick="openGeminiRunInspector(${item.runIndex})" style="cursor:pointer"`:""}><span class="brain-activity-dot"></span><span class="brain-activity-time">${esc((item.time||"").replace("T"," ").slice(11,19)||"—")}</span><div class="brain-activity-main"><strong>${esc(item.title)}</strong><p>${esc(item.detail)}</p></div><span class="badge ${item.cls}">${esc(item.badge)}</span></div>`).join(""):`<div class="callout">No Brain activity has been recorded yet.</div>`;
+  }
+
+  const lifecycleRows=Array.isArray(state.status?.recent_lifecycle_events)?state.status.recent_lifecycle_events:[];
+  const lifecycleVersion=String(state.status?.lifecycle_contract_version||"");
+  const lifecycleFailures=lifecycleRows.filter(e=>["FAILED","REJECTED"].includes(String(e?.result||"").toUpperCase()));
+  const lcb=document.getElementById("lifecycle-contract-badge");if(lcb){lcb.textContent=lifecycleVersion?"AUTHORITATIVE":"LEGACY / WAITING";lcb.className="badge "+(lifecycleVersion?"ok":"warn");}
+  const lcv=document.getElementById("lifecycle-contract-version");if(lcv)lcv.textContent=lifecycleVersion||"—";
+  const lci=document.getElementById("lifecycle-contract-instance");if(lci){const ep=Number(state.status?.lifecycle_contract_started_at_epoch||0);lci.textContent=ep?new Date(ep*1000).toLocaleString():"—";}
+  const lce=document.getElementById("lifecycle-contract-events");if(lce)lce.textContent=String(lifecycleRows.length);
+  const lcf=document.getElementById("lifecycle-contract-failures");if(lcf)lcf.textContent=String(lifecycleFailures.length);
+  const lcc=document.getElementById("lifecycle-contract-copy");if(lcc)lcc.textContent=lifecycleVersion
+    ?(lifecycleFailures.length?`${lifecycleFailures.length} explicit NYAO execution/management failure event${lifecycleFailures.length===1?"":"s"} are present in the recent contract window. Affected risk units are excluded from strategy learning.`:"Lifecycle telemetry is authoritative and the recent event window contains no explicit implementation failures.")
+    :"This EA has not published the P3.57 lifecycle contract yet. Atlas will keep legacy outcomes UNKNOWN rather than assume they were clean.";
+
   const windowRoot=document.getElementById("policy-window-history");
   if(windowRoot){
     const windows=Array.isArray(consensus.recent_windows)?consensus.recent_windows:[];
@@ -5336,7 +5689,6 @@ function renderAtlas(){
 
   const obsRoot=document.getElementById("policy-observation-list");const observations=state.policyObservations?.observations||[];if(obsRoot)obsRoot.innerHTML=observations.length?observations.map((o,i)=>{const ch=Object.entries(o.changes||{});return `<div class="observation-row" onclick="openObservationInspector(${i})"><div class="row"><div><strong>${esc(text(o.proposal_id,"Accepted Gemini observation"))}</strong><div class="muted">Baseline epoch ${esc(text(o.baseline_policy_epoch))} · ${esc((o.observed_at||"").replace("T"," ").slice(0,19))}</div></div><span class="badge info">${fmt(o.overall_confidence||0,0)}%</span></div><div class="observation-changes">${ch.length?ch.slice(0,5).map(([n,r])=>`<span class="observation-chip">${esc(pretty(n))}: ${esc(text(r.current))} → ${esc(text(r.proposed))}</span>`).join(""):`<span class="muted">Hold observation · no runtime mutation</span>`}</div></div>`}).join(""):`<div class="callout">No accepted Gemini observations have been recorded yet.</div>`;
 
-  const approval=state.review?.approval||p.approval||{};const status=approval.status||"NOT_REQUESTED";const applied=["APPLIED","AWAITING_NYAO_ACK"].includes(String(lifecycle));const autonomous=state.llmCycle?.execution_mode==="AUTONOMOUS";const steps=[["Proposal",p.proposal_id?"READY":"WAITING"],["Review",status==="NOT_REQUESTED"?"WAITING":"DONE"],["Approval",status],["Command package",applied?lifecycle:state.supervised?"READY":"WAITING"]];document.getElementById("review-workflow").innerHTML=steps.map((x,i)=>`<div class="step ${["DONE","APPROVED","READY"].some(v=>String(x[1]).includes(v))?"done":""}"><div class="step-num">${i+1}</div><div><strong>${x[0]}</strong></div><span class="badge ${badgeClass(x[1])}">${esc(x[1])}</span></div>`).join("");document.getElementById("btn-request-review").disabled=autonomous||applied||!p.proposal_id||p.review_state!=="READY_FOR_HUMAN_REVIEW"||status!=="NOT_REQUESTED";document.getElementById("btn-approve").disabled=autonomous||applied||status!=="PENDING_APPROVAL";document.getElementById("btn-reject").disabled=autonomous||applied||status!=="PENDING_APPROVAL";document.getElementById("btn-build-command").disabled=autonomous||applied||status!=="APPROVED";
 }
 
 function renderParameterIntelligence(){
@@ -5383,53 +5735,62 @@ function renderParameterIntelligence(){
   }).join("")||`<div class="callout">No candidates yet.</div>`;
 }
 function renderControl(){
+  // Settings is a live operator view. Keep the current command and risk
+  // appetite populated even though the legacy supervised arm/execution
+  // widgets were removed from the P3.54+ event-driven UI.
   const c=state.command||{}, arm=state.arm||{};
+  const setText=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value};
+  setText("c-version",text(c.command_version));
+  setText("c-epoch",text(c.policy_epoch));
+  setText("c-lot",text(c.base_lot_size));
+  setText("c-enabled",c.enabled===false?"NO":c.enabled===true?"YES":"—");
+
+  // Risk appetite belongs to the current Settings page and must always render.
+  renderRiskAppetite();
+
+  // Legacy supervised execution controls are optional. Older dashboard builds
+  // may still include them, but their absence must never short-circuit the
+  // Settings renderer above.
   const ab=document.getElementById("arm-badge");
+  if(!ab)return;
   ab.textContent=arm.armed?"ARMED":"DISARMED";
   ab.className="badge "+(arm.armed?"ok":"bad");
-  document.getElementById("arm-detail").textContent=arm.armed
+  const armDetail=document.getElementById("arm-detail");
+  if(armDetail)armDetail.textContent=arm.armed
     ? `Armed by ${text(arm.armed_by)} · ${Math.ceil(Number(arm.remaining_seconds||0)/60)} min remaining`
     : "Execution is fail-closed until explicitly armed.";
-  document.getElementById("btn-arm").disabled=Boolean(arm.armed);
-  document.getElementById("btn-disarm").disabled=!arm.armed;
-  document.getElementById("c-version").textContent=text(c.command_version);
-  document.getElementById("c-epoch").textContent=text(c.policy_epoch);
-  document.getElementById("c-lot").textContent=text(c.base_lot_size);
-  document.getElementById("c-enabled").textContent=c.enabled===false?"NO":"YES";
+  const btnArm=document.getElementById("btn-arm");if(btnArm)btnArm.disabled=Boolean(arm.armed);
+  const btnDisarm=document.getElementById("btn-disarm");if(btnDisarm)btnDisarm.disabled=!arm.armed;
+
   const pkg=state.supervised?.supervised_command_proposal||state.supervised;
   const packageEvents=(state.executionEvents?.events||[]).filter(e=>e.supervised_command_id===pkg?.supervised_command_id);
   const completedEvent=packageEvents.find(e=>["EXECUTED","EXECUTED_RECOVERED"].includes(e.action));
   const ackEvent=packageEvents.find(e=>String(e.action||"").startsWith("NYAO_ACK_"));
   const packageLifecycle=ackEvent?.action==="NYAO_ACK_CONFIRMED"?"APPLIED":completedEvent?"AWAITING_NYAO_ACK":pkg?.state;
   const eb=document.getElementById("exec-badge");
-  if(pkg?.supervised_command_id){eb.textContent=text(packageLifecycle);eb.className="badge "+badgeClass(packageLifecycle);
-    document.getElementById("exec-summary").innerHTML=packageLifecycle==="APPLIED"
-      ? `<strong>Policy applied and confirmed by Nyao</strong><br>Command ${esc(text(pkg.command_preview?.hypothetical_command_version))} / policy epoch ${esc(text(pkg.command_preview?.target_policy_epoch))} · package ${esc(pkg.supervised_command_id)}.`
-      : `<strong>Command package ${esc(pkg.supervised_command_id)}</strong><br>Baseline ${esc(text(pkg.current_context?.baseline_command_version))} / epoch ${esc(text(pkg.current_context?.baseline_policy_epoch))} → command ${esc(text(pkg.command_preview?.hypothetical_command_version))} / epoch ${esc(text(pkg.command_preview?.target_policy_epoch))}.`;
-  } else {eb.textContent="NO PACKAGE";eb.className="badge";document.getElementById("exec-summary").textContent="Build an approved command package from the Atlas page first."}
+  if(eb){
+    const summary=document.getElementById("exec-summary");
+    if(pkg?.supervised_command_id){
+      eb.textContent=text(packageLifecycle);eb.className="badge "+badgeClass(packageLifecycle);
+      if(summary)summary.innerHTML=packageLifecycle==="APPLIED"
+        ? `<strong>Policy applied and confirmed by Nyao</strong><br>Command ${esc(text(pkg.command_preview?.hypothetical_command_version))} / policy epoch ${esc(text(pkg.command_preview?.target_policy_epoch))} · package ${esc(pkg.supervised_command_id)}.`
+        : `<strong>Command package ${esc(pkg.supervised_command_id)}</strong><br>Baseline ${esc(text(pkg.current_context?.baseline_command_version))} / epoch ${esc(text(pkg.current_context?.baseline_policy_epoch))} → command ${esc(text(pkg.command_preview?.hypothetical_command_version))} / epoch ${esc(text(pkg.command_preview?.target_policy_epoch))}.`;
+    }else{
+      eb.textContent="NO PACKAGE";eb.className="badge";if(summary)summary.textContent="Build an approved command package from the Atlas page first.";
+    }
+  }
   const ex=state.execution, ack=state.ack;
   const executionState=ex?.status||(completedEvent?completedEvent.action:"WAITING");
-  const ackMatchesExecution=Boolean(
-    ack && completedEvent && ack.execution_id===completedEvent.execution_id
-  );
-  const ackState=ackMatchesExecution
-    ? ack.state
-    : ackEvent
-      ? String(ackEvent.action).replace("NYAO_ACK_","")
-      : "WAITING";
-  const steps=[
-    ["Package",pkg?"READY":"WAITING"],
-    ["Preflight",(state.preflight?.ready_for_supervised_execution??state.preflight?.ready_for_explicit_demo_execution)?"PASS":"WAITING"],
-    ["Execution",executionState],
-    ["Nyao ACK",ackState]
-  ];
-  document.getElementById("exec-workflow").innerHTML=steps.map((x,i)=>`<div class="step ${badgeClass(x[1])==="ok"?"done":""}"><div class="step-num">${i+1}</div><div><strong>${x[0]}</strong></div><span class="badge ${badgeClass(x[1])}">${esc(text(x[1]))}</span></div>`).join("");
-  document.getElementById("btn-preflight").disabled=!pkg||Boolean(completedEvent);
-  document.getElementById("btn-execute").disabled=!pkg||Boolean(completedEvent);
-  document.getElementById("btn-ack").disabled=!completedEvent||ackState==="CONFIRMED";
-  document.getElementById("btn-execute").textContent=completedEvent?"Policy applied":"Execute policy";
-  document.getElementById("btn-ack").textContent=ackState==="CONFIRMED"?"Nyao confirmed":"Refresh Nyao ACK";
-  renderRiskAppetite();
+  const ackMatchesExecution=Boolean(ack && completedEvent && ack.execution_id===completedEvent.execution_id);
+  const ackState=ackMatchesExecution?ack.state:ackEvent?String(ackEvent.action).replace("NYAO_ACK_",""):"WAITING";
+  const workflow=document.getElementById("exec-workflow");
+  if(workflow){
+    const steps=[["Package",pkg?"READY":"WAITING"],["Preflight",(state.preflight?.ready_for_supervised_execution??state.preflight?.ready_for_explicit_demo_execution)?"PASS":"WAITING"],["Execution",executionState],["Nyao ACK",ackState]];
+    workflow.innerHTML=steps.map((x,i)=>`<div class="step ${badgeClass(x[1])==="ok"?"done":""}"><div class="step-num">${i+1}</div><div><strong>${x[0]}</strong></div><span class="badge ${badgeClass(x[1])}">${esc(text(x[1]))}</span></div>`).join("");
+  }
+  const btnPreflight=document.getElementById("btn-preflight");if(btnPreflight)btnPreflight.disabled=!pkg||Boolean(completedEvent);
+  const btnExecute=document.getElementById("btn-execute");if(btnExecute){btnExecute.disabled=!pkg||Boolean(completedEvent);btnExecute.textContent=completedEvent?"Policy applied":"Execute policy"}
+  const btnAck=document.getElementById("btn-ack");if(btnAck){btnAck.disabled=!completedEvent||ackState==="CONFIRMED";btnAck.textContent=ackState==="CONFIRMED"?"Nyao confirmed":"Refresh Nyao ACK"}
 }
 function renderRiskAppetite(){
   const ra=state.riskAppetite||{};
@@ -5572,12 +5933,12 @@ async function loadZonePlan(){
 async function saveLlmCycleSchedule(){
   const interval=Number(document.getElementById("cycle-interval").value||240);
   const enabled=document.getElementById("cycle-enabled").checked;
-  const execution_mode=document.getElementById("cycle-mode").value||"SUPERVISED";
+  const execution_mode="AUTONOMOUS";
   const minimum_dwell_minutes=Number(document.getElementById("cycle-dwell").value||interval);
   const minimum_confidence=Number(document.getElementById("cycle-confidence").value||70);
   try{
     state.llmCycle=await api("/api/v1/atlas/llm/cycle-schedule",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled,interval_minutes:interval,execution_mode,minimum_dwell_minutes,minimum_confidence})});
-    renderAll();toast(enabled?`Gemini ${execution_mode.toLowerCase()} cycle scheduled every ${interval} minutes.`:"Gemini schedule disabled.");
+    renderAll();toast(enabled?`Event-driven Brain saved · ${interval}m health heartbeat enabled.`:"Event-driven Brain saved · health heartbeat disabled.");
   }catch(e){toast(e.message,true)}
 }
 async function runLlmCycleNow(){
@@ -5696,7 +6057,7 @@ function renderAccountPerformance(){
 }
 async function resetConsensusWindow(){if(!confirm("Start a fresh Gemini consensus learning window? This does not change the active policy or close positions."))return;try{const r=await api("/api/v1/atlas/autonomous-policy-consensus/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({actor:"human_operator",reason:"Operator reset from Atlas dashboard"})});state.autoConsensus=r.consensus||r;await loadLlmCycle();renderAll();toast("Learning window reset. Active policy unchanged.")}catch(e){toast(e.message,true)}}
 
-function renderAll(){updateChrome();renderOverview();renderOpportunityQueue();renderDecisionTimeline();renderLiveAnalysis();renderAnalysis();renderPositions();renderLlmCycle();renderAutonomousConsensus();renderResponsiveness();renderAtlas();renderParameterIntelligence();renderAccountPerformance();renderControl();renderHistory();if(!document.getElementById("runtime-controls").children.length)renderControls()}
+function renderAll(){updateChrome();renderOverview();renderOpportunityQueue();renderDecisionTimeline();renderLiveAnalysis();renderAnalysis();renderPositions();renderLlmCycle();renderAutonomousConsensus();renderResponsiveness();renderAtlas();renderParameterIntelligence();renderControl();renderAccountPerformance();renderHistory();const runtimeControls=document.getElementById("runtime-controls");if(runtimeControls&&!runtimeControls.children.length)renderControls()}
 
 async function loadCore(){
   const before=`${state.command?.command_version??""}:${state.command?.policy_epoch??""}:${state.status?.applied_command_version??""}:${state.status?.policy_epoch??""}`;
@@ -5726,7 +6087,8 @@ async function loadHistory(){
     api("/api/v1/atlas/risk-units"),
     api("/api/v1/atlas/recovery-attribution"),
     api("/api/v1/atlas/recovery-risk"),
-    api("/api/v1/atlas/account-performance")
+    api("/api/v1/atlas/account-performance"),
+    api("/api/v1/atlas/brain-events")
   ]);
   if(rs[0].status==="fulfilled")state.executionEvents=rs[0].value;
   if(rs[1].status==="fulfilled")state.audit=rs[1].value;
@@ -5738,6 +6100,7 @@ async function loadHistory(){
   if(rs[7].status==="fulfilled")state.recoveryAttribution=rs[7].value;
   if(rs[8].status==="fulfilled")state.recoveryRisk=rs[8].value;
   if(rs[9].status==="fulfilled")state.accountPerf=rs[9].value;
+  if(rs[10].status==="fulfilled")state.brainEvents=rs[10].value;
 }
 async function boot(){
   // Restore operator notification preferences before the first live render.
@@ -5772,7 +6135,7 @@ async function boot(){
   setInterval(async()=>{await loadParameterIntelligence();renderAll()},10000);
   setInterval(async()=>{await loadSymbols();await loadProposal();renderAll()},10000);
   setInterval(async()=>{await loadHistory();renderAll();evaluateDecisionTimeline()},15000);
-  setInterval(()=>{if(state.zonePlan?.capital_sizing?.loss_protection?.state==="HARD_VETO"){const lp=state.zonePlan.capital_sizing.loss_protection;const loaded=Number(state.zonePlanLoadedAt||Date.now());lp.remaining_seconds=Math.max(0,Number(lp.remaining_seconds||0)-(Date.now()-loaded)/1000);state.zonePlanLoadedAt=Date.now();renderOverview();}},1000);
+
 }
 boot();
 </script>
